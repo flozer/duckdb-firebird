@@ -4,16 +4,16 @@
 #include "firebird_scanner.hpp"
 
 #include "duckdb.hpp"
-#include "duckdb/main/extension_util.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 
 namespace duckdb {
 
-static void LoadInternal(DatabaseInstance &db) {
-    ExtensionUtil::RegisterFunction(db, GetFirebirdScanFunction());
+static void LoadInternal(ExtensionLoader &loader) {
+    loader.RegisterFunction(GetFirebirdScanFunction());
 }
 
-void FirebirdExtension::Load(DuckDB &db) {
-    LoadInternal(*db.instance);
+void FirebirdExtension::Load(ExtensionLoader &loader) {
+    LoadInternal(loader);
 }
 
 std::string FirebirdExtension::Name() {
@@ -31,12 +31,11 @@ std::string FirebirdExtension::Version() const {
 } // namespace duckdb
 
 // --- C entry points -----------------------------------------------------------
-// DuckDB's loader calls these to instantiate the extension. Mirrors the
-// pattern used by postgres_scanner / sqlite_scanner.
+// DuckDB ≥ 1.4 calls the *_duckdb_cpp_init symbol declared by this macro.
 extern "C" {
 
-DUCKDB_EXTENSION_API void firebird_init(duckdb::DatabaseInstance &db) {
-    duckdb::LoadInternal(db);
+DUCKDB_CPP_EXTENSION_ENTRY(firebird, loader) {
+    duckdb::LoadInternal(loader);
 }
 
 DUCKDB_EXTENSION_API const char *firebird_version() {

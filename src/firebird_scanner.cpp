@@ -22,9 +22,10 @@ struct FirebirdBindData : public TableFunctionData {
     std::string table_name;
 
     // Full table schema (used to translate projection / filter pushdown back
-    // to the canonical column ordering).
-    std::vector<std::string> column_names;
-    std::vector<LogicalType> column_types;
+    // to the canonical column ordering). duckdb::vector (subclass of
+    // std::vector) so we can assign directly into the bind-callback outputs.
+    duckdb::vector<std::string> column_names;
+    duckdb::vector<LogicalType> column_types;
 };
 
 // ---------------------------------------------------------------------------
@@ -54,8 +55,8 @@ struct FirebirdLocalState : public LocalTableFunctionState {
 
 static void LoadTableSchema(FirebirdConnection &conn,
                             const std::string &table_name,
-                            std::vector<std::string> &out_names,
-                            std::vector<LogicalType> &out_types) {
+                            duckdb::vector<std::string> &out_names,
+                            duckdb::vector<LogicalType> &out_types) {
     // Firebird stores identifiers upper-cased unless quoted at creation; we
     // upper-case here so callers can pass either form.
     std::string upper = table_name;

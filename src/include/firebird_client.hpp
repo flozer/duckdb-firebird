@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "duckdb.hpp"
 #include "ibase.h"
 
 namespace duckdb {
