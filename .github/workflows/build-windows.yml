@@ -1,0 +1,140 @@
+name: Build Windows x64
+
+# Builds the firebird.duckdb_extension for Windows x86_64 against
+# DuckDB v1.4.4 and the Firebird 4 client SDK. Triggered on every push
+# to the development branch, and manually via the Actions tab.
+
+on:
+  push:
+    branches:
+      - "claude/duckdb-firebird-plugin-*"
+      - main
+  workflow_dispatch:
+    inputs:
+      firebird_sdk_url:
+        description: "Override URL for the Firebird Windows ZIP"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  DUCKDB_VERSION: v1.4.4
+  # Default Firebird Windows release. Override via workflow_dispatch input
+  # if you need to test against a different client library version.
+  FIREBIRD_SDK_URL: https://github.com/FirebirdSQL/firebird/releases/download/v4.0.5/Firebird-4.0.5.3140-0-x64.zip
+
+jobs:
+  build:
+    name: windows-x64
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Ninja
+        shell: pwsh
+        run: choco install ninja -y --no-progress
+
+      - name: Cache Firebird SDK
+        id: cache-fb-sdk
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\firebird-sdk
+          key: firebird-sdk-${{ env.FIREBIRD_SDK_URL }}
+
+      - name: Download + extract Firebird Windows SDK
+        if: steps.cache-fb-sdk.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $url = if ('${{ inputs.firebird_sdk_url }}' -ne '') {
+            '${{ inputs.firebird_sdk_url }}'
+          } else {
+            $env:FIREBIRD_SDK_URL
+          }
+          Write-Host "Downloading $url"
+          $zip = Join-Path $env:RUNNER_TEMP 'firebird-sdk.zip'
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $dest = Join-Path $env:RUNNER_TEMP 'firebird-sdk'
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          New-Item -ItemType Directory -Path $dest | Out-Null
+          # Firebird Windows ZIPs contain both a top-level install.exe and a
+          # nested ZIP/EXE structure. The headers and import library we need
+          # live at the top level under include/ and lib/.
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          Write-Host "Contents:"
+          Get-ChildItem -Recurse -Depth 2 $dest |
+            Where-Object { -not $_.PSIsContainer } |
+            Select-Object FullName | Format-Table -AutoSize | Out-String -Width 4096
+
+      - name: Locate fbclient_ms.lib + ibase.h
+        id: fb-sdk
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'firebird-sdk'
+          $header = Get-ChildItem -Recurse -Filter 'ibase.h' $root | Select-Object -First 1
+          $lib    = Get-ChildItem -Recurse -Filter 'fbclient_ms.lib' $root | Select-Object -First 1
+          if (-not $header) { throw "ibase.h not found under $root" }
+          if (-not $lib)    { throw "fbclient_ms.lib not found under $root" }
+          # FB_SDK_ROOT points at the parent containing include/ and lib/.
+          $sdkRoot = Split-Path -Parent (Split-Path -Parent $header.FullName)
+          Write-Host "FB_SDK_ROOT = $sdkRoot"
+          Write-Host "  include  = $($header.FullName)"
+          Write-Host "  lib      = $($lib.FullName)"
+          echo "FB_SDK_ROOT=$sdkRoot" >> $env:GITHUB_ENV
+
+      - name: Pin DuckDB version
+        shell: bash
+        run: |
+          DUCKDB_GIT_VERSION=${DUCKDB_VERSION} make set_duckdb_version
+
+      - name: Build (release)
+        shell: bash
+        env:
+          GEN: ninja
+          # The Makefile passes EXT_FLAGS through to CMake; this is how we
+          # hand FB_SDK_ROOT to extension_config.cmake.
+          EXT_FLAGS: -DFB_SDK_ROOT=${{ env.FB_SDK_ROOT }}
+        run: |
+          # Convert Windows-style FB_SDK_ROOT (C:\...) to a forward-slash
+          # form CMake parses reliably.
+          export FB_SDK_ROOT_FWD=$(echo "$FB_SDK_ROOT" | sed 's|\\|/|g')
+          EXT_FLAGS="-DFB_SDK_ROOT=$FB_SDK_ROOT_FWD" make release
+
+      - name: Inspect output
+        shell: bash
+        run: |
+          echo "--- build artifacts ---"
+          find build/release -name 'firebird.duckdb_extension' -o -name '*firebird*.dll' 2>/dev/null
+          ls -la build/release/extension/firebird/ || true
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          src=$(find build/release -name 'firebird.duckdb_extension' | head -n 1)
+          if [ -z "$src" ]; then
+            echo "No firebird.duckdb_extension produced — failing"
+            exit 1
+          fi
+          cp "$src" dist/firebird.duckdb_extension
+          ls -la dist/
+
+      - name: Upload extension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firebird.duckdb_extension-windows-x64
+          path: dist/firebird.duckdb_extension
+          retention-days: 30
+          if-no-files-found: error
