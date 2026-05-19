@@ -1,0 +1,67 @@
+# name: test/sql/firebird_scan.test
+# description: smoke tests for the firebird_scan table function
+# group: [firebird]
+#
+# These tests require a running Firebird server with a test DB. They are
+# skipped by default; flip `mode skip` to `mode standard` once you have a
+# fixture set up, and adjust the connection string + table name below.
+
+require firebird
+
+mode skip
+
+# --- 1. Plain scan ----------------------------------------------------------
+statement ok
+SELECT * FROM firebird_scan(
+    'firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/test.fdb?charset=UTF8',
+    'EMPLOYEE'
+) LIMIT 1;
+
+# --- 2. Projection pushdown -------------------------------------------------
+query II
+SELECT EMP_NO, FIRST_NAME
+  FROM firebird_scan(
+    'firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/test.fdb',
+    'EMPLOYEE')
+ ORDER BY EMP_NO
+ LIMIT 2;
+----
+2	Robert
+4	Bruce
+
+# --- 3. Filter pushdown -----------------------------------------------------
+query I
+SELECT COUNT(*)
+  FROM firebird_scan(
+    'firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/test.fdb',
+    'EMPLOYEE')
+ WHERE DEPT_NO = '600';
+----
+4
+
+# --- 4. Federated join with a Parquet file ---------------------------------
+statement ok
+CREATE TEMP TABLE local_pq AS
+    SELECT * FROM firebird_scan(
+        'firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/test.fdb',
+        'DEPARTMENT');
+
+query I
+SELECT COUNT(*)
+  FROM firebird_scan(
+        'firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/test.fdb',
+        'EMPLOYEE') e
+  JOIN local_pq d USING (DEPT_NO);
+----
+42
+
+# --- 5. Named parameter override --------------------------------------------
+statement ok
+SELECT 1
+  FROM firebird_scan(
+        '/var/lib/firebird/test.fdb',
+        'EMPLOYEE',
+        user='SYSDBA',
+        password='masterkey',
+        charset='UTF8')
+ LIMIT 1;
