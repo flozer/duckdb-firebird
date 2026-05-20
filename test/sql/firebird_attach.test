@@ -126,3 +126,30 @@ DETACH fb;
 statement error
 SELECT * FROM fb.main.EMPLOYEE LIMIT 1;
 ----
+
+# --- Re-attach: the pool tears down cleanly and re-opens fine -------------
+# Guards against leaking idle connections / stale catalog state when the
+# user attaches a Firebird database, detaches, then attaches it again
+# inside the same DuckDB session.
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird);
+
+query I
+SELECT COUNT(*) FROM fb.main.EMPLOYEE;
+----
+5
+
+statement ok
+DETACH fb;
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird);
+
+query II
+SELECT EMP_ID, EMP_NAME FROM fb.main.EMPLOYEE WHERE EMP_ID = 1;
+----
+1	Alice Andersson
+
+statement ok
+DETACH fb;

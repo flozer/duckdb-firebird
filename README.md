@@ -188,6 +188,9 @@ ls build/release/extension/firebird/firebird.duckdb_extension
 | `firebird_tables(conn)` — list user tables + PK info    | ✅ |
 | `firebird_attach_sql(conn[, schema])` — DDL for view-based attach | ✅ |
 | **`ATTACH 'firebird://…' AS fb (TYPE firebird)`** — native catalog | ✅ |
+| Connection pool + lazy metadata cache (per ATTACH)        | ✅ |
+| Firebird 4 types: HUGEINT (`INT128`), `TIMESTAMP_TZ`, `TIME_TZ`, DECIMAL(38) | ✅ |
+| `row_limit=N` named parameter (Firebird-side `ROWS N`)    | ✅ |
 | Named parameter overrides (user / password / charset / role / dialect / **partitions**) | ✅ |
 | Projection pushdown                                     | ✅ |
 | Filter pushdown — `=`, `<>`, `<`, `>`, `<=`, `>=`, `AND`, `OR`, `IS NULL`, `BETWEEN`, **`IN(…)`**, optional-filter unwrap | ✅ |
@@ -214,6 +217,22 @@ docs/architecture.md            Design notes + deferred-work plan
 CMakeLists.txt + Makefile       Standard DuckDB extension build
 vcpkg.json                      libfbclient dependency
 ```
+
+## Publishing to the community catalog
+
+`community-extensions/description.yml` carries the submission metadata.
+To make the extension installable as
+
+```sql
+INSTALL firebird FROM community;
+LOAD firebird;
+```
+
+fork [`duckdb/community-extensions`](https://github.com/duckdb/community-extensions),
+copy `community-extensions/description.yml` into
+`extensions/firebird/description.yml`, set `repo.ref` to the tag /
+commit to publish, and open a PR. The community repo's CI builds and
+signs the artefacts for every supported platform from that ref.
 
 ## License
 

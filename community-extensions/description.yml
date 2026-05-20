@@ -1,0 +1,39 @@
+# Submission file for https://github.com/duckdb/community-extensions
+#
+# To publish this extension via `INSTALL firebird FROM community;
+# LOAD firebird;`, copy this file to
+#   community-extensions/extensions/firebird/description.yml
+# in a fork of duckdb/community-extensions and open a pull request.
+# The community-extensions CI will build + sign the extension for every
+# supported platform from this repo's main branch.
+
+extension:
+  name: firebird
+  description: |
+    Federated read-only access to Firebird databases from DuckDB.
+    Adds:
+      - firebird_scan(connection_string, table_name [, ...named params])
+      - firebird_tables(connection_string) — table-name + PK discovery
+      - firebird_attach_sql(connection_string [, schema]) — emits the
+        DDL for a view-based attach
+      - ATTACH 'firebird://…' AS fb (TYPE firebird) — native catalog
+        with `SELECT * FROM fb.main.TABLE` support
+    Projection + filter pushdown (=, <>, <, >, <=, >=, IS NULL,
+    BETWEEN, IN, AND/OR), PK-range parallel scan (opt-in), connection
+    pool + metadata cache.
+  version: 0.3.0
+  language: C++
+  build: cmake
+  license: MIT
+  maintainers:
+    - flozer
+  # Platforms where libfbclient is reachable via the build's vcpkg
+  # manifest / FB_SDK_ROOT. WASM is excluded — libfbclient depends on
+  # native sockets / threads / file IO.
+  excluded_platforms: "wasm_mvp;wasm_threads;wasm_eh"
+
+repo:
+  github: flozer/duckdb-firebird
+  # Update to the tag or commit SHA you want to publish. The community
+  # CI will check out exactly this ref.
+  ref: main

@@ -263,8 +263,8 @@ the views inherit every pushdown the scanner supports.
 | LIMIT pushdown into Firebird SQL           | The query builder accepts a limit; needs wiring through DuckDB's TableFunction limit pushdown hook. Modest win — DuckDB already stops calling the scan early once the limit is hit. |
 | LIKE / regex pushdown                      | Not a `TableFilter` type — sits in `EXPRESSION_FILTER`. Selective patterns (`LIKE 'prefix%'`) would benefit; broader patterns wouldn't. |
 | HUGEINT / DECIMAL(38) / TIMESTAMP_TZ types | Currently degrade to DOUBLE / VARCHAR. |
-| Stable C extension ABI                     | The extension uses the C++ ABI (`ExtensionLoader`), matching `postgres_scanner`. Migrating to `duckdb/duckdb_extension.h` lets one binary work across DuckDB versions. v0.3 effort. |
-| Community-extension signing / catalog      | Once the feature set stabilises, ship via DuckDB's community catalog (one-line `INSTALL firebird; LOAD firebird;` instead of `LOAD '/path/.duckdb_extension'`). |
+| Stable C extension ABI                     | The Stable C ABI (`duckdb_extension.h`) does **not** support StorageExtensions — only scalar / aggregate / table / replacement functions. Migrating to it today would mean losing native `ATTACH ... AS fb (TYPE firebird)`. Tracked upstream; once the C ABI gains storage-extension support, we revisit. |
+| Community-extension signing / catalog      | `community-extensions/description.yml` is in the repo; submitting it to `duckdb/community-extensions` enables `INSTALL firebird FROM community; LOAD firebird;`. Multi-platform binaries are produced by that repo's CI on every release tag. |
 
 ## References
 
