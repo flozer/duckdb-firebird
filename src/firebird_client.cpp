@@ -151,6 +151,31 @@ static void DpbAppend(std::vector<char> &dpb, char tag, const std::string &val) 
     dpb.insert(dpb.end(), val.begin(), val.end());
 }
 
+// --- FirebirdConnectionPool --------------------------------------------------
+
+std::unique_ptr<FirebirdConnection> FirebirdConnectionPool::Acquire() {
+    {
+        std::lock_guard<std::mutex> g(lock_);
+        if (!idle_.empty()) {
+            auto conn = std::move(idle_.back());
+            idle_.pop_back();
+            return conn;
+        }
+    }
+    return std::make_unique<FirebirdConnection>(info_);
+}
+
+void FirebirdConnectionPool::Release(std::unique_ptr<FirebirdConnection> conn) {
+    if (!conn) return;
+    std::lock_guard<std::mutex> g(lock_);
+    idle_.push_back(std::move(conn));
+}
+
+size_t FirebirdConnectionPool::IdleCount() {
+    std::lock_guard<std::mutex> g(lock_);
+    return idle_.size();
+}
+
 // --- FirebirdConnection ------------------------------------------------------
 
 FirebirdConnection::FirebirdConnection(const FirebirdConnectionInfo &info) : info_(info) {
@@ -314,6 +339,16 @@ void FirebirdStatement::AllocateBuffers() {
         case SQL_ARRAY:
         case SQL_QUAD:      bufsz = sizeof(ISC_QUAD);      break;
         case SQL_BOOLEAN:   bufsz = sizeof(ISC_UCHAR);     break;
+        case SQL_INT128:    bufsz = 16;                    break;
+        case SQL_TIMESTAMP_TZ:
+            // ISC_TIMESTAMP + 2-byte time-zone id (Firebird 4 ABI).
+            bufsz = sizeof(ISC_TIMESTAMP) + sizeof(int16_t);
+            break;
+        case SQL_TIME_TZ:
+            bufsz = sizeof(ISC_TIME) + sizeof(int16_t);
+            break;
+        case SQL_DEC16:     bufsz = 8;                     break;  // IEEE Decimal64
+        case SQL_DEC34:     bufsz = 16;                    break;  // IEEE Decimal128
         default:            bufsz = v.sqllen > 0 ? v.sqllen : 8;
         }
         buffers_[i].assign(bufsz, 0);
@@ -399,6 +434,26 @@ ISC_TIME FirebirdStatement::GetTime(idx_t col) const {
 }
 bool FirebirdStatement::GetBool(idx_t col) const {
     return buffers_[col][0] != 0;
+}
+
+void FirebirdStatement::GetInt128(idx_t col, uint64_t &out_lo, int64_t &out_hi) const {
+    // Firebird stores INT128 little-endian as two 64-bit halves: lower
+    // 64 bits first, then upper 64 (signed). Matches DuckDB's
+    // hugeint_t {uint64_t lower; int64_t upper;} layout one-to-one.
+    std::memcpy(&out_lo, buffers_[col].data(),     sizeof(out_lo));
+    std::memcpy(&out_hi, buffers_[col].data() + 8, sizeof(out_hi));
+}
+
+ISC_TIMESTAMP FirebirdStatement::GetTimestampTzUtc(idx_t col) const {
+    ISC_TIMESTAMP v;
+    std::memcpy(&v, buffers_[col].data(), sizeof(v));
+    return v;
+}
+
+ISC_TIME FirebirdStatement::GetTimeTzUtc(idx_t col) const {
+    ISC_TIME v;
+    std::memcpy(&v, buffers_[col].data(), sizeof(v));
+    return v;
 }
 
 std::string FirebirdStatement::ReadBlob(idx_t col) const {

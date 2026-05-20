@@ -2,7 +2,9 @@
 
 #include <cmath>
 
+#include "duckdb/common/hugeint.hpp"
 #include "duckdb/common/types/date.hpp"
+#include "duckdb/common/types/datetime.hpp"
 #include "duckdb/common/types/time.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/exception.hpp"
@@ -44,13 +46,26 @@ LogicalType FirebirdToDuckDBType(const FirebirdColumnDesc &col) {
     case SQL_SHORT:    return ScaledIntegerToDecimal(2, col.sqlscale);
     case SQL_LONG:     return ScaledIntegerToDecimal(4, col.sqlscale);
     case SQL_INT64:    return ScaledIntegerToDecimal(8, col.sqlscale);
+    case SQL_INT128:
+        // Firebird 4 INT128 — scale 0 → HUGEINT; with scale → DECIMAL(38, -scale).
+        if (col.sqlscale == 0) return LogicalType::HUGEINT;
+        if (-col.sqlscale > 38 || col.sqlscale > 0) return LogicalType::DOUBLE;
+        return LogicalType::DECIMAL(38, -col.sqlscale);
     case SQL_FLOAT:    return LogicalType::FLOAT;
     case SQL_D_FLOAT:
     case SQL_DOUBLE:   return LogicalType::DOUBLE;
-    case SQL_TIMESTAMP: return LogicalType::TIMESTAMP;
-    case SQL_TYPE_DATE: return LogicalType::DATE;
-    case SQL_TYPE_TIME: return LogicalType::TIME;
-    case SQL_BOOLEAN:   return LogicalType::BOOLEAN;
+    case SQL_DEC16:
+    case SQL_DEC34:
+        // IEEE decimal-floating-point (Firebird 4 DECFLOAT). DuckDB has
+        // no native equivalent; degrading to DOUBLE keeps the data
+        // queryable at the cost of some precision on the long tail.
+        return LogicalType::DOUBLE;
+    case SQL_TIMESTAMP:    return LogicalType::TIMESTAMP;
+    case SQL_TIMESTAMP_TZ: return LogicalType::TIMESTAMP_TZ;
+    case SQL_TYPE_DATE:    return LogicalType::DATE;
+    case SQL_TYPE_TIME:    return LogicalType::TIME;
+    case SQL_TIME_TZ:      return LogicalType::TIME_TZ;
+    case SQL_BOOLEAN:      return LogicalType::BOOLEAN;
     case SQL_BLOB:
         // sub_type 1 = TEXT BLOB; everything else is binary.
         return col.sqlsubtype == 1 ? LogicalType::VARCHAR : LogicalType::BLOB;
@@ -150,6 +165,41 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
             dtime_t(static_cast<int64_t>(t) * 100);  // 1/10000s → microseconds
         break;
     }
+    case SQL_INT128: {
+        uint64_t lo;
+        int64_t  hi;
+        stmt.GetInt128(col_idx, lo, hi);
+        // hugeint_t is {uint64_t lower; int64_t upper;} — same layout
+        // Firebird writes. DECIMAL(>18,…) is also backed by hugeint_t.
+        hugeint_t v;
+        v.lower = lo;
+        v.upper = hi;
+        FlatVector::GetData<hugeint_t>(target)[target_offset] = v;
+        break;
+    }
+    case SQL_TIMESTAMP_TZ: {
+        auto ts = stmt.GetTimestampTzUtc(col_idx);
+        date_t  d = Date::FromDate(1858, 11, 17);
+        d.days   += ts.timestamp_date;
+        dtime_t t(static_cast<int64_t>(ts.timestamp_time) * 100);
+        FlatVector::GetData<timestamp_tz_t>(target)[target_offset] =
+            timestamp_tz_t(Timestamp::FromDatetime(d, t));
+        break;
+    }
+    case SQL_TIME_TZ: {
+        auto t = stmt.GetTimeTzUtc(col_idx);
+        // Firebird stores the UTC component; surface it with a zero
+        // offset (DuckDB's dtime_tz_t encodes time+offset in 64 bits).
+        FlatVector::GetData<dtime_tz_t>(target)[target_offset] =
+            dtime_tz_t(dtime_t(static_cast<int64_t>(t) * 100), 0);
+        break;
+    }
+    case SQL_DEC16:
+    case SQL_DEC34:
+        // IEEE Decimal64 / Decimal128 — no native DuckDB equivalent yet.
+        // Surface NULL rather than producing a misleading approximation.
+        FlatVector::SetNull(target, target_offset, true);
+        break;
     case SQL_BLOB: {
         auto blob = stmt.ReadBlob(col_idx);
         if (col.sqlsubtype == 1) {

@@ -2,11 +2,35 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "duckdb.hpp"
 #include "ibase.h"
+
+// --- Firebird 4 SQL types -------------------------------------------------
+//
+// The Firebird 3 ibase.h shipped by most distros doesn't declare these,
+// but the byte layout on the wire is stable across server versions, so
+// defining them locally lets us scan Firebird 4 servers when the build
+// host only has FB3 headers available.
+
+#ifndef SQL_INT128
+#define SQL_INT128       32752
+#endif
+#ifndef SQL_TIMESTAMP_TZ
+#define SQL_TIMESTAMP_TZ 32754
+#endif
+#ifndef SQL_TIME_TZ
+#define SQL_TIME_TZ      32756
+#endif
+#ifndef SQL_DEC16
+#define SQL_DEC16        32760
+#endif
+#ifndef SQL_DEC34
+#define SQL_DEC34        32762
+#endif
 
 namespace duckdb {
 
@@ -58,6 +82,17 @@ public:
     ISC_DATE      GetDate(idx_t col) const;
     ISC_TIME      GetTime(idx_t col) const;
     bool          GetBool(idx_t col) const;
+    // 128-bit integer (Firebird 4 INT128 / NUMERIC(p,s) with p>18). The
+    // value is the raw 16-byte little-endian two's-complement payload
+    // libfbclient writes; the caller is responsible for applying scale
+    // when the column is a scaled NUMERIC. Returns (lower 64, upper 64).
+    void GetInt128(idx_t col, uint64_t &out_lo, int64_t &out_hi) const;
+    // Firebird 4 TIMESTAMP WITH TIMEZONE — UTC date/time + a 2-byte
+    // time-zone region/offset id. We only surface the UTC component
+    // (DuckDB's TIMESTAMP_TZ is microseconds since the UNIX epoch in
+    // UTC), so the tz id is intentionally dropped.
+    ISC_TIMESTAMP GetTimestampTzUtc(idx_t col) const;
+    ISC_TIME      GetTimeTzUtc(idx_t col) const;
     // Reads an entire BLOB into a string (one allocation, segments concatenated).
     std::string   ReadBlob(idx_t col) const;
 
@@ -72,8 +107,34 @@ private:
     void AllocateBuffers();
 };
 
-// Owns one isc_db_handle + a long-running read-only transaction. Cheap to
-// create per scan today; will be pooled in a follow-up.
+// Cache of idle FirebirdConnection objects. Cheap to skip when there's
+// only one query per ATTACH (each LocalState would open + tear down a
+// fresh connection anyway), but saves the ~10-100 ms isc_attach_database
+// cost on interactive sessions that hit the same database many times.
+class FirebirdConnectionPool {
+public:
+    explicit FirebirdConnectionPool(FirebirdConnectionInfo info)
+        : info_(std::move(info)) {}
+
+    // Acquire returns either a pooled idle connection (LIFO — warmest
+    // first) or a newly constructed one. Never blocks.
+    std::unique_ptr<FirebirdConnection> Acquire();
+
+    // Return a connection to the pool. The connection's read-only
+    // transaction may still be open — it'll be re-used as-is by the
+    // next acquirer.
+    void Release(std::unique_ptr<FirebirdConnection> conn);
+
+    // Pool size hint (mostly for testing / introspection).
+    size_t IdleCount();
+
+private:
+    FirebirdConnectionInfo info_;
+    std::mutex lock_;
+    std::vector<std::unique_ptr<FirebirdConnection>> idle_;
+};
+
+// Owns one isc_db_handle + a long-running read-only transaction.
 class FirebirdConnection {
 public:
     explicit FirebirdConnection(const FirebirdConnectionInfo &info);

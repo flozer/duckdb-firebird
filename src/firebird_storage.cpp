@@ -72,9 +72,20 @@ public:
     FirebirdTableEntry(Catalog &catalog,
                        SchemaCatalogEntry &schema,
                        CreateTableInfo &info,
-                       FirebirdConnectionInfo conn_info)
+                       FirebirdConnectionInfo conn_info,
+                       std::shared_ptr<FirebirdConnectionPool> pool)
         : TableCatalogEntry(catalog, schema, info),
-          conn_info_(std::move(conn_info)) {}
+          conn_info_(std::move(conn_info)),
+          pool_(std::move(pool)) {
+        // Mirror the column list out of CreateTableInfo so we can hand
+        // a fresh copy to every GetScanFunction call without re-reading
+        // RDB$RELATION_FIELDS. EnsureTablesLoaded in the schema entry
+        // already paid the round-trip once at attach time.
+        for (auto &col : columns.Logical()) {
+            cached_column_names_.push_back(col.Name());
+            cached_column_types_.push_back(col.Type());
+        }
+    }
 
     unique_ptr<BaseStatistics>
     GetStatistics(ClientContext & /*ctx*/, column_t /*column_id*/) override {
@@ -87,20 +98,31 @@ public:
 
     TableFunction GetScanFunction(ClientContext & /*ctx*/,
                                   unique_ptr<FunctionData> &bind_data) override {
-        // Build the FunctionData the firebird_scan() table function
-        // expects, up front. This is the same data the standalone
-        // `firebird_scan('conn', 'TABLE')` call would produce inside its
-        // bind callback — we just skip the round-trip through that
-        // callback by providing the already-resolved object.
         auto data = make_uniq<FirebirdBindData>();
         data->conn_info = conn_info_;
         data->table_name = name;
+        data->column_names = cached_column_names_;   // O(1) — cached at construction
+        data->column_types = cached_column_types_;
+        data->pool = pool_;
 
-        FirebirdConnection conn(data->conn_info);
-        LoadTableSchema(conn, data->table_name,
-                        data->column_names, data->column_types);
-        data->pk = ProbePrimaryKey(conn, data->table_name,
-                                   data->column_names, data->column_types);
+        // PK probe — lazy + memoised. The first scan against a table
+        // pays the three RDB$ round-trips; subsequent scans return the
+        // cached PrimaryKeyInfo (or nullopt) for free. The probe uses
+        // the pool so we don't pay the connect cost on top.
+        {
+            std::lock_guard<std::mutex> g(pk_lock_);
+            if (!pk_loaded_) {
+                auto conn = pool_ ? pool_->Acquire()
+                                  : make_uniq<FirebirdConnection>(conn_info_);
+                pk_cache_ = ProbePrimaryKey(*conn, name,
+                                            data->column_names, data->column_types);
+                if (pool_) pool_->Release(std::move(conn));
+                pk_loaded_ = true;
+            }
+            if (pk_cache_) {
+                data->pk = make_uniq<PrimaryKeyInfo>(*pk_cache_);
+            }
+        }
 
         bind_data = std::move(data);
         return GetFirebirdScanFunction();
@@ -108,6 +130,13 @@ public:
 
 private:
     FirebirdConnectionInfo conn_info_;
+    std::shared_ptr<FirebirdConnectionPool> pool_;
+    duckdb::vector<std::string> cached_column_names_;
+    duckdb::vector<LogicalType> cached_column_types_;
+
+    std::mutex pk_lock_;
+    bool pk_loaded_ = false;
+    std::unique_ptr<PrimaryKeyInfo> pk_cache_;
 };
 
 // ---------------------------------------------------------------------------
@@ -118,9 +147,11 @@ class FirebirdSchemaEntry final : public SchemaCatalogEntry {
 public:
     FirebirdSchemaEntry(Catalog &catalog,
                         CreateSchemaInfo &info,
-                        FirebirdConnectionInfo conn_info)
+                        FirebirdConnectionInfo conn_info,
+                        std::shared_ptr<FirebirdConnectionPool> pool)
         : SchemaCatalogEntry(catalog, info),
-          conn_info_(std::move(conn_info)) {}
+          conn_info_(std::move(conn_info)),
+          pool_(std::move(pool)) {}
 
     // -- discovery (the only non-stub members) -------------------------------
 
@@ -190,7 +221,12 @@ private:
         std::lock_guard<std::mutex> g(load_lock_);
         if (loaded_) return;
 
-        FirebirdConnection conn(conn_info_);
+        // One connection covers all the schema-discovery queries; return
+        // it to the pool at the end so the first user query can re-use
+        // it warm.
+        auto conn_owned = pool_ ? pool_->Acquire()
+                                : make_uniq<FirebirdConnection>(conn_info_);
+        FirebirdConnection &conn = *conn_owned;
         // User tables only: system_flag=0, persistent (type=0 or NULL for
         // older Firebird builds that don't populate that column).
         std::vector<std::string> table_names;
@@ -225,12 +261,14 @@ private:
                     info.columns.AddColumn(ColumnDefinition(col_names[i], col_types[i]));
                 }
 
-                auto entry = make_uniq<FirebirdTableEntry>(catalog, *this, info, conn_info_);
+                auto entry = make_uniq<FirebirdTableEntry>(catalog, *this, info,
+                                                           conn_info_, pool_);
                 tables_.emplace(ToUpper(table_name), std::move(entry));
             } catch (std::exception &) {
                 // Skip — table will simply not appear in fb.main.
             }
         }
+        if (pool_) pool_->Release(std::move(conn_owned));
         loaded_ = true;
     }
 
@@ -241,6 +279,7 @@ private:
     }
 
     FirebirdConnectionInfo conn_info_;
+    std::shared_ptr<FirebirdConnectionPool> pool_;
     std::mutex load_lock_;
     bool loaded_ = false;
     std::unordered_map<std::string, std::unique_ptr<FirebirdTableEntry>> tables_;
@@ -253,7 +292,9 @@ private:
 class FirebirdCatalog final : public Catalog {
 public:
     FirebirdCatalog(AttachedDatabase &db, FirebirdConnectionInfo conn_info)
-        : Catalog(db), conn_info_(std::move(conn_info)) {}
+        : Catalog(db),
+          conn_info_(std::move(conn_info)),
+          pool_(std::make_shared<FirebirdConnectionPool>(conn_info_)) {}
 
     string GetCatalogType() override { return "firebird"; }
 
@@ -264,7 +305,7 @@ public:
         CreateSchemaInfo info;
         info.schema = FIREBIRD_MAIN_SCHEMA;
         info.on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
-        main_schema_ = make_uniq<FirebirdSchemaEntry>(*this, info, conn_info_);
+        main_schema_ = make_uniq<FirebirdSchemaEntry>(*this, info, conn_info_, pool_);
     }
 
     bool InMemory() override { return false; }
@@ -344,6 +385,7 @@ public:
 
 private:
     FirebirdConnectionInfo conn_info_;
+    std::shared_ptr<FirebirdConnectionPool> pool_;
     std::unique_ptr<FirebirdSchemaEntry> main_schema_;
 };
 

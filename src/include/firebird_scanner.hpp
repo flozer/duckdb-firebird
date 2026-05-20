@@ -26,6 +26,15 @@ struct FirebirdBindData : public TableFunctionData {
     duckdb::vector<LogicalType> column_types;
     std::unique_ptr<PrimaryKeyInfo> pk;
     idx_t partitions_override = 0;
+    // Optional ROWS N hint pushed into every per-partition Firebird query.
+    // 0 = unset (no limit). DuckDB's TableFunction API has no built-in
+    // LIMIT pushdown hook, so this is opt-in via the `row_limit=N` named
+    // parameter for callers who know they only need the first N rows.
+    optional_idx limit_override;
+    // Optional shared connection pool — populated by the ATTACH path
+    // (FirebirdTableEntry::GetScanFunction). Direct firebird_scan() calls
+    // leave this null, so each LocalState constructs its own connection.
+    std::shared_ptr<FirebirdConnectionPool> pool;
 };
 
 // --- discovery + probe helpers ---------------------------------------------

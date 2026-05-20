@@ -66,7 +66,22 @@ struct FirebirdGlobalState : public GlobalTableFunctionState {
 struct FirebirdLocalState : public LocalTableFunctionState {
     std::unique_ptr<FirebirdConnection> conn;
     std::unique_ptr<FirebirdStatement>  cursor;
+    // When non-null, conn was leased from this pool; release it back on
+    // destruction so it's available for the next query against the same
+    // attached database.
+    std::shared_ptr<FirebirdConnectionPool> pool;
     bool exhausted = false;
+
+    ~FirebirdLocalState() override {
+        // Order matters: the cursor has to be torn down before the
+        // connection is returned to the pool (otherwise the cursor's
+        // dsql_free_statement runs against a connection someone else
+        // already grabbed).
+        cursor.reset();
+        if (pool && conn) {
+            pool->Release(std::move(conn));
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -260,6 +275,11 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
             if (p < 0) throw BinderException("partitions must be >= 0 (0 = auto)");
             bind->partitions_override = static_cast<idx_t>(p);
         }
+        else if (key == "row_limit") {
+            auto l = val.GetValue<int64_t>();
+            if (l <= 0) throw BinderException("row_limit must be > 0");
+            bind->limit_override = optional_idx(static_cast<idx_t>(l));
+        }
     }
 
     FirebirdConnection conn(bind->conn_info);
@@ -370,9 +390,13 @@ static unique_ptr<LocalTableFunctionState> FirebirdScanInitLocal(
     GlobalTableFunctionState * /*gstate*/) {
     auto &bind = input.bind_data->Cast<FirebirdBindData>();
     auto local = make_uniq<FirebirdLocalState>();
-    // Each worker opens its own connection. Cursors are opened lazily in
-    // the scan function once we know which partition this worker owns.
-    local->conn = make_uniq<FirebirdConnection>(bind.conn_info);
+    if (bind.pool) {
+        // ATTACH path — reuse a warm connection if the pool has one.
+        local->pool = bind.pool;
+        local->conn = bind.pool->Acquire();
+    } else {
+        local->conn = make_uniq<FirebirdConnection>(bind.conn_info);
+    }
     return std::move(local);
 }
 
@@ -401,7 +425,7 @@ static bool OpenNextPartitionCursor(ClientContext & /*ctx*/,
         bind.column_types,
         gstate.column_ids,
         gstate.filters,
-        /*limit=*/optional_idx(),
+        bind.limit_override,
         spec.where_clause);
 
     local.cursor = local.conn->OpenCursor(query.sql);
@@ -722,6 +746,7 @@ TableFunction GetFirebirdScanFunction() {
     fn.named_parameters["role"]       = LogicalType::VARCHAR;
     fn.named_parameters["dialect"]    = LogicalType::INTEGER;
     fn.named_parameters["partitions"] = LogicalType::BIGINT;
+    fn.named_parameters["row_limit"]  = LogicalType::BIGINT;
 
     // Pushdown advertisements — DuckDB's planner now knows it can hand us
     // narrowed column lists and TableFilterSet entries.
