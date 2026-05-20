@@ -132,7 +132,8 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
     const std::vector<LogicalType>  &/*all_column_types*/,
     const std::vector<column_t>     &column_ids,
     optional_ptr<TableFilterSet>     filters,
-    optional_idx                     limit) {
+    optional_idx                     limit,
+    const std::string               &extra_predicate) {
 
     Result r;
     std::ostringstream sql;
@@ -187,6 +188,19 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
                 sql << conds[i];
             }
         }
+    }
+
+    // --- Partition predicate (PK-range parallel scan) -----------------------
+    // Injected by the scanner once per worker. The text is built locally
+    // ("pk >= a AND pk <= b" with numeric literals only) so no escaping is
+    // needed.
+    if (!extra_predicate.empty()) {
+        if (sql.str().find(" WHERE ") == std::string::npos) {
+            sql << " WHERE ";
+        } else {
+            sql << " AND ";
+        }
+        sql << "(" << extra_predicate << ")";
     }
 
     // --- LIMIT pushdown ------------------------------------------------------

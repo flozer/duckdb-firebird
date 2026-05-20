@@ -1,8 +1,11 @@
 #include "firebird_scanner.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <memory>
+#include <mutex>
 #include <sstream>
+#include <thread>
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/optional_idx.hpp"
@@ -15,29 +18,83 @@
 namespace duckdb {
 
 // ---------------------------------------------------------------------------
-//  Bind data — everything we resolved at planning time.
+//  Primary-key partitioning
+// ---------------------------------------------------------------------------
+//
+// For single-column INTEGER/BIGINT primary keys we partition the scan into
+// N ranges of equal numeric width and hand each one to its own worker. The
+// PK probe runs once at bind time; the partition queue lives on the global
+// state. Tables without a usable PK collapse to a single partition (= the
+// pre-parallel behaviour).
+//
+// Why "equal numeric width" instead of "equal row count"? It only requires
+// one MIN/MAX query (cheap, sargable in Firebird), and PK distributions are
+// usually dense enough in practice that worker imbalance stays under 2×.
+// Row-count balancing would need either NTILE-style probing (multi-query)
+// or NDV statistics from RDB$ — punted to a later iteration.
+
+struct PrimaryKeyInfo {
+    std::string column;
+    int64_t min_value = 0;
+    int64_t max_value = 0;
+};
+
+struct PartitionSpec {
+    // Optional filter applied to the cursor for this partition. Empty for
+    // the "no PK" / single-partition case, which scans the whole table.
+    std::string where_clause;
+};
+
+// ---------------------------------------------------------------------------
+//  Bind data
 // ---------------------------------------------------------------------------
 struct FirebirdBindData : public TableFunctionData {
     FirebirdConnectionInfo conn_info;
     std::string table_name;
 
-    // Full table schema (used to translate projection / filter pushdown back
-    // to the canonical column ordering). duckdb::vector (subclass of
-    // std::vector) so we can assign directly into the bind-callback outputs.
+    // duckdb::vector subclasses std::vector but isn't assignable from it,
+    // so we mirror the type used by DuckDB's bind callback outputs.
     duckdb::vector<std::string> column_names;
     duckdb::vector<LogicalType> column_types;
+
+    // Optional — present only if the table has a single-column numeric PK.
+    std::unique_ptr<PrimaryKeyInfo> pk;
+
+    // User-supplied override: positive value forces exactly that many PK
+    // partitions (capped by the row range), 1 disables parallelism and
+    // also skips the PK probe, 0 / unset means auto-pick.
+    idx_t partitions_override = 0;
 };
 
 // ---------------------------------------------------------------------------
-//  Global state — single-threaded for the prototype.
+//  Global state — owns the partition queue + planner pushdown context.
+//
+// Stored once per query (in InitGlobal) so every worker can rebuild its
+// per-partition SELECT with the same projection / filter pushdown the
+// planner asked for.
 // ---------------------------------------------------------------------------
 struct FirebirdGlobalState : public GlobalTableFunctionState {
-    // We emit one scan worker; partitioning by PK range is a follow-up.
-    idx_t MaxThreads() const override { return 1; }
+    std::mutex lock;
+    std::vector<PartitionSpec> partitions;
+    idx_t next_partition = 0;
+    idx_t max_threads = 1;
+
+    // Pushdown context captured at init time.
+    std::vector<column_t>       column_ids;
+    optional_ptr<TableFilterSet> filters;
+
+    idx_t MaxThreads() const override { return max_threads; }
+
+    bool NextPartition(PartitionSpec &out) {
+        std::lock_guard<std::mutex> g(lock);
+        if (next_partition >= partitions.size()) return false;
+        out = std::move(partitions[next_partition++]);
+        return true;
+    }
 };
 
 // ---------------------------------------------------------------------------
-//  Local state — owns the cursor + connection actually doing the scan.
+//  Local state — one connection + at most one active cursor per worker.
 // ---------------------------------------------------------------------------
 struct FirebirdLocalState : public LocalTableFunctionState {
     std::unique_ptr<FirebirdConnection> conn;
@@ -115,6 +172,99 @@ static void LoadTableSchema(FirebirdConnection &conn,
 }
 
 // ---------------------------------------------------------------------------
+//  Primary-key probe (best-effort)
+// ---------------------------------------------------------------------------
+//
+// Returns a PrimaryKeyInfo iff the table has a *single-column* PK on an
+// INTEGER-family column. Composite PKs, non-numeric PKs, and tables with
+// no PK at all simply fall through (we'll scan them single-threaded). We
+// catch all exceptions because metadata access can fail in benign ways
+// (missing privileges, special system tables, MON$ unavailable) and we
+// never want a PK probe to break a working scan.
+
+static std::unique_ptr<PrimaryKeyInfo> ProbePrimaryKey(
+    FirebirdConnection &conn,
+    const std::string &table,
+    const duckdb::vector<std::string> &all_column_names,
+    const duckdb::vector<LogicalType> &all_column_types) {
+
+    std::string upper = table;
+    for (auto &c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+
+    try {
+        // 1) PK index name.
+        std::string pk_index;
+        {
+            auto cur = conn.OpenCursor(
+                "SELECT TRIM(ri.RDB$INDEX_NAME) "
+                "  FROM RDB$INDICES ri "
+                "  JOIN RDB$RELATION_CONSTRAINTS rc ON ri.RDB$INDEX_NAME = rc.RDB$INDEX_NAME "
+                " WHERE ri.RDB$RELATION_NAME = '" + upper + "' "
+                "   AND rc.RDB$CONSTRAINT_TYPE = 'PRIMARY KEY'");
+            if (!cur->Fetch()) return nullptr;          // no PK
+            pk_index = cur->GetText(0);
+        }
+
+        // 2) PK columns (we require exactly one).
+        std::vector<std::string> pk_cols;
+        {
+            auto cur = conn.OpenCursor(
+                "SELECT TRIM(seg.RDB$FIELD_NAME) "
+                "  FROM RDB$INDEX_SEGMENTS seg "
+                " WHERE seg.RDB$INDEX_NAME = '" + pk_index + "' "
+                " ORDER BY seg.RDB$FIELD_POSITION");
+            while (cur->Fetch()) pk_cols.push_back(cur->GetText(0));
+        }
+        if (pk_cols.size() != 1) return nullptr;        // composite PK — fall back
+
+        // 3) Confirm the PK column is INTEGER-family in our resolved schema.
+        const std::string &pk_name = pk_cols.front();
+        auto it = std::find(all_column_names.begin(), all_column_names.end(), pk_name);
+        if (it == all_column_names.end()) return nullptr;
+        auto idx = static_cast<idx_t>(it - all_column_names.begin());
+        switch (all_column_types[idx].id()) {
+        case LogicalTypeId::SMALLINT:
+        case LogicalTypeId::INTEGER:
+        case LogicalTypeId::BIGINT:
+            break;
+        default:
+            return nullptr;                              // not numeric — fall back
+        }
+
+        // 4) MIN/MAX for the PK column. One round trip; Firebird hits the
+        //    index for both. Empty tables abort.
+        int64_t min_v = 0, max_v = 0;
+        {
+            std::string sql = "SELECT MIN(" + QuoteIdent(pk_name) + "), "
+                              "       MAX(" + QuoteIdent(pk_name) + ") "
+                              "  FROM " + QuoteIdent(table);
+            auto cur = conn.OpenCursor(sql);
+            if (!cur->Fetch()) return nullptr;
+            if (cur->IsNull(0) || cur->IsNull(1)) return nullptr;
+            // The MIN/MAX of an INTEGER-family column comes back as the same
+            // SQL type as the column — read accordingly.
+            switch (cur->columns()[0].sqltype) {
+            case SQL_SHORT: min_v = cur->GetShort(0); max_v = cur->GetShort(1); break;
+            case SQL_LONG:  min_v = cur->GetLong(0);  max_v = cur->GetLong(1);  break;
+            case SQL_INT64: min_v = cur->GetInt64(0); max_v = cur->GetInt64(1); break;
+            default: return nullptr;
+            }
+        }
+
+        if (max_v <= min_v) return nullptr;             // 0-1 row table
+
+        auto pk = make_uniq<PrimaryKeyInfo>();
+        pk->column = pk_name;
+        pk->min_value = min_v;
+        pk->max_value = max_v;
+        return pk;
+    } catch (...) {
+        // Any RDB$ access failure → silently fall back to single-thread.
+        return nullptr;
+    }
+}
+
+// ---------------------------------------------------------------------------
 //  Bind.
 // ---------------------------------------------------------------------------
 static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
@@ -133,15 +283,28 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
     for (auto &kv : input.named_parameters) {
         auto &key = kv.first;
         auto &val = kv.second;
-        if      (key == "user")     bind->conn_info.user     = val.ToString();
-        else if (key == "password") bind->conn_info.password = val.ToString();
-        else if (key == "charset")  bind->conn_info.charset  = val.ToString();
-        else if (key == "role")     bind->conn_info.role     = val.ToString();
-        else if (key == "dialect")  bind->conn_info.dialect  = static_cast<int>(val.GetValue<int32_t>());
+        if      (key == "user")       bind->conn_info.user     = val.ToString();
+        else if (key == "password")   bind->conn_info.password = val.ToString();
+        else if (key == "charset")    bind->conn_info.charset  = val.ToString();
+        else if (key == "role")       bind->conn_info.role     = val.ToString();
+        else if (key == "dialect")    bind->conn_info.dialect  = static_cast<int>(val.GetValue<int32_t>());
+        else if (key == "partitions") {
+            auto p = val.GetValue<int64_t>();
+            if (p < 0) throw BinderException("partitions must be >= 0 (0 = auto)");
+            bind->partitions_override = static_cast<idx_t>(p);
+        }
     }
 
     FirebirdConnection conn(bind->conn_info);
     LoadTableSchema(conn, bind->table_name, bind->column_names, bind->column_types);
+
+    // PK probe is only worth its three RDB$ round-trips if we might actually
+    // parallelize. If the caller forced partitions=1 we skip it entirely;
+    // also keeps interactive small-table queries fast on remote servers.
+    if (bind->partitions_override != 1) {
+        bind->pk = ProbePrimaryKey(conn, bind->table_name,
+                                   bind->column_names, bind->column_types);
+    }
 
     return_types = bind->column_types;
     names        = bind->column_names;
@@ -149,54 +312,153 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
 }
 
 // ---------------------------------------------------------------------------
-//  Init.
+//  Init — slice the PK range into N partitions.
 // ---------------------------------------------------------------------------
+//
+// Heuristic for partition count:
+//   - No PK → 1 partition (full-table scan)
+//   - PK range / row_estimate ≈ "rows per worker" target of 50k.
+//     Bounded by (hardware concurrency, 32) to avoid pathologically many
+//     short partitions on huge ranges.
+//
+// We don't have row_estimate at bind time (no MON$STATS query in the
+// probe), so a fixed cap-and-floor is good enough: between 1 and 16
+// partitions, scaled by the range width itself.
+
+// Empirical: opening fresh Firebird connections + preparing the XSQLDAs +
+// fanning queries through libfbclient's lock manager has measurable cost,
+// and on Firebird 3.0 SuperServer (the typical OLTP deployment) the
+// server-side scheduler effectively serializes queries against a single
+// database file — so naive partitioning actively HURTS performance there.
+//
+// Defaults are tuned for that pessimistic case: only auto-partition when
+// the PK range is large enough that the serial baseline is itself slow
+// (a few seconds), and let users opt into finer partitioning via the
+// partitions= named parameter when they're hitting Classic mode, multi-
+// threaded SuperClassic, or a remote Firebird where parallelism wins.
+//
+// Concretely:
+//   range <  4M rows  → 1 partition  (cheap serial baseline)
+//   range >= 4M rows  → min(range / 2M, hardware_concurrency)
+static constexpr int64_t MIN_ROWS_PER_PARTITION = 2'000'000;
+
+static idx_t PickPartitionCount(int64_t min_v, int64_t max_v) {
+    int64_t range = max_v - min_v + 1;
+    if (range < MIN_ROWS_PER_PARTITION * 2) return 1;       // not worth the overhead
+    auto hw = static_cast<int64_t>(std::thread::hardware_concurrency());
+    if (hw <= 0) hw = 4;
+    int64_t by_range = range / MIN_ROWS_PER_PARTITION;
+    int64_t result   = std::min<int64_t>(by_range, hw);
+    return static_cast<idx_t>(std::max<int64_t>(1, result));
+}
+
 static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
-    ClientContext & /*context*/, TableFunctionInitInput & /*input*/) {
-    return make_uniq<FirebirdGlobalState>();
+    ClientContext & /*context*/, TableFunctionInitInput &input) {
+    auto &bind = input.bind_data->Cast<FirebirdBindData>();
+    auto gstate = make_uniq<FirebirdGlobalState>();
+
+    if (bind.pk) {
+        int64_t lo = bind.pk->min_value;
+        int64_t hi = bind.pk->max_value;
+        idx_t n = bind.partitions_override > 0
+                      ? bind.partitions_override
+                      : PickPartitionCount(lo, hi);
+        // Never produce empty partitions for a tiny range.
+        int64_t row_capacity = hi - lo + 1;
+        if (row_capacity > 0 && static_cast<int64_t>(n) > row_capacity) {
+            n = static_cast<idx_t>(row_capacity);
+        }
+        gstate->partitions.reserve(n);
+        // Bucket boundaries via floor-div; the last bucket absorbs the
+        // remainder. Using long double for the multiply protects against
+        // overflow on near-INT64_MAX PK ranges.
+        long double width = (static_cast<long double>(hi) - lo + 1.0L) / n;
+        std::string pk = QuoteIdent(bind.pk->column);
+        for (idx_t i = 0; i < n; ++i) {
+            int64_t part_lo = lo + static_cast<int64_t>(width * i);
+            int64_t part_hi = (i == n - 1)
+                ? hi
+                : lo + static_cast<int64_t>(width * (i + 1)) - 1;
+            PartitionSpec spec;
+            spec.where_clause = pk + " >= " + std::to_string(part_lo) +
+                                " AND " + pk + " <= " + std::to_string(part_hi);
+            gstate->partitions.push_back(std::move(spec));
+        }
+        gstate->max_threads = n;
+    } else {
+        gstate->partitions.push_back(PartitionSpec{});  // single "whole table" slice
+        gstate->max_threads = 1;
+    }
+
+    // Capture pushdown context for the workers.
+    gstate->column_ids = std::vector<column_t>(input.column_ids.begin(),
+                                               input.column_ids.end());
+    gstate->filters    = input.filters;
+    return std::move(gstate);
 }
 
 static unique_ptr<LocalTableFunctionState> FirebirdScanInitLocal(
     ExecutionContext & /*ctx*/,
     TableFunctionInitInput &input,
     GlobalTableFunctionState * /*gstate*/) {
-
     auto &bind = input.bind_data->Cast<FirebirdBindData>();
     auto local = make_uniq<FirebirdLocalState>();
-
-    auto query = FirebirdQueryBuilder::Build(
-        bind.table_name,
-        bind.column_names,
-        bind.column_types,
-        input.column_ids,
-        input.filters,
-        /*limit=*/optional_idx());
-
-    local->conn   = make_uniq<FirebirdConnection>(bind.conn_info);
-    local->cursor = local->conn->OpenCursor(query.sql);
+    // Each worker opens its own connection. Cursors are opened lazily in
+    // the scan function once we know which partition this worker owns.
+    local->conn = make_uniq<FirebirdConnection>(bind.conn_info);
     return std::move(local);
 }
 
 // ---------------------------------------------------------------------------
 //  Scan.
 // ---------------------------------------------------------------------------
-static void FirebirdScanFunction(ClientContext & /*context*/,
+//
+// Each call to the scan function either continues the worker's current
+// cursor or, if it's exhausted (or hasn't been opened yet), pulls the
+// next partition from the global queue, opens a fresh cursor for it, and
+// continues. The worker is "done" when the queue is empty and the
+// current cursor (if any) has been fully drained.
+
+static bool OpenNextPartitionCursor(ClientContext & /*ctx*/,
+                                    TableFunctionInput &data,
+                                    FirebirdLocalState &local) {
+    auto &bind   = data.bind_data->Cast<FirebirdBindData>();
+    auto &gstate = data.global_state->Cast<FirebirdGlobalState>();
+
+    PartitionSpec spec;
+    if (!gstate.NextPartition(spec)) return false;
+
+    auto query = FirebirdQueryBuilder::Build(
+        bind.table_name,
+        bind.column_names,
+        bind.column_types,
+        gstate.column_ids,
+        gstate.filters,
+        /*limit=*/optional_idx(),
+        spec.where_clause);
+
+    local.cursor = local.conn->OpenCursor(query.sql);
+    return true;
+}
+
+static void FirebirdScanFunction(ClientContext &ctx,
                                  TableFunctionInput &data,
                                  DataChunk &output) {
     auto &local = data.local_state->Cast<FirebirdLocalState>();
-    if (local.exhausted) {
-        output.SetCardinality(0);
-        return;
-    }
 
     const idx_t target = STANDARD_VECTOR_SIZE;
     const idx_t n_out_cols = output.ColumnCount();
-
     idx_t row = 0;
+
     while (row < target) {
+        if (!local.cursor) {
+            if (!OpenNextPartitionCursor(ctx, data, local)) break;
+        }
         if (!local.cursor->Fetch()) {
-            local.exhausted = true;
-            break;
+            // Current partition done — drop the cursor and try to fetch
+            // the next one on the next iteration.
+            local.cursor.reset();
+            continue;
         }
         for (idx_t c = 0; c < n_out_cols; ++c) {
             FirebirdAppendValue(*local.cursor, c, output.data[c], row);
@@ -216,11 +478,12 @@ TableFunction GetFirebirdScanFunction() {
                      FirebirdScanBind,
                      FirebirdScanInitGlobal,
                      FirebirdScanInitLocal);
-    fn.named_parameters["user"]     = LogicalType::VARCHAR;
-    fn.named_parameters["password"] = LogicalType::VARCHAR;
-    fn.named_parameters["charset"]  = LogicalType::VARCHAR;
-    fn.named_parameters["role"]     = LogicalType::VARCHAR;
-    fn.named_parameters["dialect"]  = LogicalType::INTEGER;
+    fn.named_parameters["user"]       = LogicalType::VARCHAR;
+    fn.named_parameters["password"]   = LogicalType::VARCHAR;
+    fn.named_parameters["charset"]    = LogicalType::VARCHAR;
+    fn.named_parameters["role"]       = LogicalType::VARCHAR;
+    fn.named_parameters["dialect"]    = LogicalType::INTEGER;
+    fn.named_parameters["partitions"] = LogicalType::BIGINT;
 
     // Pushdown advertisements — DuckDB's planner now knows it can hand us
     // narrowed column lists and TableFilterSet entries.

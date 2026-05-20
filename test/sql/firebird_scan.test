@@ -128,6 +128,30 @@ SELECT COUNT(*) FROM firebird_scan(
 ----
 5
 
+# --- PK-range partition overrides (parallel scan) --------------------------
+# Forcing N=3 partitions on a 5-row table exercises the parallel path
+# and confirms partitions still return every row exactly once.
+
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE', partitions=3);
+----
+5
+
+# Single-threaded path is selectable with partitions=1 (skips the PK probe).
+query II
+SELECT EMP_ID, EMP_NAME FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE', partitions=1)
+ ORDER BY EMP_ID LIMIT 2;
+----
+1	Alice Andersson
+2	Bob Brown
+
+# Sum across all rows is identical whether we partition or not — guards
+# against off-by-one / duplicate-row bugs in the partition boundaries.
+query I
+SELECT SUM(EMP_ID) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE', partitions=4);
+----
+15
+
 # --- Error paths ------------------------------------------------------------
 
 # Unknown table — bind should fail with a clear message.

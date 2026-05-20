@@ -26,7 +26,8 @@ public:
                         const std::vector<LogicalType>  &all_column_types,
                         const std::vector<column_t>     &column_ids,
                         optional_ptr<TableFilterSet>     filters,
-                        optional_idx                     limit);
+                        optional_idx                     limit,
+                        const std::string               &extra_predicate = {});
 };
 
 } // namespace duckdb
