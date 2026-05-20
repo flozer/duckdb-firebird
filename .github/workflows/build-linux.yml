@@ -1,0 +1,112 @@
+name: Build + Test Linux x64
+
+# Linux build with a real Firebird server fixture. Acts as the guardian
+# test suite: every push to a development branch runs the SQL tests in
+# test/sql/firebird_scan.test against an actual EMPLOYEE database, so
+# regressions in type mapping, pushdown, or BLOB handling fail fast.
+
+on:
+  push:
+    branches:
+      - "claude/duckdb-firebird-plugin-*"
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DUCKDB_VERSION: v1.4.4
+
+jobs:
+  build-test:
+    name: linux-x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install build deps + Firebird
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build g++ pkg-config python3 ccache \
+            firebird-dev firebird3.0-server
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=1G
+          echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-linux-${{ env.DUCKDB_VERSION }}-${{ github.sha }}
+          restore-keys: ccache-linux-${{ env.DUCKDB_VERSION }}-
+
+      - name: Provision Firebird test database
+        id: fb
+        run: |
+          # Read the SYSDBA password Debian wrote during postinst.
+          # Older installs may not have it — fall back to "masterkey".
+          if [ -r /etc/firebird/3.0/SYSDBA.password ]; then
+            source /etc/firebird/3.0/SYSDBA.password
+          else
+            ISC_USER=SYSDBA
+            ISC_PASSWORD=masterkey
+          fi
+
+          # Run the bootstrap script, which creates /tmp/fbdata/test.fdb
+          # with the EMPLOYEE fixture and echoes the env vars.
+          set +e
+          ISC_USER="$ISC_USER" ISC_PASSWORD="$ISC_PASSWORD" \
+              FIREBIRD_TEST_DB=/tmp/fbdata/test.fdb \
+              ./scripts/setup_test_firebird.sh
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ]; then
+            echo "::error::Firebird fixture setup failed (rc=$rc)"
+            exit $rc
+          fi
+          # Export for subsequent steps.
+          echo "FIREBIRD_TEST_DB=/tmp/fbdata/test.fdb" >> $GITHUB_ENV
+          echo "ISC_USER=$ISC_USER"                    >> $GITHUB_ENV
+          echo "ISC_PASSWORD=$ISC_PASSWORD"            >> $GITHUB_ENV
+
+      - name: Pin DuckDB version
+        run: |
+          DUCKDB_GIT_VERSION=${DUCKDB_VERSION} make set_duckdb_version
+
+      - name: Build (release)
+        env:
+          GEN: ninja
+        run: make release
+
+      - name: Verify the .duckdb_extension exists
+        run: |
+          out=build/release/extension/firebird/firebird.duckdb_extension
+          if [ ! -f "$out" ]; then
+            echo "::error::Expected $out, not produced"
+            find build/release/extension/firebird/ -maxdepth 1
+            exit 1
+          fi
+          file "$out"
+          ls -lh "$out"
+
+      - name: Run SQL test suite against real Firebird
+        run: |
+          ./build/release/test/unittest test/sql/firebird_scan.test
+
+      - name: Upload extension artifact (linux_amd64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: firebird.duckdb_extension-linux-x64
+          path: build/release/extension/firebird/firebird.duckdb_extension
+          retention-days: 30
+          if-no-files-found: error

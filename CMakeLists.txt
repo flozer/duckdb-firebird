@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.5)
 
+# This CMakeLists.txt is intended to be included from DuckDB's extension build
+# system via extension_config.cmake / duckdb_extension_load. Direct standalone
+# invocation will not produce a working .duckdb_extension — use `make release`.
+
 set(TARGET_NAME firebird)
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
@@ -20,16 +24,8 @@ set(EXTENSION_SOURCES
     src/firebird_scanner.cpp
 )
 
-# When built inside the DuckDB extension build system the parent CMake defines
-# both targets via build_static_extension / build_loadable_extension. If we are
-# built standalone (for local development), fall back to a single shared lib.
-if(NOT DEFINED DUCKDB_EXTENSION_NAME)
-    add_library(${LOADABLE_EXTENSION_NAME} SHARED ${EXTENSION_SOURCES})
-    add_library(${EXTENSION_NAME} STATIC ${EXTENSION_SOURCES})
-else()
-    build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
-    build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
-endif()
+build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
+build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
 # --- libfbclient ------------------------------------------------------------
 #
@@ -59,8 +55,6 @@ if(FB_SDK_ROOT)
     find_path(FB_INCLUDE_DIR ibase.h PATHS ${FB_INCLUDE_CANDIDATES} NO_DEFAULT_PATH)
 
     if(WIN32)
-        # MSVC import library is named fbclient_ms.lib in the Firebird
-        # Windows ZIP. Some custom builds also produce plain fbclient.lib.
         find_library(FB_LIBRARY
             NAMES fbclient_ms fbclient
             PATHS ${FB_LIB_CANDIDATES}
@@ -84,8 +78,8 @@ if(FB_SDK_ROOT)
 
     target_include_directories(${EXTENSION_NAME}          PRIVATE ${FB_INCLUDE_DIR})
     target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE ${FB_INCLUDE_DIR})
-    target_link_libraries(${EXTENSION_NAME}          PUBLIC ${FB_LIBRARY})
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} PUBLIC ${FB_LIBRARY})
+    target_link_libraries(${EXTENSION_NAME}          ${FB_LIBRARY})
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} ${FB_LIBRARY})
 else()
     find_package(PkgConfig)
     if(PkgConfig_FOUND)
@@ -95,12 +89,12 @@ else()
     if(FBCLIENT_FOUND)
         target_include_directories(${EXTENSION_NAME}          PRIVATE ${FBCLIENT_INCLUDE_DIRS})
         target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE ${FBCLIENT_INCLUDE_DIRS})
-        target_link_libraries(${EXTENSION_NAME}          PUBLIC ${FBCLIENT_LIBRARIES})
-        target_link_libraries(${LOADABLE_EXTENSION_NAME} PUBLIC ${FBCLIENT_LIBRARIES})
+        target_link_libraries(${EXTENSION_NAME}          ${FBCLIENT_LIBRARIES})
+        target_link_libraries(${LOADABLE_EXTENSION_NAME} ${FBCLIENT_LIBRARIES})
     else()
-        # Last resort: rely on default search paths.
-        target_link_libraries(${EXTENSION_NAME}          PUBLIC fbclient)
-        target_link_libraries(${LOADABLE_EXTENSION_NAME} PUBLIC fbclient)
+        # Last resort: rely on default search paths (Linux with /usr/lib).
+        target_link_libraries(${EXTENSION_NAME}          fbclient)
+        target_link_libraries(${LOADABLE_EXTENSION_NAME} fbclient)
     endif()
 endif()
 

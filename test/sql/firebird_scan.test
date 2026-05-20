@@ -1,67 +1,137 @@
 # name: test/sql/firebird_scan.test
-# description: smoke tests for the firebird_scan table function
+# description: end-to-end tests for the firebird_scan table function
 # group: [firebird]
 #
-# These tests require a running Firebird server with a test DB. They are
-# skipped by default; flip `mode skip` to `mode standard` once you have a
-# fixture set up, and adjust the connection string + table name below.
+# Requires the EMPLOYEE fixture from scripts/setup_test_firebird.sh and the
+# following environment variables:
+#   FIREBIRD_TEST_DB   absolute path to a Firebird .fdb file
+#   ISC_PASSWORD       SYSDBA password
+# CI populates them via scripts/setup_test_firebird.sh; locally you can
+# `source` the output of the script.
 
 require firebird
 
-mode skip
+require-env FIREBIRD_TEST_DB
 
-# --- 1. Plain scan ----------------------------------------------------------
-statement ok
-SELECT * FROM firebird_scan(
-    'firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/test.fdb?charset=UTF8',
-    'EMPLOYEE'
-) LIMIT 1;
+require-env ISC_PASSWORD
 
-# --- 2. Projection pushdown -------------------------------------------------
+# --- Basic scan -------------------------------------------------------------
+
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE');
+----
+5
+
+# Type roundtrip: INTEGER, VARCHAR, VARCHAR, DECIMAL, DATE, BOOLEAN.
+query IIIIII
+SELECT EMP_ID, EMP_NAME, DEPT_NO, SALARY, HIRE_DATE, ACTIVE
+  FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ ORDER BY EMP_ID;
+----
+1	Alice Andersson	600	75000.50	2020-03-15	true
+2	Bob Brown	600	82500.00	2019-07-01	true
+3	Carlos Chen	900	65000.75	2022-11-20	false
+4	Diana Davis	600	98000.25	2018-01-10	true
+5	Erik Eklund	700	71200.00	2021-06-30	true
+
+# BLOB SUB_TYPE 1 (text) — full read.
+query I
+SELECT NOTE FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE') WHERE EMP_ID = 1;
+----
+Senior developer
+
+# NULL handling.
 query II
-SELECT EMP_NO, FIRST_NAME
-  FROM firebird_scan(
-    'firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/test.fdb',
-    'EMPLOYEE')
- ORDER BY EMP_NO
- LIMIT 2;
+SELECT EMP_ID, NOTE FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE NOTE IS NULL ORDER BY EMP_ID;
 ----
-2	Robert
-4	Bruce
+2	NULL
+5	NULL
 
-# --- 3. Filter pushdown -----------------------------------------------------
+# --- Filter pushdown -------------------------------------------------------
+
+# Equality on VARCHAR.
+query II
+SELECT EMP_ID, EMP_NAME FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE DEPT_NO = '600' ORDER BY EMP_ID;
+----
+1	Alice Andersson
+2	Bob Brown
+4	Diana Davis
+
+# Range on DECIMAL (BETWEEN — DuckDB splits into >= AND <=).
+query II
+SELECT EMP_ID, SALARY FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE SALARY BETWEEN 70000 AND 90000 ORDER BY EMP_ID;
+----
+1	75000.50
+2	82500.00
+5	71200.00
+
+# AND / OR.
 query I
-SELECT COUNT(*)
-  FROM firebird_scan(
-    'firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/test.fdb',
-    'EMPLOYEE')
- WHERE DEPT_NO = '600';
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE (DEPT_NO = '600' AND SALARY > 80000) OR DEPT_NO = '700';
 ----
-4
+3
 
-# --- 4. Federated join with a Parquet file ---------------------------------
+# DATE comparison.
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE HIRE_DATE >= DATE '2020-01-01';
+----
+3
+
+# BOOLEAN comparison.
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE') WHERE ACTIVE = FALSE;
+----
+1
+
+# --- Aggregation on top of the scan ----------------------------------------
+
+query III
+SELECT DEPT_NO, COUNT(*), CAST(AVG(SALARY) AS DECIMAL(10,2))
+  FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ GROUP BY DEPT_NO ORDER BY DEPT_NO;
+----
+600	3	85166.92
+700	1	71200.00
+900	1	65000.75
+
+# --- Federated join with an in-memory CTE ----------------------------------
+
 statement ok
-CREATE TEMP TABLE local_pq AS
-    SELECT * FROM firebird_scan(
-        'firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/test.fdb',
-        'DEPARTMENT');
+CREATE TEMP TABLE dept_label(dept VARCHAR, label VARCHAR);
+
+statement ok
+INSERT INTO dept_label VALUES ('600','Engineering'),('700','Sales'),('900','Ops');
+
+query II
+SELECT e.EMP_NAME, d.label
+  FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE') e
+  JOIN dept_label d ON e.DEPT_NO = d.dept
+ ORDER BY e.EMP_ID;
+----
+Alice Andersson	Engineering
+Bob Brown	Engineering
+Carlos Chen	Ops
+Diana Davis	Engineering
+Erik Eklund	Sales
+
+# --- Named-parameter overrides ---------------------------------------------
 
 query I
-SELECT COUNT(*)
-  FROM firebird_scan(
-        'firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/test.fdb',
-        'EMPLOYEE') e
-  JOIN local_pq d USING (DEPT_NO);
+SELECT COUNT(*) FROM firebird_scan(
+    '${FIREBIRD_TEST_DB}', 'EMPLOYEE',
+    user='SYSDBA', password='${ISC_PASSWORD}', charset='UTF8');
 ----
-42
+5
 
-# --- 5. Named parameter override --------------------------------------------
-statement ok
-SELECT 1
-  FROM firebird_scan(
-        '/var/lib/firebird/test.fdb',
-        'EMPLOYEE',
-        user='SYSDBA',
-        password='masterkey',
-        charset='UTF8')
- LIMIT 1;
+# --- Error paths ------------------------------------------------------------
+
+# Unknown table — bind should fail with a clear message.
+statement error
+SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'DOES_NOT_EXIST') LIMIT 1;
+----
+firebird_scan: table 'DOES_NOT_EXIST'
