@@ -11,4 +11,9 @@ TableFunction GetFirebirdScanFunction();
 // firebird_tables(connection_string) — list user tables for discoverability.
 TableFunction GetFirebirdTablesFunction();
 
+// firebird_attach_sql(connection_string [, schema]) — emits CREATE SCHEMA
+// + CREATE OR REPLACE VIEW DDL the user can pipe back into DuckDB. A
+// lightweight stand-in for the full ATTACH StorageExtension.
+TableFunction GetFirebirdAttachFunction();
+
 } // namespace duckdb

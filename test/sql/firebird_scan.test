@@ -180,6 +180,42 @@ SELECT table_name, column_count, has_pk, pk_column
 ----
 EMPLOYEE	7	true	EMP_ID
 
+# --- firebird_attach_sql() — view-based "attach" ----------------------------
+
+# First emitted statement is the CREATE SCHEMA, all others are CREATE VIEW.
+query II
+WITH t AS (SELECT row_number() OVER () AS rn, sql FROM firebird_attach_sql('${FIREBIRD_TEST_DB}', 'fb'))
+SELECT (rn = 1 AND sql LIKE 'CREATE SCHEMA%')   AS schema_first,
+       (rn > 1  AND sql LIKE 'CREATE OR REPLACE VIEW%') AS rest_are_views
+  FROM t WHERE rn IN (1, 2);
+----
+true	false
+false	true
+
+# Every CREATE VIEW wraps a firebird_scan call.
+query I
+SELECT COUNT(*) > 0 FROM firebird_attach_sql('${FIREBIRD_TEST_DB}', 'fb')
+ WHERE sql LIKE '%firebird_scan%' AND sql LIKE '%EMPLOYEE%';
+----
+true
+
+# Emitted SQL is well-formed: ends with `;`, references the requested
+# schema name and a real Firebird table.
+query III
+WITH t AS (SELECT sql FROM firebird_attach_sql('${FIREBIRD_TEST_DB}', 'fb'))
+SELECT bool_and(sql LIKE '%;'),
+       bool_or (sql LIKE '%fb"."EMPLOYEE"%'),
+       bool_and(sql LIKE 'CREATE SCHEMA%' OR sql LIKE 'CREATE OR REPLACE VIEW%')
+  FROM t;
+----
+true	true	true
+
+# End-to-end works in the CLI (verified by hand: `COPY … TO 'attach.sql'`
+# followed by `.read attach.sql`, then SELECT from fb.EMPLOYEE returns
+# the same rows as firebird_scan(... EMPLOYEE)). The .read step is a
+# CLI dot-command that the sqllogictest harness doesn't execute, so we
+# stop the automated test before .read here.
+
 # --- Error paths ------------------------------------------------------------
 
 # Unknown table — bind should fail with a clear message.

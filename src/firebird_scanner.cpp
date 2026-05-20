@@ -596,6 +596,150 @@ TableFunction GetFirebirdTablesFunction() {
 }
 
 // ---------------------------------------------------------------------------
+//  firebird_attach_sql(connection_string [, target_schema='fb'])
+// ---------------------------------------------------------------------------
+//
+// Returns the DDL needed to "attach" a Firebird database without writing
+// a full StorageExtension. The function does no side effects — it just
+// emits one row per CREATE statement: the CREATE SCHEMA first, then one
+// CREATE OR REPLACE VIEW per user table that wraps firebird_scan().
+//
+// Usage in the DuckDB CLI:
+//
+//   COPY (
+//     SELECT sql FROM firebird_attach_sql('firebird://…', 'fb')
+//   ) TO 'attach.sql' (FORMAT 'csv', HEADER false, QUOTE '');
+//   .read attach.sql
+//
+// or one-shot from the shell:
+//
+//   duckdb -c "SELECT sql FROM firebird_attach_sql('…', 'fb')" | duckdb my.db
+//
+// Direct side-effect execution from inside a table function is unsafe in
+// DuckDB (nested ctx.Query() deadlocks the client lock), so we deliver
+// the DDL as data and let the user route it through their normal SQL
+// execution path.
+
+struct FirebirdAttachBindData : public TableFunctionData {
+    std::string connection_string;
+    FirebirdConnectionInfo conn_info;
+    std::string target_schema = "fb";
+    bool overwrite = true;
+};
+
+struct FirebirdAttachGlobalState : public GlobalTableFunctionState {
+    std::vector<std::string> stmts;
+    idx_t cursor = 0;
+    idx_t MaxThreads() const override { return 1; }
+};
+
+// SQL-quote a single-quoted string literal (doubles embedded quotes).
+static std::string SqlString(const std::string &s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    out.push_back('\'');
+    for (char c : s) { if (c == '\'') out.push_back('\''); out.push_back(c); }
+    out.push_back('\'');
+    return out;
+}
+
+static unique_ptr<FunctionData> FirebirdAttachBind(ClientContext &,
+                                                   TableFunctionBindInput &input,
+                                                   vector<LogicalType> &return_types,
+                                                   vector<string> &names) {
+    if (input.inputs.empty()) {
+        throw BinderException("firebird_attach_sql(connection_string [, schema='fb'])");
+    }
+    auto bind = make_uniq<FirebirdAttachBindData>();
+    bind->connection_string = input.inputs[0].ToString();
+    bind->conn_info = FirebirdConnectionInfo::Parse(bind->connection_string);
+    if (input.inputs.size() >= 2) {
+        bind->target_schema = input.inputs[1].ToString();
+    }
+    for (auto &kv : input.named_parameters) {
+        if      (kv.first == "user")      bind->conn_info.user     = kv.second.ToString();
+        else if (kv.first == "password")  bind->conn_info.password = kv.second.ToString();
+        else if (kv.first == "charset")   bind->conn_info.charset  = kv.second.ToString();
+        else if (kv.first == "role")      bind->conn_info.role     = kv.second.ToString();
+        else if (kv.first == "dialect")   bind->conn_info.dialect  =
+            static_cast<int>(kv.second.GetValue<int32_t>());
+        else if (kv.first == "schema")    bind->target_schema      = kv.second.ToString();
+        else if (kv.first == "overwrite") bind->overwrite          = kv.second.GetValue<bool>();
+    }
+    names = {"sql"};
+    return_types = {LogicalType::VARCHAR};
+    return std::move(bind);
+}
+
+static unique_ptr<GlobalTableFunctionState> FirebirdAttachInitGlobal(
+    ClientContext &, TableFunctionInitInput &input) {
+    auto &bind = input.bind_data->Cast<FirebirdAttachBindData>();
+    auto gstate = make_uniq<FirebirdAttachGlobalState>();
+
+    // List user tables (filter system tables, views, GTTs).
+    FirebirdConnection conn(bind.conn_info);
+    std::vector<std::string> tables;
+    {
+        auto cur = conn.OpenCursor(
+            "SELECT TRIM(r.RDB$RELATION_NAME) "
+            "  FROM RDB$RELATIONS r "
+            " WHERE r.RDB$SYSTEM_FLAG = 0 "
+            "   AND (r.RDB$RELATION_TYPE = 0 OR r.RDB$RELATION_TYPE IS NULL) "
+            " ORDER BY r.RDB$RELATION_NAME");
+        while (cur->Fetch()) tables.push_back(cur->GetText(0));
+    }
+
+    // Each emitted row is one self-contained statement, terminated with
+    // `;` so the user can `.read` the result without further processing.
+    gstate->stmts.push_back(
+        "CREATE SCHEMA IF NOT EXISTS " + QuoteIdent(bind.target_schema) + ";");
+
+    const std::string verb = bind.overwrite
+        ? "CREATE OR REPLACE VIEW "
+        : "CREATE VIEW IF NOT EXISTS ";
+    for (auto &tbl : tables) {
+        std::ostringstream ddl;
+        ddl << verb
+            << QuoteIdent(bind.target_schema) << "." << QuoteIdent(tbl)
+            << " AS SELECT * FROM firebird_scan("
+            << SqlString(bind.connection_string) << ", "
+            << SqlString(tbl) << ");";
+        gstate->stmts.push_back(ddl.str());
+    }
+    return std::move(gstate);
+}
+
+static void FirebirdAttachFunction(ClientContext &, TableFunctionInput &data,
+                                   DataChunk &output) {
+    auto &gstate = data.global_state->Cast<FirebirdAttachGlobalState>();
+    const idx_t target = STANDARD_VECTOR_SIZE;
+    idx_t row = 0;
+    while (row < target && gstate.cursor < gstate.stmts.size()) {
+        FlatVector::GetData<string_t>(output.data[0])[row] =
+            StringVector::AddString(output.data[0], gstate.stmts[gstate.cursor++]);
+        ++row;
+    }
+    output.SetCardinality(row);
+}
+
+TableFunction GetFirebirdAttachFunction() {
+    TableFunction fn("firebird_attach_sql",
+                     {LogicalType::VARCHAR},
+                     FirebirdAttachFunction,
+                     FirebirdAttachBind,
+                     FirebirdAttachInitGlobal);
+    fn.varargs = LogicalType::VARCHAR;            // optional positional schema name
+    fn.named_parameters["user"]      = LogicalType::VARCHAR;
+    fn.named_parameters["password"]  = LogicalType::VARCHAR;
+    fn.named_parameters["charset"]   = LogicalType::VARCHAR;
+    fn.named_parameters["role"]      = LogicalType::VARCHAR;
+    fn.named_parameters["dialect"]   = LogicalType::INTEGER;
+    fn.named_parameters["schema"]    = LogicalType::VARCHAR;
+    fn.named_parameters["overwrite"] = LogicalType::BOOLEAN;
+    return fn;
+}
+
+// ---------------------------------------------------------------------------
 //  Registration.
 // ---------------------------------------------------------------------------
 TableFunction GetFirebirdScanFunction() {

@@ -96,6 +96,28 @@ SELECT * FROM firebird_tables('firebird://…');
 -- DEPT       |            3 | false | NULL
 ```
 
+### Lightweight "attach": query every table as `schema.table`
+
+`firebird_attach_sql` emits the DDL needed to create a CREATE SCHEMA + one
+CREATE OR REPLACE VIEW per Firebird table. After running the DDL, every
+Firebird table is reachable through the local DuckDB catalog — no
+`firebird_scan(...)` boilerplate per query:
+
+```sql
+-- 1. Generate the DDL.
+COPY (SELECT sql FROM firebird_attach_sql('firebird://…', 'fb'))
+   TO 'fb_attach.sql' (FORMAT 'csv', HEADER false, QUOTE '');
+-- 2. Run it.
+.read fb_attach.sql
+-- 3. Query as if everything were local. Projection + filter pushdown
+--    still reach the firebird_scan call wrapped by the view.
+SELECT * FROM fb."EMPLOYEE" WHERE DEPT_NO = '600';
+```
+
+A real `ATTACH 'fb://…' AS fb (TYPE firebird)` (full `StorageExtension`) is
+on the roadmap; the view-based recipe above covers the same federated-
+read use case in the meantime.
+
 ## Build
 
 This follows the standard DuckDB out-of-tree extension layout.
@@ -129,6 +151,7 @@ ls build/release/extension/firebird/firebird.duckdb_extension
 |---|---|
 | `firebird_scan(conn, table)`                            | ✅ |
 | `firebird_tables(conn)` — list user tables + PK info    | ✅ |
+| `firebird_attach_sql(conn[, schema])` — DDL for view-based attach | ✅ |
 | Named parameter overrides (user / password / charset / role / dialect / **partitions**) | ✅ |
 | Projection pushdown                                     | ✅ |
 | Filter pushdown — `=`, `<>`, `<`, `>`, `<=`, `>=`, `AND`, `OR`, `IS NULL`, `BETWEEN`, **`IN(…)`**, optional-filter unwrap | ✅ |
