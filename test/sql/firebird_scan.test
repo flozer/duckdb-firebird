@@ -88,6 +88,24 @@ SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE') WHERE ACTI
 ----
 1
 
+# IN list — translated to `col IN (a, b)` SQL on the Firebird side.
+query II
+SELECT EMP_ID, EMP_NAME FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE DEPT_NO IN ('600','900') ORDER BY EMP_ID;
+----
+1	Alice Andersson
+2	Bob Brown
+3	Carlos Chen
+4	Diana Davis
+
+# IN with mismatched value type — should still return correct rows
+# (DuckDB will re-evaluate above the scan if pushdown failed).
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE EMP_ID IN (1, 3, 5);
+----
+3
+
 # --- Aggregation on top of the scan ----------------------------------------
 
 query III
@@ -151,6 +169,16 @@ query I
 SELECT SUM(EMP_ID) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE', partitions=4);
 ----
 15
+
+# --- firebird_tables() — discovery -----------------------------------------
+
+# EMPLOYEE is present, has 7 columns, PK on EMP_ID.
+query IIII
+SELECT table_name, column_count, has_pk, pk_column
+  FROM firebird_tables('${FIREBIRD_TEST_DB}')
+ WHERE table_name = 'EMPLOYEE';
+----
+EMPLOYEE	7	true	EMP_ID
 
 # --- Error paths ------------------------------------------------------------
 

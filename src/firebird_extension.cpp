@@ -10,6 +10,7 @@ namespace duckdb {
 
 static void LoadInternal(ExtensionLoader &loader) {
     loader.RegisterFunction(GetFirebirdScanFunction());
+    loader.RegisterFunction(GetFirebirdTablesFunction());
 }
 
 void FirebirdExtension::Load(ExtensionLoader &loader) {

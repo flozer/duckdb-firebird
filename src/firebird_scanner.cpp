@@ -469,6 +469,133 @@ static void FirebirdScanFunction(ClientContext &ctx,
 }
 
 // ---------------------------------------------------------------------------
+//  firebird_tables(connection_string) — discovery table function
+// ---------------------------------------------------------------------------
+//
+// Returns one row per *user* table in the Firebird database, with the
+// column count and a flag indicating whether we'd parallelize a scan
+// against it. This is the "where do I start?" function for users
+// pointed at an unfamiliar legacy database.
+
+struct FirebirdTablesBindData : public TableFunctionData {
+    FirebirdConnectionInfo conn_info;
+};
+
+struct FirebirdTablesRow {
+    std::string table_name;
+    int32_t column_count = 0;
+    bool has_pk = false;
+    std::string pk_column;          // empty when has_pk is false
+};
+
+struct FirebirdTablesGlobalState : public GlobalTableFunctionState {
+    std::vector<FirebirdTablesRow> rows;
+    idx_t cursor = 0;
+    idx_t MaxThreads() const override { return 1; }
+};
+
+static unique_ptr<FunctionData> FirebirdTablesBind(ClientContext &,
+                                                   TableFunctionBindInput &input,
+                                                   vector<LogicalType> &return_types,
+                                                   vector<string> &names) {
+    if (input.inputs.empty()) {
+        throw BinderException("firebird_tables(connection_string) "
+                              "requires the connection string as a positional argument");
+    }
+    auto bind = make_uniq<FirebirdTablesBindData>();
+    bind->conn_info = FirebirdConnectionInfo::Parse(input.inputs[0].ToString());
+    for (auto &kv : input.named_parameters) {
+        if      (kv.first == "user")     bind->conn_info.user     = kv.second.ToString();
+        else if (kv.first == "password") bind->conn_info.password = kv.second.ToString();
+        else if (kv.first == "charset")  bind->conn_info.charset  = kv.second.ToString();
+        else if (kv.first == "role")     bind->conn_info.role     = kv.second.ToString();
+        else if (kv.first == "dialect")  bind->conn_info.dialect  =
+            static_cast<int>(kv.second.GetValue<int32_t>());
+    }
+    names = {"table_name", "column_count", "has_pk", "pk_column"};
+    return_types = {LogicalType::VARCHAR, LogicalType::INTEGER,
+                    LogicalType::BOOLEAN, LogicalType::VARCHAR};
+    return std::move(bind);
+}
+
+static unique_ptr<GlobalTableFunctionState> FirebirdTablesInitGlobal(
+    ClientContext &, TableFunctionInitInput &input) {
+    auto &bind = input.bind_data->Cast<FirebirdTablesBindData>();
+    auto gstate = make_uniq<FirebirdTablesGlobalState>();
+
+    FirebirdConnection conn(bind.conn_info);
+
+    // One query gives us name + column count + PK column (where present).
+    // System / temp / view filtering: RDB$SYSTEM_FLAG = 0 selects user
+    // tables; RDB$RELATION_TYPE 0 = persistent table (other values are
+    // views, GTTs, etc.). We only return scannable tables.
+    const std::string sql =
+        "SELECT TRIM(r.RDB$RELATION_NAME) AS NAME, "
+        "       (SELECT COUNT(*) FROM RDB$RELATION_FIELDS rf "
+        "          WHERE rf.RDB$RELATION_NAME = r.RDB$RELATION_NAME) AS CC, "
+        "       (SELECT TRIM(seg.RDB$FIELD_NAME) "
+        "          FROM RDB$INDICES ri "
+        "          JOIN RDB$RELATION_CONSTRAINTS rc ON ri.RDB$INDEX_NAME = rc.RDB$INDEX_NAME "
+        "          JOIN RDB$INDEX_SEGMENTS seg ON seg.RDB$INDEX_NAME = ri.RDB$INDEX_NAME "
+        "         WHERE ri.RDB$RELATION_NAME = r.RDB$RELATION_NAME "
+        "           AND rc.RDB$CONSTRAINT_TYPE = 'PRIMARY KEY' "
+        "         ROWS 1) AS PK "
+        "  FROM RDB$RELATIONS r "
+        " WHERE r.RDB$SYSTEM_FLAG = 0 "
+        "   AND (r.RDB$RELATION_TYPE = 0 OR r.RDB$RELATION_TYPE IS NULL) "
+        " ORDER BY r.RDB$RELATION_NAME";
+
+    auto cursor = conn.OpenCursor(sql);
+    while (cursor->Fetch()) {
+        FirebirdTablesRow row;
+        row.table_name = cursor->GetText(0);
+        row.column_count = cursor->IsNull(1) ? 0 : cursor->GetLong(1);
+        if (!cursor->IsNull(2)) {
+            row.has_pk = true;
+            row.pk_column = cursor->GetText(2);
+        }
+        gstate->rows.push_back(std::move(row));
+    }
+    return std::move(gstate);
+}
+
+static void FirebirdTablesFunction(ClientContext &, TableFunctionInput &data,
+                                   DataChunk &output) {
+    auto &gstate = data.global_state->Cast<FirebirdTablesGlobalState>();
+    const idx_t target = STANDARD_VECTOR_SIZE;
+    idx_t row = 0;
+    while (row < target && gstate.cursor < gstate.rows.size()) {
+        const auto &r = gstate.rows[gstate.cursor++];
+        FlatVector::GetData<string_t>(output.data[0])[row] =
+            StringVector::AddString(output.data[0], r.table_name);
+        FlatVector::GetData<int32_t>(output.data[1])[row] = r.column_count;
+        FlatVector::GetData<bool>(output.data[2])[row]    = r.has_pk;
+        if (r.has_pk) {
+            FlatVector::GetData<string_t>(output.data[3])[row] =
+                StringVector::AddString(output.data[3], r.pk_column);
+        } else {
+            FlatVector::SetNull(output.data[3], row, true);
+        }
+        ++row;
+    }
+    output.SetCardinality(row);
+}
+
+TableFunction GetFirebirdTablesFunction() {
+    TableFunction fn("firebird_tables",
+                     {LogicalType::VARCHAR},
+                     FirebirdTablesFunction,
+                     FirebirdTablesBind,
+                     FirebirdTablesInitGlobal);
+    fn.named_parameters["user"]     = LogicalType::VARCHAR;
+    fn.named_parameters["password"] = LogicalType::VARCHAR;
+    fn.named_parameters["charset"]  = LogicalType::VARCHAR;
+    fn.named_parameters["role"]     = LogicalType::VARCHAR;
+    fn.named_parameters["dialect"]  = LogicalType::INTEGER;
+    return fn;
+}
+
+// ---------------------------------------------------------------------------
 //  Registration.
 // ---------------------------------------------------------------------------
 TableFunction GetFirebirdScanFunction() {

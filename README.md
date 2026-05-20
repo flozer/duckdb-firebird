@@ -73,7 +73,27 @@ SELECT * FROM firebird_scan('/data/prod.fdb', 'EMPLOYEE',
                             password='secret',
                             charset='WIN1252',
                             role='READER',
-                            dialect=3);
+                            dialect=3,
+                            partitions=4);
+```
+
+- `partitions` — force the PK-range parallelism level. `0` (default) auto-
+  picks (conservative: only kicks in above ~4 M rows). `1` forces serial
+  and skips the PK probe entirely (best for interactive queries on small
+  tables). `N>=2` partitions the PK range explicitly — useful on remote
+  Firebird or Classic / SuperClassic deployments where parallelism is
+  cheap; counterproductive on local SuperServer where the server
+  scheduler serializes queries.
+
+### Discover the schema
+
+```sql
+-- List user tables, their column counts and primary-key columns:
+SELECT * FROM firebird_tables('firebird://…');
+-- table_name | column_count | has_pk | pk_column
+-- EMPLOYEE   |            7 | true   | EMP_ID
+-- ORDERS     |           12 | true   | ORDER_ID
+-- DEPT       |            3 | false | NULL
 ```
 
 ## Build
@@ -103,20 +123,22 @@ make test_debug
 ls build/release/extension/firebird/firebird.duckdb_extension
 ```
 
-## What's implemented (v0.1 prototype)
+## What's implemented (v0.2)
 
-| Feature                              | Status        |
+| Feature                                                 | Status |
 |---|---|
-| `firebird_scan(conn, table)`         | ✅ Yes        |
-| Named parameter overrides            | ✅ Yes        |
-| Projection pushdown                  | ✅ Yes        |
-| Filter pushdown (=, <>, <, >, <=, >=, AND, OR, IS NULL) | ✅ Yes |
-| LIMIT pushdown                       | 🟡 Plumbed, not wired |
-| Type mapping (numeric, text, date, time, timestamp, blob, decimal) | ✅ Yes |
-| PK-range parallel scan               | ⏳ Designed (`docs/architecture.md`) |
-| Connection pool                      | ⏳ Designed   |
-| `ATTACH 'fb://…' AS fb (TYPE firebird)` | ⏳ Designed |
-| Stable C extension ABI               | ⏳ v0.2       |
+| `firebird_scan(conn, table)`                            | ✅ |
+| `firebird_tables(conn)` — list user tables + PK info    | ✅ |
+| Named parameter overrides (user / password / charset / role / dialect / **partitions**) | ✅ |
+| Projection pushdown                                     | ✅ |
+| Filter pushdown — `=`, `<>`, `<`, `>`, `<=`, `>=`, `AND`, `OR`, `IS NULL`, `BETWEEN`, **`IN(…)`**, optional-filter unwrap | ✅ |
+| PK-range parallel scan (opt-in via `partitions=N`)      | ✅ |
+| Type mapping — INTEGER / VARCHAR / DECIMAL(scale) / DATE / TIMESTAMP / TIME / BOOLEAN / BLOB SUB_TYPE 1 → VARCHAR / BLOB | ✅ |
+| End-to-end test fixture in CI (Linux + real Firebird 3) | ✅ |
+| Windows x64 build via GitHub Actions                    | ✅ |
+| LIMIT pushdown                                          | 🟡 partial (builder accepts limit; planner hook tbd) |
+| `ATTACH 'fb://…' AS fb (TYPE firebird)`                 | ⏳ next |
+| Stable C extension ABI                                  | ⏳ next |
 
 ## Repository layout
 

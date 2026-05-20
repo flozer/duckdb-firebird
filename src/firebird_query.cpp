@@ -7,7 +7,9 @@
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
 #include "duckdb/planner/filter/constant_filter.hpp"
+#include "duckdb/planner/filter/in_filter.hpp"
 #include "duckdb/planner/filter/null_filter.hpp"
+#include "duckdb/planner/filter/optional_filter.hpp"
 
 namespace duckdb {
 
@@ -120,6 +122,34 @@ static bool TranslateFilter(const std::string &column_name,
         }
         out = acc;
         return !out.empty();
+    }
+    case TableFilterType::IN_FILTER: {
+        auto &c = filter.Cast<InFilter>();
+        if (c.values.empty()) {
+            // `WHERE col IN ()` is unsatisfiable — emit something that
+            // guarantees zero rows without round-tripping every literal.
+            out = "(1=0)";
+            return true;
+        }
+        std::string acc = column_name + " IN (";
+        for (size_t i = 0; i < c.values.size(); ++i) {
+            std::string lit;
+            if (!FormatLiteral(c.values[i], lit)) return false;
+            if (i) acc += ", ";
+            acc += lit;
+        }
+        acc += ")";
+        out = acc;
+        return true;
+    }
+    case TableFilterType::OPTIONAL_FILTER: {
+        // "Optional" means DuckDB will still re-check this filter, so
+        // pushing it down is a pure win when we *can*. Unwrap and try the
+        // child; if we can't translate it, just signal "not pushed" — no
+        // correctness impact (DuckDB still applies it).
+        auto &c = filter.Cast<OptionalFilter>();
+        if (!c.child_filter) return false;
+        return TranslateFilter(column_name, *c.child_filter, out);
     }
     default:
         return false;  // unsupported: re-evaluated in DuckDB
