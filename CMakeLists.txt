@@ -22,6 +22,7 @@ set(EXTENSION_SOURCES
     src/firebird_types.cpp
     src/firebird_query.cpp
     src/firebird_scanner.cpp
+    src/firebird_storage.cpp
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

@@ -170,17 +170,26 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
     sql << "SELECT ";
 
     // --- projection pushdown -------------------------------------------------
+    //
+    // Important: we always emit *exactly one SELECT expression per entry
+    // in column_ids*, in the same order. Otherwise the scan-time loop
+    // (output column i ⇄ Firebird column i) gets misaligned. For
+    // COLUMN_IDENTIFIER_ROW_ID we don't have a real rowid in Firebird, so
+    // we emit a typed NULL placeholder. BIGINT matches DuckDB's
+    // virtual-rowid type and keeps the cell shape valid for COUNT(*)-
+    // style queries that project only the rowid.
     if (column_ids.empty()) {
         sql << "*";
     } else {
-        bool first = true;
-        for (auto cid : column_ids) {
-            if (cid == COLUMN_IDENTIFIER_ROW_ID) continue;
-            if (!first) sql << ", ";
-            sql << QuoteIdent(all_column_names[cid]);
-            first = false;
+        for (size_t i = 0; i < column_ids.size(); ++i) {
+            if (i) sql << ", ";
+            auto cid = column_ids[i];
+            if (cid == COLUMN_IDENTIFIER_ROW_ID) {
+                sql << "CAST(NULL AS BIGINT)";
+            } else {
+                sql << QuoteIdent(all_column_names[cid]);
+            }
         }
-        if (first) sql << "1";  // all projections were row-id; emit a stub
     }
 
     sql << " FROM " << QuoteIdent(table_name);

@@ -1,0 +1,128 @@
+# name: test/sql/firebird_attach.test
+# description: native ATTACH ... AS x (TYPE firebird) support
+# group: [firebird]
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+require-env ISC_PASSWORD
+
+# --- Attach ----------------------------------------------------------------
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird);
+
+# Information schema sees the Firebird tables.
+query I
+SELECT COUNT(*) > 0 FROM information_schema.tables
+ WHERE table_catalog = 'fb' AND table_name = 'EMPLOYEE';
+----
+true
+
+# Only the "main" schema is exposed.
+query I
+SELECT schema_name FROM information_schema.schemata WHERE catalog_name = 'fb';
+----
+main
+
+# DESCRIBE surfaces the real Firebird column shape, not a placeholder.
+query III
+SELECT column_name, data_type, is_nullable
+  FROM information_schema.columns
+ WHERE table_catalog = 'fb' AND table_name = 'EMPLOYEE'
+ ORDER BY ordinal_position;
+----
+EMP_ID	INTEGER	YES
+EMP_NAME	VARCHAR	YES
+DEPT_NO	VARCHAR	YES
+SALARY	DECIMAL(18,2)	YES
+HIRE_DATE	DATE	YES
+ACTIVE	BOOLEAN	YES
+NOTE	VARCHAR	YES
+
+# --- Reads through the attached catalog ------------------------------------
+
+query II
+SELECT EMP_ID, EMP_NAME FROM fb.main.EMPLOYEE WHERE DEPT_NO = '600' ORDER BY EMP_ID;
+----
+1	Alice Andersson
+2	Bob Brown
+4	Diana Davis
+
+# COUNT(*) hits the rowid-only projection path — guards against the
+# INT32/INT64 type-mismatch regression that bit the first ATTACH cut.
+query I
+SELECT COUNT(*) FROM fb.main.EMPLOYEE;
+----
+5
+
+# Case-insensitive resolution: identifier comes in lowercased / quoted /
+# upper, all hit the same table.
+query I
+SELECT COUNT(*) FROM fb.main.employee;
+----
+5
+
+query I
+SELECT COUNT(*) FROM fb.main."EMPLOYEE";
+----
+5
+
+# GROUP BY across the bridge — confirms the table is fully usable in
+# DuckDB's executor, not just trivial SELECTs.
+query II
+SELECT DEPT_NO, COUNT(*)
+  FROM fb.main.EMPLOYEE
+ GROUP BY DEPT_NO
+ ORDER BY DEPT_NO;
+----
+600	3
+700	1
+900	1
+
+# --- Federated join with a local TEMP table --------------------------------
+
+statement ok
+CREATE TEMP TABLE dept(d VARCHAR, label VARCHAR);
+
+statement ok
+INSERT INTO dept VALUES ('600','Engineering'),('700','Sales'),('900','Ops');
+
+query II
+SELECT e.EMP_NAME, d.label
+  FROM fb.main.EMPLOYEE e
+  JOIN dept d ON e.DEPT_NO = d.d
+ ORDER BY e.EMP_ID;
+----
+Alice Andersson	Engineering
+Bob Brown	Engineering
+Carlos Chen	Ops
+Diana Davis	Engineering
+Erik Eklund	Sales
+
+# --- Read-only enforcement --------------------------------------------------
+
+statement error
+CREATE TABLE fb.main.NEW_TABLE (id INT);
+----
+read-only
+
+statement error
+DROP TABLE fb.main.EMPLOYEE;
+----
+
+# --- Schema lookup errors give a helpful message ---------------------------
+
+statement error
+SELECT * FROM fb.public.EMPLOYEE LIMIT 1;
+----
+
+# --- Detach restores clean state -------------------------------------------
+
+statement ok
+DETACH fb;
+
+statement error
+SELECT * FROM fb.main.EMPLOYEE LIMIT 1;
+----

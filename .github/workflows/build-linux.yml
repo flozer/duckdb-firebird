@@ -102,6 +102,7 @@ jobs:
       - name: Run SQL test suite against real Firebird
         run: |
           ./build/release/test/unittest test/sql/firebird_scan.test
+          ./build/release/test/unittest test/sql/firebird_attach.test
 
       - name: Upload extension artifact (linux_amd64)
         uses: actions/upload-artifact@v4

@@ -96,7 +96,42 @@ SELECT * FROM firebird_tables('firebird://…');
 -- DEPT       |            3 | false | NULL
 ```
 
-### Lightweight "attach": query every table as `schema.table`
+### Native ATTACH
+
+```sql
+ATTACH 'firebird://SYSDBA:masterkey@host/path/db.fdb' AS fb (TYPE firebird);
+
+-- Every Firebird user table is now reachable through DuckDB's catalog:
+SELECT * FROM fb.main.EMPLOYEE WHERE DEPT_NO = '600';
+SELECT COUNT(*) FROM fb.main.employee;          -- case-insensitive
+DESCRIBE fb.main.EMPLOYEE;                       -- DuckDB sees real columns
+
+-- Federated:
+SELECT e.EMP_NAME, d.label
+  FROM fb.main.EMPLOYEE e
+  JOIN read_parquet('s3://lake/dept.parquet') d ON e.DEPT_NO = d.dept_no;
+
+DETACH fb;
+```
+
+The catalog is read-only: `CREATE TABLE`, `INSERT`, `UPDATE`, `DELETE` and
+`ALTER` against `fb.*` all raise `NotImplemented`. Connection options
+(`user`, `password`, `charset`, `role`, `dialect`) can be supplied via the
+URL or via attach options:
+
+```sql
+ATTACH 'C:/data/prod.fdb' AS fb (
+    TYPE firebird,
+    user 'analytics',
+    password 'secret',
+    charset 'WIN1252');
+```
+
+Only the `main` schema is exposed (Firebird's flat-table model). Table
+names round-trip case-insensitively — `fb.main.EMPLOYEE`, `fb.main.employee`
+and `fb.main."EMPLOYEE"` all resolve to the same table.
+
+### Lightweight "attach" via DDL emission
 
 `firebird_attach_sql` emits the DDL needed to create a CREATE SCHEMA + one
 CREATE OR REPLACE VIEW per Firebird table. After running the DDL, every
@@ -152,6 +187,7 @@ ls build/release/extension/firebird/firebird.duckdb_extension
 | `firebird_scan(conn, table)`                            | ✅ |
 | `firebird_tables(conn)` — list user tables + PK info    | ✅ |
 | `firebird_attach_sql(conn[, schema])` — DDL for view-based attach | ✅ |
+| **`ATTACH 'firebird://…' AS fb (TYPE firebird)`** — native catalog | ✅ |
 | Named parameter overrides (user / password / charset / role / dialect / **partitions**) | ✅ |
 | Projection pushdown                                     | ✅ |
 | Filter pushdown — `=`, `<>`, `<`, `>`, `<=`, `>=`, `AND`, `OR`, `IS NULL`, `BETWEEN`, **`IN(…)`**, optional-filter unwrap | ✅ |

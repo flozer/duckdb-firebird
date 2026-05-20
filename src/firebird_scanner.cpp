@@ -26,44 +26,11 @@ namespace duckdb {
 // PK probe runs once at bind time; the partition queue lives on the global
 // state. Tables without a usable PK collapse to a single partition (= the
 // pre-parallel behaviour).
-//
-// Why "equal numeric width" instead of "equal row count"? It only requires
-// one MIN/MAX query (cheap, sargable in Firebird), and PK distributions are
-// usually dense enough in practice that worker imbalance stays under 2×.
-// Row-count balancing would need either NTILE-style probing (multi-query)
-// or NDV statistics from RDB$ — punted to a later iteration.
-
-struct PrimaryKeyInfo {
-    std::string column;
-    int64_t min_value = 0;
-    int64_t max_value = 0;
-};
 
 struct PartitionSpec {
     // Optional filter applied to the cursor for this partition. Empty for
     // the "no PK" / single-partition case, which scans the whole table.
     std::string where_clause;
-};
-
-// ---------------------------------------------------------------------------
-//  Bind data
-// ---------------------------------------------------------------------------
-struct FirebirdBindData : public TableFunctionData {
-    FirebirdConnectionInfo conn_info;
-    std::string table_name;
-
-    // duckdb::vector subclasses std::vector but isn't assignable from it,
-    // so we mirror the type used by DuckDB's bind callback outputs.
-    duckdb::vector<std::string> column_names;
-    duckdb::vector<LogicalType> column_types;
-
-    // Optional — present only if the table has a single-column numeric PK.
-    std::unique_ptr<PrimaryKeyInfo> pk;
-
-    // User-supplied override: positive value forces exactly that many PK
-    // partitions (capped by the row range), 1 disables parallelism and
-    // also skips the PK probe, 0 / unset means auto-pick.
-    idx_t partitions_override = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -110,10 +77,10 @@ struct FirebirdLocalState : public LocalTableFunctionState {
 // for every column. We use the same JOIN-with-RDB$FIELDS shape as the
 // peregrine extractor: one round-trip per table.
 
-static void LoadTableSchema(FirebirdConnection &conn,
-                            const std::string &table_name,
-                            duckdb::vector<std::string> &out_names,
-                            duckdb::vector<LogicalType> &out_types) {
+void LoadTableSchema(FirebirdConnection &conn,
+                     const std::string &table_name,
+                     duckdb::vector<std::string> &out_names,
+                     duckdb::vector<LogicalType> &out_types) {
     // Firebird stores identifiers upper-cased unless quoted at creation; we
     // upper-case here so callers can pass either form.
     std::string upper = table_name;
@@ -182,7 +149,7 @@ static void LoadTableSchema(FirebirdConnection &conn,
 // (missing privileges, special system tables, MON$ unavailable) and we
 // never want a PK probe to break a working scan.
 
-static std::unique_ptr<PrimaryKeyInfo> ProbePrimaryKey(
+std::unique_ptr<PrimaryKeyInfo> ProbePrimaryKey(
     FirebirdConnection &conn,
     const std::string &table,
     const duckdb::vector<std::string> &all_column_names,

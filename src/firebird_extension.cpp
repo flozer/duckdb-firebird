@@ -2,8 +2,10 @@
 
 #include "firebird_extension.hpp"
 #include "firebird_scanner.hpp"
+#include "firebird_storage.hpp"
 
 #include "duckdb.hpp"
+#include "duckdb/main/database.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
 namespace duckdb {
@@ -12,6 +14,12 @@ static void LoadInternal(ExtensionLoader &loader) {
     loader.RegisterFunction(GetFirebirdScanFunction());
     loader.RegisterFunction(GetFirebirdTablesFunction());
     loader.RegisterFunction(GetFirebirdAttachFunction());
+
+    // Register the StorageExtension so DuckDB knows how to handle
+    //   ATTACH 'firebird://…' AS fb (TYPE firebird);
+    auto &db = loader.GetDatabaseInstance();
+    auto &config = DBConfig::GetConfig(db);
+    config.storage_extensions["firebird"] = GetFirebirdStorageExtension();
 }
 
 void FirebirdExtension::Load(ExtensionLoader &loader) {
