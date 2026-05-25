@@ -216,6 +216,25 @@ true	true	true
 # CLI dot-command that the sqllogictest harness doesn't execute, so we
 # stop the automated test before .read here.
 
+# --- Views (RDB$RELATION_TYPE = 1) -----------------------------------------
+# Views show up alongside tables and scan exactly like a base table.
+
+query I
+SELECT kind FROM firebird_tables('${FIREBIRD_TEST_DB}')
+ WHERE table_name = 'V_ACTIVE_EMP';
+----
+view
+
+query III
+SELECT EMP_ID, EMP_NAME, DEPT_NO
+  FROM firebird_scan('${FIREBIRD_TEST_DB}', 'V_ACTIVE_EMP')
+ ORDER BY EMP_ID;
+----
+1	Alice Andersson	600
+2	Bob Brown	600
+4	Diana Davis	600
+5	Erik Eklund	700
+
 # --- BLOB binary (SUB_TYPE 0) ----------------------------------------------
 # Verifies the BLOB-read path that doesn't degrade to VARCHAR.
 

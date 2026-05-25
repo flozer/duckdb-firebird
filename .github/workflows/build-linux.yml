@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 env:
-  DUCKDB_VERSION: v1.4.4
+  DUCKDB_VERSION: v1.5.3
 
 jobs:
   build-test:

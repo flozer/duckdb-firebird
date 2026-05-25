@@ -205,7 +205,14 @@ make test_debug
 ls build/release/extension/firebird/firebird.duckdb_extension
 ```
 
-## What's implemented (v0.2)
+## Supported DuckDB versions
+
+Built and tested against **DuckDB v1.5.3** (Variegata). The
+`StorageExtension::Register` API used by the ATTACH path landed in v1.5,
+so this branch targets v1.5.3+. (A v1.4-compatible variant lived earlier
+in the history if you need to pin older.)
+
+## What's implemented (v0.3)
 
 | Feature                                                 | Status |
 |---|---|
@@ -216,6 +223,10 @@ ls build/release/extension/firebird/firebird.duckdb_extension
 | Connection pool + lazy metadata cache (per ATTACH)        | ✅ |
 | Firebird 4 types: HUGEINT (`INT128`), `TIMESTAMP_TZ`, `TIME_TZ`, DECIMAL(38) | ✅ |
 | `row_limit=N` named parameter (Firebird-side `ROWS N`)    | ✅ |
+| **Views** (`RDB$RELATION_TYPE=1`) — scan + ATTACH catalog | ✅ |
+| **External tables** + global temporaries (types 2, 4, 5)  | ✅ |
+| Materialized-view pattern (CTAS from a Firebird view)     | ✅ |
+| Arrow Flight SQL via GizmoSQL — extension is v1.5 ABI compatible | 🟡 (works once GizmoSQL can reach `extensions.duckdb.org` to satisfy its `INSTALL icu;`/`INSTALL spatial;` prelude) |
 | Named parameter overrides (user / password / charset / role / dialect / **partitions**) | ✅ |
 | Projection pushdown                                     | ✅ |
 | Filter pushdown — `=`, `<>`, `<`, `>`, `<=`, `>=`, `AND`, `OR`, `IS NULL`, `BETWEEN`, **`IN(…)`**, optional-filter unwrap | ✅ |
@@ -242,6 +253,48 @@ docs/architecture.md            Design notes + deferred-work plan
 CMakeLists.txt + Makefile       Standard DuckDB extension build
 vcpkg.json                      libfbclient dependency
 ```
+
+## Arrow Flight SQL via GizmoSQL
+
+GizmoSQL is an Arrow Flight SQL server backed by DuckDB. Once it can
+load this extension you can query Firebird from any Flight SQL client
+(JDBC, ADBC, Python, Java, …) without going through DuckDB locally.
+
+The extension binary itself is v1.5 ABI-compatible, which matches the
+DuckDB bundled in `gizmosql_server v1.26.x`. Start it with an init
+script that loads the extension and (optionally) pre-attaches your
+Firebird DB:
+
+```bash
+cat > init.sql <<'EOF'
+SET allow_unsigned_extensions = true;
+LOAD '/path/to/firebird.duckdb_extension';
+ATTACH 'firebird://SYSDBA:pwd@host/path/db.fdb' AS fb (TYPE firebird);
+EOF
+
+GIZMOSQL_PASSWORD='strong-pw' gizmosql_server \
+    --port 31337 \
+    --init-sql-commands-file init.sql
+```
+
+Then connect from any Flight SQL client. With the Python ADBC driver:
+
+```python
+import adbc_driver_flightsql.dbapi
+con = adbc_driver_flightsql.dbapi.connect(
+    "grpc+tcp://localhost:31337",
+    db_kwargs={"username": "gizmosql_user", "password": "strong-pw"})
+cur = con.cursor()
+cur.execute("SELECT * FROM fb.main.EMPLOYEE WHERE DEPT_NO = '600'")
+print(cur.fetchall())
+```
+
+**Caveat**: GizmoSQL's startup unconditionally runs
+`INSTALL icu; INSTALL spatial;`. Networks that can't reach
+`extensions.duckdb.org` will fail before the user `init.sql` is
+processed. Either pre-cache those extensions under
+`~/.duckdb/extensions/v1.5.3/linux_amd64/` or run GizmoSQL in an
+environment with network access to the DuckDB extension repository.
 
 ## Publishing to the community catalog
 

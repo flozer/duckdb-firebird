@@ -493,10 +493,26 @@ struct FirebirdTablesBindData : public TableFunctionData {
 
 struct FirebirdTablesRow {
     std::string table_name;
+    std::string kind;               // "table", "view", "external", or "gtt"
     int32_t column_count = 0;
     bool has_pk = false;
     std::string pk_column;          // empty when has_pk is false
 };
+
+static const char *RelationKindLabel(int rtype) {
+    // RDB$RELATION_TYPE values:
+    //   0 (or NULL)        — persistent table
+    //   1                  — view
+    //   2                  — external table
+    //   3                  — virtual / MON$ (excluded by the WHERE clause)
+    //   4, 5               — global temporary table
+    switch (rtype) {
+    case 1:           return "view";
+    case 2:           return "external";
+    case 4: case 5:   return "gtt";
+    default:          return "table";
+    }
+}
 
 struct FirebirdTablesGlobalState : public GlobalTableFunctionState {
     std::vector<FirebirdTablesRow> rows;
@@ -522,9 +538,9 @@ static unique_ptr<FunctionData> FirebirdTablesBind(ClientContext &,
         else if (kv.first == "dialect")  bind->conn_info.dialect  =
             static_cast<int>(kv.second.GetValue<int32_t>());
     }
-    names = {"table_name", "column_count", "has_pk", "pk_column"};
-    return_types = {LogicalType::VARCHAR, LogicalType::INTEGER,
-                    LogicalType::BOOLEAN, LogicalType::VARCHAR};
+    names = {"table_name", "kind", "column_count", "has_pk", "pk_column"};
+    return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR,
+                    LogicalType::INTEGER, LogicalType::BOOLEAN, LogicalType::VARCHAR};
     return std::move(bind);
 }
 
@@ -535,12 +551,14 @@ static unique_ptr<GlobalTableFunctionState> FirebirdTablesInitGlobal(
 
     FirebirdConnection conn(bind.conn_info);
 
-    // One query gives us name + column count + PK column (where present).
-    // System / temp / view filtering: RDB$SYSTEM_FLAG = 0 selects user
-    // tables; RDB$RELATION_TYPE 0 = persistent table (other values are
-    // views, GTTs, etc.). We only return scannable tables.
+    // One query gives us name + relation kind + column count + PK column.
+    // System tables filtered via SYSTEM_FLAG; we keep persistent tables
+    // (type 0/NULL), views (1), external tables (2), and global
+    // temporaries (4,5). Only MON$ virtual snapshots (type 3) are
+    // intentionally excluded — they're best accessed via direct SQL.
     const std::string sql =
         "SELECT TRIM(r.RDB$RELATION_NAME) AS NAME, "
+        "       COALESCE(r.RDB$RELATION_TYPE, 0) AS RTYPE, "
         "       (SELECT COUNT(*) FROM RDB$RELATION_FIELDS rf "
         "          WHERE rf.RDB$RELATION_NAME = r.RDB$RELATION_NAME) AS CC, "
         "       (SELECT TRIM(seg.RDB$FIELD_NAME) "
@@ -552,17 +570,19 @@ static unique_ptr<GlobalTableFunctionState> FirebirdTablesInitGlobal(
         "         ROWS 1) AS PK "
         "  FROM RDB$RELATIONS r "
         " WHERE r.RDB$SYSTEM_FLAG = 0 "
-        "   AND (r.RDB$RELATION_TYPE = 0 OR r.RDB$RELATION_TYPE IS NULL) "
+        "   AND (r.RDB$RELATION_TYPE IS NULL OR r.RDB$RELATION_TYPE <> 3) "
         " ORDER BY r.RDB$RELATION_NAME";
 
     auto cursor = conn.OpenCursor(sql);
     while (cursor->Fetch()) {
         FirebirdTablesRow row;
         row.table_name = cursor->GetText(0);
-        row.column_count = cursor->IsNull(1) ? 0 : cursor->GetLong(1);
-        if (!cursor->IsNull(2)) {
+        int rtype = cursor->IsNull(1) ? 0 : cursor->GetShort(1);
+        row.kind = RelationKindLabel(rtype);
+        row.column_count = cursor->IsNull(2) ? 0 : cursor->GetLong(2);
+        if (!cursor->IsNull(3)) {
             row.has_pk = true;
-            row.pk_column = cursor->GetText(2);
+            row.pk_column = cursor->GetText(3);
         }
         gstate->rows.push_back(std::move(row));
     }
@@ -578,13 +598,15 @@ static void FirebirdTablesFunction(ClientContext &, TableFunctionInput &data,
         const auto &r = gstate.rows[gstate.cursor++];
         FlatVector::GetData<string_t>(output.data[0])[row] =
             StringVector::AddString(output.data[0], r.table_name);
-        FlatVector::GetData<int32_t>(output.data[1])[row] = r.column_count;
-        FlatVector::GetData<bool>(output.data[2])[row]    = r.has_pk;
+        FlatVector::GetData<string_t>(output.data[1])[row] =
+            StringVector::AddString(output.data[1], r.kind);
+        FlatVector::GetData<int32_t>(output.data[2])[row] = r.column_count;
+        FlatVector::GetData<bool>(output.data[3])[row]    = r.has_pk;
         if (r.has_pk) {
-            FlatVector::GetData<string_t>(output.data[3])[row] =
-                StringVector::AddString(output.data[3], r.pk_column);
+            FlatVector::GetData<string_t>(output.data[4])[row] =
+                StringVector::AddString(output.data[4], r.pk_column);
         } else {
-            FlatVector::SetNull(output.data[3], row, true);
+            FlatVector::SetNull(output.data[4], row, true);
         }
         ++row;
     }
@@ -686,7 +708,8 @@ static unique_ptr<GlobalTableFunctionState> FirebirdAttachInitGlobal(
     auto &bind = input.bind_data->Cast<FirebirdAttachBindData>();
     auto gstate = make_uniq<FirebirdAttachGlobalState>();
 
-    // List user tables (filter system tables, views, GTTs).
+    // List user-visible relations (tables, views, externals, GTTs);
+    // skip MON$ virtual snapshots (type 3) and system tables.
     FirebirdConnection conn(bind.conn_info);
     std::vector<std::string> tables;
     {
@@ -694,7 +717,7 @@ static unique_ptr<GlobalTableFunctionState> FirebirdAttachInitGlobal(
             "SELECT TRIM(r.RDB$RELATION_NAME) "
             "  FROM RDB$RELATIONS r "
             " WHERE r.RDB$SYSTEM_FLAG = 0 "
-            "   AND (r.RDB$RELATION_TYPE = 0 OR r.RDB$RELATION_TYPE IS NULL) "
+            "   AND (r.RDB$RELATION_TYPE IS NULL OR r.RDB$RELATION_TYPE <> 3) "
             " ORDER BY r.RDB$RELATION_NAME");
         while (cur->Fetch()) tables.push_back(cur->GetText(0));
     }

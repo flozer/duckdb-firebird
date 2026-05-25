@@ -7,6 +7,7 @@
 #include "duckdb.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/storage/storage_extension.hpp"
 
 namespace duckdb {
 
@@ -17,9 +18,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 
     // Register the StorageExtension so DuckDB knows how to handle
     //   ATTACH 'firebird://…' AS fb (TYPE firebird);
+    //
+    // The registration entry point varies a little across DuckDB versions:
+    //   v1.4 had `config.storage_extensions[name] = unique_ptr<>;`
+    //   v1.5+ exposes `StorageExtension::Register(config, name, shared_ptr<>)`
+    //          (via DBConfig::GetCallbackManager — the field was made
+    //          private and moved into the callback manager registry).
     auto &db = loader.GetDatabaseInstance();
     auto &config = DBConfig::GetConfig(db);
-    config.storage_extensions["firebird"] = GetFirebirdStorageExtension();
+    auto storage_ext = GetFirebirdStorageExtension();
+    StorageExtension::Register(config, "firebird",
+                               shared_ptr<StorageExtension>(storage_ext.release()));
 }
 
 void FirebirdExtension::Load(ExtensionLoader &loader) {

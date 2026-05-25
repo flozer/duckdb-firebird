@@ -71,6 +71,14 @@ INSERT INTO FILE_STORAGE VALUES (1, 'logo.png',     6, CAST(_ASCII'binary' AS BL
 INSERT INTO FILE_STORAGE VALUES (2, 'empty.dat',    0, NULL);
 INSERT INTO FILE_STORAGE VALUES (3, 'document.bin', 5, CAST(_ASCII'hello'  AS BLOB SUB_TYPE 0));
 COMMIT;
+
+-- View fixture — confirms catalog surfaces RDB$RELATION_TYPE=1 alongside
+-- regular tables, and that the binder/scanner can scan a view exactly
+-- like a base table.
+CREATE OR ALTER VIEW V_ACTIVE_EMP (EMP_ID, EMP_NAME, DEPT_NO) AS
+    SELECT EMP_ID, EMP_NAME, DEPT_NO
+      FROM EMPLOYEE WHERE ACTIVE = TRUE;
+COMMIT;
 EOF
 
 # Make the file world-readable so the test harness (running as a different

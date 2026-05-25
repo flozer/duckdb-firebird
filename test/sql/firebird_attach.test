@@ -151,5 +151,36 @@ SELECT EMP_ID, EMP_NAME FROM fb.main.EMPLOYEE WHERE EMP_ID = 1;
 ----
 1	Alice Andersson
 
+# --- Views via ATTACH ------------------------------------------------------
+# Views (RDB$RELATION_TYPE=1) appear in the attached catalog and scan
+# exactly like regular tables.
+
+query I
+SELECT COUNT(*) FROM information_schema.tables
+ WHERE table_catalog = 'fb' AND table_name = 'V_ACTIVE_EMP';
+----
+1
+
+query III
+SELECT EMP_ID, EMP_NAME, DEPT_NO FROM fb.main.V_ACTIVE_EMP ORDER BY EMP_ID;
+----
+1	Alice Andersson	600
+2	Bob Brown	600
+4	Diana Davis	600
+5	Erik Eklund	700
+
+# Materialized-view pattern via CTAS — once cached locally, queries are
+# free of Firebird round-trips.
+statement ok
+CREATE OR REPLACE TABLE main.mv_active_emp AS SELECT * FROM fb.main.V_ACTIVE_EMP;
+
+query I
+SELECT COUNT(*) FROM main.mv_active_emp;
+----
+4
+
+statement ok
+DROP TABLE main.mv_active_emp;
+
 statement ok
 DETACH fb;

@@ -227,15 +227,20 @@ private:
         auto conn_owned = pool_ ? pool_->Acquire()
                                 : make_uniq<FirebirdConnection>(conn_info_);
         FirebirdConnection &conn = *conn_owned;
-        // User tables only: system_flag=0, persistent (type=0 or NULL for
-        // older Firebird builds that don't populate that column).
+        // User-visible relations: filter system_flag, but include both
+        // persistent tables (type 0 / NULL) AND views (type 1) AND
+        // external tables (type 2) AND global temporaries (4, 5).
+        // The only thing we deliberately drop is the in-memory MON$
+        // virtual snapshots (type 3) — those are best queried directly
+        // through firebird_scan('SELECT * FROM MON$…') and don't belong
+        // in a user-facing catalog.
         std::vector<std::string> table_names;
         {
             auto cur = conn.OpenCursor(
                 "SELECT TRIM(r.RDB$RELATION_NAME) "
                 "  FROM RDB$RELATIONS r "
                 " WHERE r.RDB$SYSTEM_FLAG = 0 "
-                "   AND (r.RDB$RELATION_TYPE = 0 OR r.RDB$RELATION_TYPE IS NULL) "
+                "   AND (r.RDB$RELATION_TYPE IS NULL OR r.RDB$RELATION_TYPE <> 3) "
                 " ORDER BY r.RDB$RELATION_NAME");
             while (cur->Fetch()) table_names.push_back(cur->GetText(0));
         }

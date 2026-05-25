@@ -1,7 +1,7 @@
 name: Build Windows x64
 
 # Builds the firebird.duckdb_extension for Windows x86_64 against
-# DuckDB v1.4.4 and the Firebird 4 client SDK. Triggered on every push
+# DuckDB v1.5.3 and the Firebird 4 client SDK. Triggered on every push
 # to the development branch, and manually via the Actions tab.
 
 on:
@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 env:
-  DUCKDB_VERSION: v1.4.4
+  DUCKDB_VERSION: v1.5.3
   # Default Firebird Windows release. Override via workflow_dispatch input
   # if you need to test against a different client library version.
   FIREBIRD_SDK_URL: https://github.com/FirebirdSQL/firebird/releases/download/v4.0.5/Firebird-4.0.5.3140-0-x64.zip
