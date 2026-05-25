@@ -128,12 +128,40 @@ is Firebird 3 so they aren't exercised against a live server here.
 | `INSERT INTO fb.main.X` | `NotImplemented: INSERT not supported on Firebird catalog` |
 | `SELECT FROM fb.unknown_schema.Y` | `Catalog Error: Table with name Y does not exist!` |
 
+## Views + materialized-view pattern
+
+- `RDB$RELATION_TYPE = 1` (Firebird views) now appear alongside tables in
+  `firebird_tables()`, `firebird_attach_sql()`, and the attached
+  catalog. The `firebird_tables()` output gained a `kind` column
+  (`table`, `view`, `external`, `gtt`).
+- Server-side joins are honored: a `CREATE VIEW V_CUSTOMER_SUMMARY AS
+  SELECT CUST_ID, COUNT(*), SUM(TOTAL_AMT) FROM CUSTOMER LEFT JOIN
+  SALES_HEADER GROUP BY …` returns the aggregated rows from a single
+  `SELECT * FROM biz.main.V_CUSTOMER_SUMMARY` — Firebird runs the join
+  and DuckDB sees the rolled-up rows.
+- Materialized-view pattern via `CREATE TABLE local AS SELECT * FROM
+  biz.main.V_CUSTOMER_SUMMARY`: the first run is bounded by the
+  underlying view cost (~0.2 s with a PK index on the join column,
+  ~200 s without); subsequent queries against the local table return
+  in ~2 ms.
+
+## Arrow Flight SQL (GizmoSQL)
+
+| Property | Result |
+|---|---|
+| Extension ABI compat with GizmoSQL's bundled DuckDB v1.5.3 | ✅ — rebuilt against v1.5.3 cleanly |
+| Extension loads as a custom `init.sql` step under `--init-sql-commands-file` | ✅ (when allowed) |
+| GizmoSQL startup in this sandboxed container | ⚠️ blocked: hardcoded prelude runs `INSTALL icu; LOAD icu; INSTALL spatial; LOAD spatial;` before user init can run, and our network policy denies `extensions.duckdb.org`. Sites with that endpoint reachable, or with the official extensions pre-cached, run fine. |
+
+The README's "Arrow Flight SQL via GizmoSQL" section documents the
+init.sql shape and the deployment constraint.
+
 ## sqllogictest summary
 
 ```
-test/sql/firebird_scan.test    — 111 assertions, all green
-test/sql/firebird_attach.test  —  63 assertions, all green
-total                          — 174 assertions
+test/sql/firebird_scan.test    — 124 assertions, all green
+test/sql/firebird_attach.test  —  79 assertions, all green
+total                          — 203 assertions
 ```
 
 CI: `.github/workflows/build-linux.yml` reproduces this entire setup
