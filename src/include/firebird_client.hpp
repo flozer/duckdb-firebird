@@ -45,6 +45,12 @@ struct FirebirdConnectionInfo {
     static FirebirdConnectionInfo Parse(const std::string &conn_str);
 };
 
+// Throws a BinderException if `charset` would deliver bytes DuckDB's
+// UTF-8-only string vectors can't ingest. UTF8, UTF-8, NONE, OCTETS pass;
+// anything else is rejected with a hint to keep the default UTF8 (Firebird
+// transliterates from the storage charset server-side).
+void ValidateClientCharset(const std::string &charset);
+
 struct FirebirdColumnDesc {
     std::string name;
     int16_t sqltype = 0;           // base type (low bit cleared)

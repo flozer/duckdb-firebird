@@ -216,6 +216,50 @@ true	true	true
 # CLI dot-command that the sqllogictest harness doesn't execute, so we
 # stop the automated test before .read here.
 
+# --- BLOB binary (SUB_TYPE 0) ----------------------------------------------
+# Verifies the BLOB-read path that doesn't degrade to VARCHAR.
+
+# Schema discovery surfaces the binary BLOB column as DuckDB BLOB
+# (not VARCHAR, which is what SUB_TYPE 1 maps to).
+query I
+SELECT typeof(PAYLOAD)
+  FROM firebird_scan('${FIREBIRD_TEST_DB}', 'FILE_STORAGE')
+ WHERE FILE_ID = 1;
+----
+BLOB
+
+# Payload bytes round-trip exactly — octet_length matches the recorded size.
+query II
+SELECT FILE_ID, octet_length(PAYLOAD)
+  FROM firebird_scan('${FIREBIRD_TEST_DB}', 'FILE_STORAGE')
+ ORDER BY FILE_ID;
+----
+1	6
+2	NULL
+3	5
+
+# --- Charset handling ------------------------------------------------------
+#
+# DuckDB strings are UTF-8 internally. Tell the user clearly when they
+# pick a charset that would deliver non-UTF-8 bytes — silently passing
+# them through would crash deeper in DuckDB's utf8proc.
+
+statement error
+SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE', charset='WIN1252') LIMIT 1;
+----
+charset='WIN1252' would deliver non-UTF-8 bytes
+
+statement error
+SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE', charset='ISO8859_1') LIMIT 1;
+----
+non-UTF-8
+
+# UTF-8 (with or without the dash) + the byte-pass-through aliases pass.
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE', charset='UTF-8');
+----
+5
+
 # --- Error paths ------------------------------------------------------------
 
 # Unknown table — bind should fail with a clear message.

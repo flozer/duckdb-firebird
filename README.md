@@ -71,10 +71,35 @@ databases; defaults apply (`SYSDBA` / `masterkey`, UTF-8, dialect 3).
 SELECT * FROM firebird_scan('/data/prod.fdb', 'EMPLOYEE',
                             user='analytics',
                             password='secret',
-                            charset='WIN1252',
+                            charset='UTF8',
                             role='READER',
                             dialect=3,
-                            partitions=4);
+                            partitions=4,
+                            row_limit=100);
+```
+
+### Charset handling
+
+DuckDB stores strings as UTF-8 internally. The extension **only accepts
+`UTF8`, `UTF-8`, `NONE`, or `OCTETS`** for the client `charset`
+parameter; anything else (e.g. `WIN1252`, `ISO8859_1`) is rejected at
+bind time with a hint.
+
+This is not a limitation for legacy Brazilian Portuguese / Latin-1
+databases. Firebird stores the bytes in whatever character set the table
+was declared with, but **the wire protocol transliterates** to whatever
+the client `lc_ctype` asks for. So a `DEFAULT CHARACTER SET WIN1252`
+database queried with the default `charset=UTF8` returns proper UTF-8
+strings — `São Paulo`, `Açúcar União Ltda`, `Coração Forte`, all
+render correctly:
+
+```sql
+-- Works against a legacy WIN1252 database without any extra config:
+SELECT NOME, CIDADE FROM firebird_scan('/legacy/erp.fdb', 'FORNECEDOR');
+--   NOME                    CIDADE
+--   Açúcar União Ltda       São Paulo
+--   Coração Forte ME        Belo Horizonte
+--   Indústrias Pôr-do-Sol   Curitiba
 ```
 
 - `partitions` — force the PK-range parallelism level. `0` (default) auto-

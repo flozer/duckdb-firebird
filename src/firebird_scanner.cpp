@@ -267,7 +267,26 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
         auto &val = kv.second;
         if      (key == "user")       bind->conn_info.user     = val.ToString();
         else if (key == "password")   bind->conn_info.password = val.ToString();
-        else if (key == "charset")    bind->conn_info.charset  = val.ToString();
+        else if (key == "charset") {
+            // DuckDB strings are UTF-8 internally; if the user asks for a
+            // different client charset we'd be handing raw non-UTF-8
+            // bytes to DuckDB, which crashes later (utf8proc fatal). The
+            // default UTF8 already works for WIN1252 / ISO_8859_1 / Latin1
+            // storage because Firebird transliterates server-side.
+            auto c = val.ToString();
+            std::string upper = c;
+            for (auto &ch : upper) ch = static_cast<char>(std::toupper(
+                static_cast<unsigned char>(ch)));
+            if (upper != "UTF8" && upper != "UTF-8" && upper != "NONE" &&
+                upper != "OCTETS") {
+                throw BinderException(
+                    "firebird_scan: charset='" + c + "' would deliver non-UTF-8 "
+                    "bytes to DuckDB. Use the default UTF8 — Firebird "
+                    "transliterates from " + c + "-stored data to UTF-8 wire "
+                    "automatically. (See README → 'Charset handling'.)");
+            }
+            bind->conn_info.charset = c;
+        }
         else if (key == "role")       bind->conn_info.role     = val.ToString();
         else if (key == "dialect")    bind->conn_info.dialect  = static_cast<int>(val.GetValue<int32_t>());
         else if (key == "partitions") {

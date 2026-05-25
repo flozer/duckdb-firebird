@@ -57,6 +57,20 @@ INSERT INTO EMPLOYEE VALUES (3, 'Carlos Chen',     '900', 65000.75, DATE '2022-1
 INSERT INTO EMPLOYEE VALUES (4, 'Diana Davis',     '600', 98000.25, DATE '2018-01-10', TRUE,  'Team lead');
 INSERT INTO EMPLOYEE VALUES (5, 'Erik Eklund',     '700', 71200.00, DATE '2021-06-30', TRUE,  NULL);
 COMMIT;
+
+-- Binary BLOB fixture (SUB_TYPE 0) — exercises the BLOB read path that
+-- DOESN'T degrade to VARCHAR. The payloads are short ASCII so the test
+-- can assert on octet_length without binary string literals.
+CREATE TABLE FILE_STORAGE (
+  FILE_ID  INTEGER NOT NULL PRIMARY KEY,
+  NAME     VARCHAR(40) NOT NULL,
+  SIZE_B   INTEGER NOT NULL,
+  PAYLOAD  BLOB SUB_TYPE 0
+);
+INSERT INTO FILE_STORAGE VALUES (1, 'logo.png',     6, CAST(_ASCII'binary' AS BLOB SUB_TYPE 0));
+INSERT INTO FILE_STORAGE VALUES (2, 'empty.dat',    0, NULL);
+INSERT INTO FILE_STORAGE VALUES (3, 'document.bin', 5, CAST(_ASCII'hello'  AS BLOB SUB_TYPE 0));
+COMMIT;
 EOF
 
 # Make the file world-readable so the test harness (running as a different

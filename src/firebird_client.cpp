@@ -126,6 +126,26 @@ FirebirdConnectionInfo FirebirdConnectionInfo::Parse(const std::string &conn_str
     return info;
 }
 
+// --- charset validation ------------------------------------------------------
+
+void ValidateClientCharset(const std::string &charset) {
+    std::string upper;
+    upper.reserve(charset.size());
+    for (char c : charset) {
+        upper.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    }
+    // Accept names that produce UTF-8 wire bytes, plus the byte-pass-through
+    // variants (NONE / OCTETS). Anything else would hand non-UTF-8 bytes to
+    // DuckDB's string vectors and trip utf8proc later.
+    if (upper == "UTF8" || upper == "UTF-8" || upper == "NONE" || upper == "OCTETS") {
+        return;
+    }
+    throw IOException(
+        "firebird: charset='" + charset + "' would deliver non-UTF-8 bytes to "
+        "DuckDB. Use the default UTF8 — Firebird transliterates from " +
+        charset + "-stored data to UTF-8 on the wire automatically.");
+}
+
 // --- error reporting ---------------------------------------------------------
 
 void FirebirdConnection::Check(const ISC_STATUS *status, const std::string &context) {
@@ -179,6 +199,7 @@ size_t FirebirdConnectionPool::IdleCount() {
 // --- FirebirdConnection ------------------------------------------------------
 
 FirebirdConnection::FirebirdConnection(const FirebirdConnectionInfo &info) : info_(info) {
+    ValidateClientCharset(info_.charset);
     Attach();
     try {
         StartReadOnlyTransaction();
