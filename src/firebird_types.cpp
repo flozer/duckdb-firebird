@@ -48,8 +48,9 @@ LogicalType FirebirdToDuckDBType(const FirebirdColumnDesc &col) {
     case SQL_INT64:    return ScaledIntegerToDecimal(8, col.sqlscale);
     case SQL_INT128:
         // Firebird 4 INT128 — scale 0 → HUGEINT; with scale → DECIMAL(38, -scale).
+        // Firebird always reports scale <= 0 in RDB$FIELD_SCALE.
         if (col.sqlscale == 0) return LogicalType::HUGEINT;
-        if (-col.sqlscale > 38 || col.sqlscale > 0) return LogicalType::DOUBLE;
+        if (-col.sqlscale > 38) return LogicalType::DOUBLE;
         return LogicalType::DECIMAL(38, -col.sqlscale);
     case SQL_FLOAT:    return LogicalType::FLOAT;
     case SQL_D_FLOAT:
@@ -60,11 +61,13 @@ LogicalType FirebirdToDuckDBType(const FirebirdColumnDesc &col) {
         // no native equivalent; degrading to DOUBLE keeps the data
         // queryable at the cost of some precision on the long tail.
         return LogicalType::DOUBLE;
-    case SQL_TIMESTAMP:    return LogicalType::TIMESTAMP;
-    case SQL_TIMESTAMP_TZ: return LogicalType::TIMESTAMP_TZ;
-    case SQL_TYPE_DATE:    return LogicalType::DATE;
-    case SQL_TYPE_TIME:    return LogicalType::TIME;
-    case SQL_TIME_TZ:      return LogicalType::TIME_TZ;
+    case SQL_TIMESTAMP:       return LogicalType::TIMESTAMP;
+    case SQL_TIMESTAMP_TZ:
+    case SQL_TIMESTAMP_TZ_EX: return LogicalType::TIMESTAMP_TZ;
+    case SQL_TYPE_DATE:       return LogicalType::DATE;
+    case SQL_TYPE_TIME:       return LogicalType::TIME;
+    case SQL_TIME_TZ:
+    case SQL_TIME_TZ_EX:      return LogicalType::TIME_TZ;
     case SQL_BOOLEAN:      return LogicalType::BOOLEAN;
     case SQL_BLOB:
         // sub_type 1 = TEXT BLOB; everything else is binary.
@@ -177,7 +180,11 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
         FlatVector::GetData<hugeint_t>(target)[target_offset] = v;
         break;
     }
-    case SQL_TIMESTAMP_TZ: {
+    case SQL_TIMESTAMP_TZ:
+    case SQL_TIMESTAMP_TZ_EX: {
+        // EX variants add a session-offset field after the (date,time,zoneId)
+        // triple, but the first 10 bytes are layout-compatible — the UTC
+        // accessor reads only those.
         auto ts = stmt.GetTimestampTzUtc(col_idx);
         date_t  d = Date::FromDate(1858, 11, 17);
         d.days   += ts.timestamp_date;
@@ -186,7 +193,8 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
             timestamp_tz_t(Timestamp::FromDatetime(d, t));
         break;
     }
-    case SQL_TIME_TZ: {
+    case SQL_TIME_TZ:
+    case SQL_TIME_TZ_EX: {
         auto t = stmt.GetTimeTzUtc(col_idx);
         // Firebird stores the UTC component; surface it with a zero
         // offset (DuckDB's dtime_tz_t encodes time+offset in 64 bits).

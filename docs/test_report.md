@@ -66,6 +66,45 @@ Firebird 4 types (`INT128`, `TIMESTAMP_TZ`, `TIME_TZ`, `DECFLOAT`)
 compile cleanly and have unit-level mapping code, but the test fixture
 is Firebird 3 so they aren't exercised against a live server here.
 
+### Firebird 5 live coverage (Windows local, May 2026)
+
+A `biz4.fdb` fixture on Firebird 5.0.4 SuperServer was used to exercise
+every type added in FB4+. All results confirmed against a fresh build
+of the extension (DuckDB v1.5.3, MSVC 19.44):
+
+| Firebird storage | RDB$FIELD_TYPE | DuckDB type | Verified |
+|---|---|---|---|
+| `INT128` | 26, sub=0 | `HUGEINT` | ✅ `170141183460469231731687303715884105727` round-trip |
+| `DECIMAL(38, s)` | 26, sub=2, scale<0 | `DECIMAL(38, s)` | ✅ `12345678901234567890.12345` round-trip |
+| `DECFLOAT(16)` | 24 | `DOUBLE` | ⚠️ surfaces NULL (no native IEEE decimal64 path; OO API decode deferred — see roadmap) |
+| `DECFLOAT(34)` | 25 | `DOUBLE` | ⚠️ same as above |
+| `TIMESTAMP WITH TIME ZONE` | 29 | `TIMESTAMP WITH TIME ZONE` | ✅ UTC instant preserved (`2026-05-25 17:30:00.123+00`) |
+| `TIME WITH TIME ZONE` | 28 | `TIME WITH TIME ZONE` | ✅ |
+
+End-to-end demonstrated:
+
+- **CTAS materialization** — `CREATE TABLE local_fb4 AS SELECT * FROM
+  firebird_scan(…)`: 4 rows, all types preserved including HUGEINT
+  and TIMESTAMP_TZ.
+- **COPY to Parquet** — `COPY (...) TO 'fb4.parquet'`: Parquet writer
+  degrades HUGEINT → DOUBLE (writer limitation, not the extension);
+  DECIMAL(38,5) preserved exactly.
+- **Federated JOIN** — Firebird `FB4_TYPES ⋈ read_parquet('fb4.parquet')`
+  on a HUGEINT key column resolves correctly.
+- **ATTACH catalog** — `ATTACH 'C:/fbtest/biz4.fdb' AS fb
+  (TYPE firebird, user 'SYSDBA', password 'masterkey');` exposes all
+  three tables with full FB4 type info in `SHOW ALL TABLES`. Subsequent
+  `SELECT typeof(BIG_NUM) FROM fb.main.FB4_TYPES` returns `HUGEINT`.
+- **Aggregates over HUGEINT** — `MIN/MAX/AVG` over the materialized
+  local copy return the correct extremes.
+
+A bug was found and fixed during this verification:
+`LoadTableSchema` was translating the FB <=3 `RDB$FIELD_TYPE` codes
+but had no entries for the FB4 additions (24=DECFLOAT(16),
+25=DECFLOAT(34), 26=INT128, 28=TIME_TZ, 29=TIMESTAMP_TZ, 30=TIME_TZ_EX,
+31=TIMESTAMP_TZ_EX). Without those, every FB4 column degraded to
+VARCHAR. The mapping now matches Firebird's `blr.h` upstream.
+
 ## Edge cases
 
 - **No PK** (AUDIT_TRAIL): scans single-threaded, correct row count.

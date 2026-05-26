@@ -365,8 +365,18 @@ void FirebirdStatement::AllocateBuffers() {
             // ISC_TIMESTAMP + 2-byte time-zone id (Firebird 4 ABI).
             bufsz = sizeof(ISC_TIMESTAMP) + sizeof(int16_t);
             break;
+        case SQL_TIMESTAMP_TZ_EX:
+            // Extended TZ adds a 4-byte session GMT offset (in minutes)
+            // after the zone id. We don't surface the GMT offset itself
+            // (DuckDB's TIMESTAMP_TZ is offset-only on UTC), but the
+            // buffer must be sized correctly or fbclient writes past it.
+            bufsz = sizeof(ISC_TIMESTAMP) + sizeof(int16_t) + sizeof(int32_t);
+            break;
         case SQL_TIME_TZ:
             bufsz = sizeof(ISC_TIME) + sizeof(int16_t);
+            break;
+        case SQL_TIME_TZ_EX:
+            bufsz = sizeof(ISC_TIME) + sizeof(int16_t) + sizeof(int32_t);
             break;
         case SQL_DEC16:     bufsz = 8;                     break;  // IEEE Decimal64
         case SQL_DEC34:     bufsz = 16;                    break;  // IEEE Decimal128

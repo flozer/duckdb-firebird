@@ -92,6 +92,20 @@ struct FirebirdLocalState : public LocalTableFunctionState {
 // for every column. We use the same JOIN-with-RDB$FIELDS shape as the
 // peregrine extractor: one round-trip per table.
 
+// SQL-quote a single-quoted string literal (doubles embedded quotes). Used
+// for any user-controlled value reaching a Firebird WHERE clause — without
+// this an attacker who controls the table name (e.g. through a
+// firebird_scan('conn', $TBL) call) could escape the string literal and
+// inject extra metadata queries.
+static std::string SqlLiteral(const std::string &s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    out.push_back('\'');
+    for (char c : s) { if (c == '\'') out.push_back('\''); out.push_back(c); }
+    out.push_back('\'');
+    return out;
+}
+
 void LoadTableSchema(FirebirdConnection &conn,
                      const std::string &table_name,
                      duckdb::vector<std::string> &out_names,
@@ -109,7 +123,7 @@ void LoadTableSchema(FirebirdConnection &conn,
         "       COALESCE(f.RDB$FIELD_LENGTH, 0) "
         "  FROM RDB$RELATION_FIELDS rf "
         "  JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE "
-        " WHERE rf.RDB$RELATION_NAME = '" + upper + "' "
+        " WHERE rf.RDB$RELATION_NAME = " + SqlLiteral(upper) + " "
         " ORDER BY rf.RDB$FIELD_POSITION";
 
     auto cursor = conn.OpenCursor(sql);
@@ -121,23 +135,32 @@ void LoadTableSchema(FirebirdConnection &conn,
         desc.sqlscale    = cursor->GetShort(3);
         desc.sqllen      = cursor->GetShort(4);
 
-        // RDB$FIELD_TYPE uses Firebird's *internal* type codes which differ
-        // from the SQL-level XSQLDA constants. Translate.
+        // RDB$FIELD_TYPE uses Firebird's *internal* blr_* type codes which
+        // differ from the SQL-level XSQLDA constants. Codes 7..37/261 are
+        // legacy (FB <=3); 23..31 are the Firebird 4 additions. Stay in sync
+        // with src/include/firebird/impl/blr.h upstream.
         switch (desc.sqltype) {
-        case 7:   desc.sqltype = SQL_SHORT;     break;  // SMALLINT
-        case 8:   desc.sqltype = SQL_LONG;      break;  // INTEGER
-        case 9:   desc.sqltype = SQL_QUAD;      break;  // QUAD
-        case 10:  desc.sqltype = SQL_FLOAT;     break;
-        case 11:  desc.sqltype = SQL_D_FLOAT;   break;
-        case 12:  desc.sqltype = SQL_TYPE_DATE; break;  // (Dialect 3)
-        case 13:  desc.sqltype = SQL_TYPE_TIME; break;
-        case 14:  desc.sqltype = SQL_TEXT;      break;  // CHAR
-        case 16:  desc.sqltype = SQL_INT64;     break;
-        case 23:  desc.sqltype = SQL_BOOLEAN;   break;
-        case 27:  desc.sqltype = SQL_DOUBLE;    break;
-        case 35:  desc.sqltype = SQL_TIMESTAMP; break;
-        case 37:  desc.sqltype = SQL_VARYING;   break;
-        case 261: desc.sqltype = SQL_BLOB;      break;
+        case 7:   desc.sqltype = SQL_SHORT;             break;  // SMALLINT
+        case 8:   desc.sqltype = SQL_LONG;              break;  // INTEGER
+        case 9:   desc.sqltype = SQL_QUAD;              break;  // QUAD
+        case 10:  desc.sqltype = SQL_FLOAT;             break;
+        case 11:  desc.sqltype = SQL_D_FLOAT;           break;
+        case 12:  desc.sqltype = SQL_TYPE_DATE;         break;  // (Dialect 3)
+        case 13:  desc.sqltype = SQL_TYPE_TIME;         break;
+        case 14:  desc.sqltype = SQL_TEXT;              break;  // CHAR
+        case 16:  desc.sqltype = SQL_INT64;             break;
+        case 23:  desc.sqltype = SQL_BOOLEAN;           break;
+        case 24:  desc.sqltype = SQL_DEC16;             break;  // FB4 blr_dec64  (IEEE Decimal64 / DECFLOAT(16))
+        case 25:  desc.sqltype = SQL_DEC34;             break;  // FB4 blr_dec128 (IEEE Decimal128 / DECFLOAT(34))
+        case 26:  desc.sqltype = SQL_INT128;            break;  // FB4 INT128 / DECIMAL/NUMERIC(p>18)
+        case 27:  desc.sqltype = SQL_DOUBLE;            break;
+        case 28:  desc.sqltype = SQL_TIME_TZ;           break;  // FB4 TIME WITH TIME ZONE
+        case 29:  desc.sqltype = SQL_TIMESTAMP_TZ;      break;  // FB4 TIMESTAMP WITH TIME ZONE
+        case 30:  desc.sqltype = SQL_TIME_TZ_EX;        break;  // FB4 EXTENDED TIME WITH TIME ZONE
+        case 31:  desc.sqltype = SQL_TIMESTAMP_TZ_EX;   break;  // FB4 EXTENDED TIMESTAMP WITH TIME ZONE
+        case 35:  desc.sqltype = SQL_TIMESTAMP;         break;
+        case 37:  desc.sqltype = SQL_VARYING;           break;
+        case 261: desc.sqltype = SQL_BLOB;              break;
         default: /* leave as-is; FirebirdToDuckDBType degrades to VARCHAR */ break;
         }
 
@@ -181,7 +204,7 @@ std::unique_ptr<PrimaryKeyInfo> ProbePrimaryKey(
                 "SELECT TRIM(ri.RDB$INDEX_NAME) "
                 "  FROM RDB$INDICES ri "
                 "  JOIN RDB$RELATION_CONSTRAINTS rc ON ri.RDB$INDEX_NAME = rc.RDB$INDEX_NAME "
-                " WHERE ri.RDB$RELATION_NAME = '" + upper + "' "
+                " WHERE ri.RDB$RELATION_NAME = " + SqlLiteral(upper) + " "
                 "   AND rc.RDB$CONSTRAINT_TYPE = 'PRIMARY KEY'");
             if (!cur->Fetch()) return nullptr;          // no PK
             pk_index = cur->GetText(0);
@@ -193,7 +216,7 @@ std::unique_ptr<PrimaryKeyInfo> ProbePrimaryKey(
             auto cur = conn.OpenCursor(
                 "SELECT TRIM(seg.RDB$FIELD_NAME) "
                 "  FROM RDB$INDEX_SEGMENTS seg "
-                " WHERE seg.RDB$INDEX_NAME = '" + pk_index + "' "
+                " WHERE seg.RDB$INDEX_NAME = " + SqlLiteral(pk_index) + " "
                 " ORDER BY seg.RDB$FIELD_POSITION");
             while (cur->Fetch()) pk_cols.push_back(cur->GetText(0));
         }
@@ -665,16 +688,6 @@ struct FirebirdAttachGlobalState : public GlobalTableFunctionState {
     idx_t MaxThreads() const override { return 1; }
 };
 
-// SQL-quote a single-quoted string literal (doubles embedded quotes).
-static std::string SqlString(const std::string &s) {
-    std::string out;
-    out.reserve(s.size() + 2);
-    out.push_back('\'');
-    for (char c : s) { if (c == '\'') out.push_back('\''); out.push_back(c); }
-    out.push_back('\'');
-    return out;
-}
-
 static unique_ptr<FunctionData> FirebirdAttachBind(ClientContext &,
                                                    TableFunctionBindInput &input,
                                                    vector<LogicalType> &return_types,
@@ -735,8 +748,8 @@ static unique_ptr<GlobalTableFunctionState> FirebirdAttachInitGlobal(
         ddl << verb
             << QuoteIdent(bind.target_schema) << "." << QuoteIdent(tbl)
             << " AS SELECT * FROM firebird_scan("
-            << SqlString(bind.connection_string) << ", "
-            << SqlString(tbl) << ");";
+            << SqlLiteral(bind.connection_string) << ", "
+            << SqlLiteral(tbl) << ");";
         gstate->stmts.push_back(ddl.str());
     }
     return std::move(gstate);
