@@ -86,17 +86,23 @@ SQL-injection probe.
   follow-up `SELECT COUNT(*) FROM … 'CUSTOMER'` returns 3 rows,
   proving the table was not touched.
 
-### 2) Custom review suite — FB4
+### 2) Custom review suite — FB4 (full parity)
 
-Repeated 12 of the most type-sensitive cases against Firebird 4.0.5
-embedded mode (with the FB4 `fbclient.dll` co-located next to
-`duckdb.exe`). **All green.** Type mapping, INT128 extremes,
-DECIMAL(38, 5) lower bound, TZ types, NULL row, IN pushdown, LIKE
-prefix (DuckDB decompose path), LIKE embedded wildcard (our hook
-path), ATTACH catalog, CTAS, COPY to Parquet — every check
-reproduces FB5's behaviour byte-identical except for the timestamp
-display format (FB4 vs FB5 server emits identical UTC offsets, so
-DuckDB-side output is the same).
+Re-ran the **same 26-group suite** against Firebird 4.0.5 embedded
+mode (with the FB4 `fbclient.dll` co-located next to `duckdb.exe`).
+**All 26 groups green.** Type mapping, INT128 extremes, DECIMAL(38,
+5) lower bound, TZ types, NULL row, all pushdown variants
+(equality, range, IN, IS NULL, LIKE prefix via DuckDB range
+rewrite, LIKE embedded wildcard via our hook, leading-wildcard LIKE
+that stays in DuckDB), projection pushdown, row_limit + partitions
+named params, firebird_attach_sql DDL, ATTACH catalog (incl.
+case-insensitive lookup), federated CROSS JOIN, read-only enforce
+(INSERT/DROP/CREATE all NotImplemented), DETACH + re-ATTACH, CTAS,
+COPY to Parquet, federated Firebird × Parquet via HUGEINT join key,
+all error paths, and the SQL-injection probe — every check
+reproduces FB5's behaviour byte-identical. The FB4 and FB5 servers
+emit identical UTC offsets for TIMESTAMP_TZ on the test fixture, so
+the DuckDB-side output matches across the two servers.
 
 ### 3) Existing sqllogictest suite
 
@@ -110,7 +116,35 @@ FILE_STORAGE + V_ACTIVE_EMP` fixture on each.
 | Firebird 5.0.4 | 124 / 124 | 79 / 79 | 203 / 203 |
 | Firebird 4.0.5 | 124 / 124 | 79 / 79 | 203 / 203 |
 
-### 4) GizmoSQL — blocked, requires signed build
+### 4) GizmoSQL equivalent surface — verified locally
+
+Direct GizmoSQL exec is gated on signing (see below). Before
+declaring it blocked, the **exact surface** GizmoSQL exposes to
+Arrow Flight SQL clients (DuckDB v1.5.3 in-proc + `LOAD firebird` +
+`ATTACH 'firebird://…' AS fb (TYPE firebird)` + DAX-shaped queries)
+was reproduced against our local `duckdb.exe -unsigned` and
+returned the expected rows:
+
+- `LOAD` + `ATTACH` of the same `biz4.fdb` fixture succeeds.
+- `SHOW ALL TABLES` exposes CUSTOMER / DEPARTMENT / FB4_TYPES with
+  full FB4-type signatures (HUGEINT, DECIMAL(38, 5),
+  TIMESTAMP WITH TIME ZONE, TIME WITH TIME ZONE) — exactly what an
+  ADBC Flight SQL client would see in `GetTables` / `GetCatalogs`.
+- `SELECT COUNT(*) FROM fb.main.FB4_TYPES` → 4.
+- `SELECT typeof(BIG_NUM), BIG_NUM FROM fb.main.FB4_TYPES WHERE ID
+  = 1` → `HUGEINT, 170141183460469231731687303715884105727`.
+- `SELECT MIN/MAX(BIG_NUM), MIN/MAX(BIG_DEC) FROM fb.main.FB4_TYPES`
+  → extremes recovered exact.
+- CTAS into a DuckDB-side table for a Flight SQL client to fetch
+  via `getStream` → 4 rows.
+- DETACH cleans up the pool.
+
+This isolates the GizmoSQL blocker (next section) to the
+extension-load policy: the extension's table functions and
+StorageExtension run end-to-end inside the same DuckDB embedded
+runtime that GizmoSQL uses, just without the signing gate in front.
+
+### 4b) GizmoSQL — blocked on signing
 
 GizmoSQL Windows `v1.26.2` installs and starts cleanly; the
 pre-cache approach (`scripts/gizmosql_aircache.sh` ported to
@@ -134,17 +168,70 @@ confirms GizmoSQL constructs `DuckDB::DBConfig` without surfacing
 `allow_unsigned_extensions` — it is hard-coded to its default
 (false), and no CLI flag or env var toggles it.
 
-**Conclusion**: GizmoSQL live verification is gated on either
-(a) the community-extensions CI publishing a signed
-`firebird.duckdb_extension` (which happens automatically once PR
-#1980 merges), or (b) a custom GizmoSQL build that exposes
-`allow_unsigned_extensions` as a config knob. Path (a) is the
-intended one and lifts this blocker for users at the same time.
+**Why this is a hard block locally**
 
-This is **not** a defect of duckdb-firebird; the extension binary
+The DuckDB signing logic at
+[`duckdb/src/main/extension/extension_load.cpp:483-498`](https://github.com/duckdb/duckdb/blob/v1.5.3/src/main/extension/extension_load.cpp#L483-L498)
+fans out as:
+
+```cpp
+if (!Settings::Get<AllowUnsignedExtensionsSetting>(db)) {
+    bool signature_valid = ...;
+    if (!signature_valid) throw IOException(... UNSIGNED_EXTENSION ...);
+}
+```
+
+The setting itself
+([`custom_settings.cpp:197-201`](https://github.com/duckdb/duckdb/blob/v1.5.3/src/main/settings/custom_settings.cpp#L197-L201))
+explicitly rejects any flip-to-true after database start:
+
+```cpp
+void AllowUnsignedExtensionsSetting::OnSet(...) {
+    if (info.db && input.GetValue<bool>()) {
+        throw InvalidInputException(
+            "Cannot change allow_unsigned_extensions setting while database is running");
+    }
+}
+```
+
+GizmoSQL constructs `DuckDB::DBConfig` in `RunDuckDBFlightSqlServer`
+([`gizmosql/src/duckdb/duckdb_server.cpp:2087-2103`](https://github.com/gizmodata/gizmosql/blob/main/src/duckdb/duckdb_server.cpp#L2087-L2103))
+without touching `config.options.allow_unsigned_extensions`, so the
+default `false` wins by the time the user `init.sql` runs.
+
+The signature itself is verified against a fixed list of public keys
+baked into the DuckDB binary
+([`extension_helper.cpp:418` for the official keys,
+`:640` for community keys](https://github.com/duckdb/duckdb/blob/v1.5.3/src/main/extension/extension_helper.cpp#L418-L640)).
+Signing requires a private key matching one of those entries —
+unavailable to the maintainer.
+
+**Two paths forward**, listed in order of preference:
+
+1. **Community-extensions PR #1980 merges → upstream CI signs the
+   build with the `community_public_keys`-matching key.** That signed
+   `.duckdb_extension` then loads under GizmoSQL with no further work.
+   This is the intended distribution path and was always the gate;
+   it is now waiting on the maintainer queue.
+
+2. **Custom GizmoSQL build** with one extra line in `RunDuckDBFlightSqlServer`:
+   ```cpp
+   config.options.allow_unsigned_extensions = true;
+   ```
+   plus a corresponding CLI flag. This unblocks local validation but
+   requires GizmoSQL's full build (Arrow + Boost + gRPC + Flight)
+   which is a several-hour setup; auto-mode declined to escalate to
+   that scope, and on principle a reviewer would not patch the host
+   tool to make the extension load.
+
+This is **not** a defect of duckdb-firebird. The extension binary
 itself is v1.5.3 ABI-compatible with the DuckDB embedded inside
-GizmoSQL, and `LOAD firebird` would succeed the moment GizmoSQL
-trusts the signing key.
+GizmoSQL — section 4) above verifies the surface end-to-end in the
+same DuckDB build, only without the signing wrapper. Once the
+extension is signed, the GizmoSQL smoke script
+`scripts/gizmosql_smoke.sh` exists in the repo and will reproduce
+section 4)'s queries over Arrow Flight SQL via the Python ADBC
+driver, asserting the same row counts and types.
 
 ## Findings
 
