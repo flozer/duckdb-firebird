@@ -10,6 +10,10 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
 
 #include "firebird_client.hpp"
 #include "firebird_query.hpp"
@@ -461,6 +465,16 @@ static bool OpenNextPartitionCursor(ClientContext & /*ctx*/,
     PartitionSpec spec;
     if (!gstate.NextPartition(spec)) return false;
 
+    // Concatenate the partition range predicate with any extra predicates
+    // lifted from BoundFunctionExpression pushdown (currently just LIKE
+    // prefix). All fragments are already SQL-safe (literals quoted via
+    // SqlLiteral, identifiers via QuoteIdent).
+    std::string combined = spec.where_clause;
+    for (auto &ep : bind.extra_predicates) {
+        if (!combined.empty()) combined += " AND ";
+        combined += "(" + ep + ")";
+    }
+
     auto query = FirebirdQueryBuilder::Build(
         bind.table_name,
         bind.column_names,
@@ -468,7 +482,7 @@ static bool OpenNextPartitionCursor(ClientContext & /*ctx*/,
         gstate.column_ids,
         gstate.filters,
         bind.limit_override,
-        spec.where_clause);
+        combined);
 
     local.cursor = local.conn->OpenCursor(query.sql);
     return true;
@@ -786,6 +800,97 @@ TableFunction GetFirebirdAttachFunction() {
 }
 
 // ---------------------------------------------------------------------------
+//  Complex-filter pushdown — `col LIKE 'prefix%'`
+// ---------------------------------------------------------------------------
+//
+// `LIKE` reaches the scan as a `BoundFunctionExpression` (scalar function
+// `~~`), not a `TableFilter`, so DuckDB hands it over via this hook. We
+// only translate the high-value case: a constant right-hand-side whose
+// wildcards (`%`, `_`) are all at position >= 1 — Firebird picks an
+// index range scan for that. Patterns starting with a wildcard, or any
+// pattern we don't recognise, are left in `filters` so DuckDB re-applies
+// them above the scan.
+//
+// Escape rules: we always emit `... ESCAPE '\\'` so a user-supplied
+// backslash in the pattern keeps its literal meaning. The pattern
+// literal itself goes through SqlLiteral, which doubles embedded
+// single quotes; we do not pre-escape `%`/`_` because the user wrote
+// them deliberately.
+
+// Returns nullopt if `expr` is not a `col LIKE 'literal'` shape with a
+// usable non-wildcard prefix. Otherwise returns the column index and the
+// pattern literal.
+static bool TryExtractLikePrefix(Expression &expr,
+                                 idx_t &out_col,
+                                 std::string &out_pattern) {
+    if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+        return false;
+    }
+    auto &fn = expr.Cast<BoundFunctionExpression>();
+    // DuckDB exposes `LIKE` as the scalar function "~~".
+    if (fn.function.name != "~~" || fn.children.size() != 2) return false;
+
+    auto &lhs = *fn.children[0];
+    auto &rhs = *fn.children[1];
+    if (lhs.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) return false;
+    if (rhs.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT)   return false;
+
+    auto &colref = lhs.Cast<BoundColumnRefExpression>();
+    auto &constexpr_ = rhs.Cast<BoundConstantExpression>();
+    if (constexpr_.value.IsNull()) return false;
+    if (constexpr_.value.type().id() != LogicalTypeId::VARCHAR) return false;
+
+    auto pattern = constexpr_.value.GetValue<std::string>();
+    if (pattern.empty()) return false;
+    // Require at least one literal character before any wildcard so
+    // Firebird can use an index range scan. A leading `%`/`_` would
+    // force a full table scan anyway, with no benefit from pushdown.
+    char first = pattern.front();
+    if (first == '%' || first == '_') return false;
+
+    out_col     = colref.binding.column_index;
+    out_pattern = std::move(pattern);
+    return true;
+}
+
+static void FirebirdScanPushdownComplexFilter(
+    ClientContext & /*ctx*/, LogicalGet &get, FunctionData *bind_data_p,
+    vector<unique_ptr<Expression>> &filters) {
+
+    if (!bind_data_p) return;
+    auto &bind = bind_data_p->Cast<FirebirdBindData>();
+
+    // `column_index` in BoundColumnRefExpression is an index into the
+    // scan's projected columns (i.e. into LogicalGet::GetColumnIds()),
+    // not into bind.column_names. Resolve through GetColumnIds() to find
+    // the original column index.
+    const auto &col_ids = get.GetColumnIds();
+
+    auto it = filters.begin();
+    while (it != filters.end()) {
+        idx_t projected_col = 0;
+        std::string pattern;
+        if (!TryExtractLikePrefix(**it, projected_col, pattern)) {
+            ++it;
+            continue;
+        }
+        if (projected_col >= col_ids.size()) { ++it; continue; }
+        auto src_col_idx = col_ids[projected_col].GetPrimaryIndex();
+        if (src_col_idx == COLUMN_IDENTIFIER_ROW_ID ||
+            src_col_idx >= bind.column_names.size()) {
+            ++it;
+            continue;
+        }
+        std::string frag = QuoteIdent(bind.column_names[src_col_idx]) +
+                           " LIKE " + SqlLiteral(pattern) +
+                           " ESCAPE '\\'";
+        bind.extra_predicates.push_back(std::move(frag));
+        // Tell DuckDB we have the filter covered — it won't re-evaluate it.
+        it = filters.erase(it);
+    }
+}
+
+// ---------------------------------------------------------------------------
 //  Registration.
 // ---------------------------------------------------------------------------
 TableFunction GetFirebirdScanFunction() {
@@ -808,6 +913,9 @@ TableFunction GetFirebirdScanFunction() {
     fn.projection_pushdown = true;
     fn.filter_pushdown     = true;
     fn.filter_prune        = false;  // not yet — we still need to recheck residuals
+    // LIKE-prefix pushdown (BoundFunctionExpression that the TableFilter
+    // path can't express). See FirebirdScanPushdownComplexFilter.
+    fn.pushdown_complex_filter = FirebirdScanPushdownComplexFilter;
 
     return fn;
 }

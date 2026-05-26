@@ -35,6 +35,12 @@ struct FirebirdBindData : public TableFunctionData {
     // (FirebirdTableEntry::GetScanFunction). Direct firebird_scan() calls
     // leave this null, so each LocalState constructs its own connection.
     std::shared_ptr<FirebirdConnectionPool> pool;
+    // Pre-translated WHERE fragments that DuckDB's TableFilterSet path
+    // can't express — currently `col LIKE 'prefix%' ESCAPE '\'` lifted
+    // from the BoundFunctionExpression filter set. Each entry already
+    // has its identifiers / literals quoted; the builder splices them
+    // into the WHERE clause with AND glue.
+    duckdb::vector<std::string> extra_predicates;
 };
 
 // --- discovery + probe helpers ---------------------------------------------

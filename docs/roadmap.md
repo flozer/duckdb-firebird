@@ -128,39 +128,47 @@ networks with `extensions.duckdb.org` reachable.
 
 ## Milestone v0.5 — Pushdown completeness
 
-### 6. LIMIT pushdown
+### 6. LIMIT pushdown — **deferred (upstream gap)**
 
-The builder already accepts `limit` (`firebird_query.cpp`). Wire up
-DuckDB's `pushdown_limit` hook on the `TableFunction` (analogous to
-`pushdown_projection` / `pushdown_filter`) so the planner reports the
-limit during `bind` and the scanner appends `ROWS N` to the Firebird
-SQL.
+Investigation against DuckDB v1.5.3 source shows `TableFunction` has
+no `pushdown_limit` hook and `LogicalGet` has no `limit` field; a SQL
+`LIMIT N` lands in a `LogicalLimit` *above* the scan, so the planner
+never tells our scanner about it. The optimiser stops calling the
+scan once N rows are emitted (cheap on a small N), so the missing
+piece only matters when the cost of *opening* the cursor over a huge
+result set is itself prohibitive.
 
-**Edge**: with `partitions > 1` the per-partition limit must be N (not
-N/partitions) — DuckDB applies the top-level limit above the scan;
-each partition just needs to *not exceed* N rows of its own slice.
-Simpler: when `limit` is set, force `partitions=1` and bypass the PK
-probe.
+**Workaround in place:** `firebird_scan(…, row_limit=N)` named param
+already emits `ROWS N` in the Firebird SQL — the user just has to
+write it explicitly when they know the limit at query time. The
+`firebird_query.cpp` builder fully supports it; no further change
+needed for the manual path.
 
-**Acceptance**: `EXPLAIN SELECT * FROM fb.main.BIG_T LIMIT 100` shows
-`ROWS 100` in the Firebird SQL, end-to-end query returns in ms not
-seconds on a 1 M-row table.
+**Re-evaluate** when DuckDB exposes a `pushdown_limit` hook on
+`TableFunction` (tracked upstream — no fixed milestone). At that
+point: wire the hook, set `partitions = 1` whenever a limit is
+present (avoid per-partition N×partitions over-fetch), drop this
+deferred note.
 
-### 7. LIKE prefix pushdown
+### 7. LIKE prefix pushdown — **DONE**
 
-`LIKE 'prefix%'` is the high-value case: Firebird picks an index range
-scan when the pattern has a non-wildcard prefix. The catch is that
-DuckDB surfaces `LIKE` as an `EXPRESSION_FILTER` (not a `TableFilter`),
-so we need to:
+`pushdown_complex_filter` hook now lifts `BoundFunctionExpression` of
+the `~~` (LIKE) scalar function with a constant RHS, requires at
+least one literal character before any `%`/`_`, and emits
+`col LIKE 'pattern' ESCAPE '\'` into the Firebird WHERE. Patterns
+starting with `%`/`_`, non-LIKE expressions, and any shape we don't
+recognise stay in `filters` so DuckDB re-applies them above the scan.
 
-- Walk the expression filter, detect `LikeExpression` with a constant
-  RHS whose first `%` / `_` is at position ≥ 1.
-- Emit `col LIKE 'prefix%' ESCAPE '\'` — Firebird honors `ESCAPE`.
-- Leave non-prefix patterns to DuckDB.
+**Observation from live testing on FB5**: DuckDB v1.5.3 already
+decomposes the simple `LIKE 'prefix%'` case into `col >= 'prefix'
+AND col < 'prefiq'` *before* the hook runs, so the normal TableFilter
+pushdown path consumes those. Our hook catches the patterns DuckDB
+does **not** decompose — embedded `%`/`_` (e.g. `'S%Textil'`,
+`'C_racao%'`) and any future LIKE variant that doesn't fit the
+range-rewrite. The two paths cooperate.
 
-**Acceptance**: `EXPLAIN SELECT * FROM fb.main.CUSTOMER WHERE NAME
-LIKE 'Açúc%'` shows the LIKE in the Firebird SQL; cold query against
-a 1 M-row table returns in < 100 ms when the column is indexed.
+Single-quote escaping in the pattern is handled by `SqlLiteral`;
+backslash escape semantics by the `ESCAPE '\'` clause.
 
 ---
 
