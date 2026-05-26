@@ -27,6 +27,10 @@ extension:
   language: C++
   build: cmake
   license: MIT
+  # libfbclient is consumed via the in-repo vcpkg.json manifest, so the
+  # community CI must spin up the vcpkg toolchain to satisfy the
+  # ibase.h / fbclient_ms dependency before configuring CMake.
+  requires_toolchains: vcpkg
   maintainers:
     - flozer
   # Platforms where libfbclient is reachable via the build's vcpkg
