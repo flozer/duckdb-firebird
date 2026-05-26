@@ -102,27 +102,22 @@ Firebird 5.0 RC1 changelog flags a few items worth verifying:
 **Acceptance**: the existing test suite passes unchanged against FB5;
 README adds a "Firebird 5 + ParallelWorkers" note.
 
-### 5. GizmoSQL smoke test
+### 5. GizmoSQL smoke test — **scripts shipped, CI wiring pending**
 
-GizmoSQL hardcodes `INSTALL icu; INSTALL spatial;` in its startup
-prelude
-([gizmosql_library.cpp:748-760](C:\tmp\gizmosql\src\common\gizmosql_library.cpp#L748-L760))
-so any environment without reach to `extensions.duckdb.org` fails
-before our extension's `LOAD` runs. Two concrete deliverables:
+Two scripts now in `scripts/`:
 
-- `scripts/gizmosql_aircache.sh` — downloads `icu` + `spatial`
-  matching DuckDB v1.5.3 for `linux_amd64` and drops them in
-  `~/.duckdb/extensions/v1.5.3/linux_amd64/`. README points at it.
-- `scripts/gizmosql_smoke.sh` — `docker run gizmodata/gizmosql:1.26.2`
-  with our extension bind-mounted and an `init.sql` that pre-attaches
-  the FB fixture. Asserts `python3 -c "import
-  adbc_driver_flightsql.dbapi …"` returns the expected row count.
-  This becomes the regression guard that proves the extension is and
-  stays GizmoSQL-compatible.
+- `gizmosql_aircache.sh` — downloads `icu` + `spatial` for
+  `${DUCKDB_VERSION:-v1.5.3}` / `${PLATFORM:-linux_amd64}` and
+  populates `~/.duckdb/extensions/…`. Bind-mount that dir into
+  GizmoSQL on air-gapped hosts.
+- `gizmosql_smoke.sh` — brings up Firebird 5 + GizmoSQL containers,
+  loads the extension, applies the biz4 fixture, and asserts a row
+  count + dtype over Arrow Flight SQL via the Python ADBC driver.
 
-**Acceptance**: `scripts/gizmosql_smoke.sh` returns 0 in CI on every
-push; the README's GizmoSQL section drops the "blocked" caveat for
-networks with `extensions.duckdb.org` reachable.
+**Acceptance** (still open): a CI job that runs `gizmosql_smoke.sh`
+on every push to main. The matrix workflow `build-linux-fb-matrix.yml`
+is the obvious host for it; deferred until the GitHub Actions billing
+hold on this repo lifts.
 
 ---
 

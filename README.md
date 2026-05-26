@@ -300,9 +300,18 @@ print(cur.fetchall())
 **Caveat**: GizmoSQL's startup unconditionally runs
 `INSTALL icu; INSTALL spatial;`. Networks that can't reach
 `extensions.duckdb.org` will fail before the user `init.sql` is
-processed. Either pre-cache those extensions under
-`~/.duckdb/extensions/v1.5.3/linux_amd64/` or run GizmoSQL in an
-environment with network access to the DuckDB extension repository.
+processed. Two ways to handle it:
+
+- Run `scripts/gizmosql_aircache.sh` on a connected host once; it
+  pre-populates `~/.duckdb/extensions/v1.5.3/linux_amd64/` with
+  `icu` and `spatial`. Bind-mount that directory into the GizmoSQL
+  container (`-v ~/.duckdb:/root/.duckdb`).
+- Or run GizmoSQL where `extensions.duckdb.org` is directly reachable.
+
+`scripts/gizmosql_smoke.sh` is an end-to-end smoke test: brings up a
+Firebird 5 container, a GizmoSQL container with the extension
+bind-mounted, applies the biz4 fixture, and asserts a row count +
+type over Arrow Flight SQL.
 
 ## Publishing to the community catalog
 
