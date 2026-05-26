@@ -1,0 +1,176 @@
+name: Build + Test Linux x64 (FB 3/4/5 matrix)
+
+# Builds the extension once and runs the SQL test suites against three
+# Firebird major versions (3, 4, 5) sequentially on a single Ubuntu 24.04
+# runner. The FB server is started in a Docker container, port-mapped to
+# localhost:3050 — the suite connects via TCP so the client lib in the
+# runner doesn't need an exact version match with the server.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DUCKDB_VERSION: v1.5.3
+
+jobs:
+  build-test:
+    name: linux-x64 / fb${{ matrix.fb_major }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - fb_major: 3
+            fb_image: firebirdsql/firebird:3-noble
+          - fb_major: 4
+            fb_image: firebirdsql/firebird:4-noble
+          - fb_major: 5
+            fb_image: firebirdsql/firebird:5-noble
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install build deps + firebird client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build g++ pkg-config python3 ccache \
+            firebird-dev
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=1G
+          echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-linux-fb${{ matrix.fb_major }}-${{ env.DUCKDB_VERSION }}-${{ github.sha }}
+          restore-keys: ccache-linux-fb${{ matrix.fb_major }}-${{ env.DUCKDB_VERSION }}-
+
+      - name: Start Firebird ${{ matrix.fb_major }} container
+        run: |
+          docker run -d \
+              --name fb \
+              -p 3050:3050 \
+              -e FIREBIRD_ROOT_PASSWORD=masterkey \
+              -e FIREBIRD_USE_LEGACY_AUTH=true \
+              ${{ matrix.fb_image }}
+          # Wait for the server to accept connections.
+          for i in $(seq 1 30); do
+            if nc -z localhost 3050; then echo "FB up"; break; fi
+            sleep 1
+          done
+          docker logs fb | tail -20
+
+      - name: Provision FB${{ matrix.fb_major }} fixtures
+        run: |
+          # Apply the EMPLOYEE fixture via isql inside the container —
+          # the container has the matching server-side libfbclient and
+          # the database file path is server-local.
+          docker exec -i fb bash -c "isql -u SYSDBA -p masterkey" <<'SQL'
+          CREATE DATABASE '/var/lib/firebird/data/test.fdb' DEFAULT CHARACTER SET UTF8;
+          SQL
+          docker exec -i fb bash -c "isql -u SYSDBA -p masterkey /var/lib/firebird/data/test.fdb" <<'SQL'
+          CREATE TABLE EMPLOYEE (
+            EMP_ID    INTEGER NOT NULL PRIMARY KEY,
+            EMP_NAME  VARCHAR(60) NOT NULL,
+            DEPT_NO   VARCHAR(3),
+            SALARY    NUMERIC(10,2),
+            HIRE_DATE DATE,
+            ACTIVE    BOOLEAN,
+            NOTE      BLOB SUB_TYPE 1
+          );
+          INSERT INTO EMPLOYEE VALUES (1, 'Alice Andersson', '600', 75000.50, DATE '2020-03-15', TRUE,  'Senior developer');
+          INSERT INTO EMPLOYEE VALUES (2, 'Bob Brown',       '600', 82500.00, DATE '2019-07-01', TRUE,  NULL);
+          INSERT INTO EMPLOYEE VALUES (3, 'Carlos Chen',     '900', 65000.75, DATE '2022-11-20', FALSE, 'On leave');
+          INSERT INTO EMPLOYEE VALUES (4, 'Diana Davis',     '600', 98000.25, DATE '2018-01-10', TRUE,  'Team lead');
+          INSERT INTO EMPLOYEE VALUES (5, 'Erik Eklund',     '700', 71200.00, DATE '2021-06-30', TRUE,  NULL);
+          COMMIT;
+          CREATE TABLE FILE_STORAGE (
+            FILE_ID  INTEGER NOT NULL PRIMARY KEY,
+            NAME     VARCHAR(40) NOT NULL,
+            SIZE_B   INTEGER NOT NULL,
+            PAYLOAD  BLOB SUB_TYPE 0
+          );
+          INSERT INTO FILE_STORAGE VALUES (1, 'logo.png',     6, CAST(_ASCII'binary' AS BLOB SUB_TYPE 0));
+          INSERT INTO FILE_STORAGE VALUES (2, 'empty.dat',    0, NULL);
+          INSERT INTO FILE_STORAGE VALUES (3, 'document.bin', 5, CAST(_ASCII'hello'  AS BLOB SUB_TYPE 0));
+          COMMIT;
+          CREATE OR ALTER VIEW V_ACTIVE_EMP (EMP_ID, EMP_NAME, DEPT_NO) AS
+              SELECT EMP_ID, EMP_NAME, DEPT_NO
+                FROM EMPLOYEE WHERE ACTIVE = TRUE;
+          COMMIT;
+          SQL
+
+          if [ "${{ matrix.fb_major }}" != "3" ]; then
+            docker cp scripts/fixture_biz4.sql fb:/tmp/fixture_biz4.sql
+            docker exec -i fb bash -c "isql -u SYSDBA -p masterkey" <<'SQL'
+            CREATE DATABASE '/var/lib/firebird/data/biz4.fdb' DEFAULT CHARACTER SET UTF8;
+            SQL
+            docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_biz4.sql /var/lib/firebird/data/biz4.fdb
+          fi
+
+          # Suite tests connect over TCP — expose the URL form.
+          echo "FIREBIRD_TEST_DB=firebird://SYSDBA:masterkey@localhost:3050//var/lib/firebird/data/test.fdb?charset=UTF8" >> $GITHUB_ENV
+
+      - name: Pin DuckDB version
+        run: |
+          DUCKDB_GIT_VERSION=${DUCKDB_VERSION} make set_duckdb_version
+
+      - name: Build (release)
+        env:
+          GEN: ninja
+        run: make release
+
+      - name: Run SQL test suite
+        env:
+          ISC_USER: SYSDBA
+          ISC_PASSWORD: masterkey
+        run: |
+          ./build/release/test/unittest test/sql/firebird_scan.test
+          ./build/release/test/unittest test/sql/firebird_attach.test
+
+      - name: FB4+ live type smoke (INT128 / DECIMAL(38) / TIMESTAMP_TZ)
+        if: matrix.fb_major != '3'
+        env:
+          ISC_USER: SYSDBA
+          ISC_PASSWORD: masterkey
+        run: |
+          ./build/release/duckdb -unsigned <<'EOF'
+          SELECT
+              typeof(BIG_NUM)  AS t_big_num,
+              typeof(BIG_DEC)  AS t_big_dec,
+              typeof(TS_TZ)    AS t_ts_tz,
+              typeof(T_TZ)     AS t_t_tz
+            FROM firebird_scan(
+                'firebird://SYSDBA:masterkey@localhost:3050//var/lib/firebird/data/biz4.fdb?charset=UTF8',
+                'FB4_TYPES',
+                partitions=1)
+           LIMIT 1;
+          EOF
+
+      - name: Stop Firebird container
+        if: always()
+        run: docker rm -f fb || true
+
+      - name: Upload extension artifact (linux_amd64) - fb${{ matrix.fb_major }}
+        if: matrix.fb_major == '5'
+        uses: actions/upload-artifact@v4
+        with:
+          name: firebird.duckdb_extension-linux-x64
+          path: build/release/extension/firebird/firebird.duckdb_extension
+          retention-days: 30
+          if-no-files-found: error
