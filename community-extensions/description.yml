@@ -19,9 +19,11 @@ extension:
       - ATTACH 'firebird://…' AS fb (TYPE firebird) — native catalog
         with `SELECT * FROM fb.main.TABLE` support
     Projection + filter pushdown (=, <>, <, >, <=, >=, IS NULL,
-    BETWEEN, IN, AND/OR), PK-range parallel scan (opt-in), connection
-    pool + metadata cache.
-  version: 0.3.0
+    BETWEEN, IN, AND/OR, LIKE 'prefix%'), PK-range parallel scan
+    (opt-in), connection pool + metadata cache. Firebird 3/4/5
+    server compatibility, including INT128, DECIMAL(38, s),
+    TIMESTAMP WITH TIME ZONE, and TIME WITH TIME ZONE.
+  version: 0.4.0
   language: C++
   build: cmake
   license: MIT
@@ -34,6 +36,6 @@ extension:
 
 repo:
   github: flozer/duckdb-firebird
-  # Update to the tag or commit SHA you want to publish. The community
-  # CI will check out exactly this ref.
-  ref: main
+  # Pinned to the v0.4 release tag — community-extensions CI checks
+  # out exactly this ref to build the published artefacts.
+  ref: v0.4.0
