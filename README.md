@@ -244,6 +244,14 @@ want explicit local DuckDB views over selected Firebird tables.
   using `apt`-shipped Firebird and the existing Makefile harness.
 - [`docs/roadmap.md`](docs/roadmap.md) — what's done, what's next.
 
+## Project governance
+
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — development, testing, and pull
+  request expectations.
+- [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — participation rules.
+- [`SECURITY.md`](SECURITY.md) — private vulnerability reporting and
+  security scope.
+
 ## Build
 
 This follows the standard DuckDB out-of-tree extension layout.
