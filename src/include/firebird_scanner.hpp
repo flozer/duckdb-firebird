@@ -48,10 +48,16 @@ struct FirebirdBindData : public TableFunctionData {
     duckdb::vector<std::string> extra_predicates;
     // How to handle Firebird text columns whose CHARACTER SET is NONE
     // (server does NOT transliterate, so the bytes arriving in our
-    // buffers can be anything). Default STRICT raises on non-UTF-8;
-    // WIN1252 / ISO_8859_1 transcode to UTF-8; BLOB surfaces the
-    // column as DuckDB BLOB. See enum NoneEncoding.
-    NoneEncoding none_encoding = NoneEncoding::STRICT;
+    // buffers can be anything). The default is WIN1252 because the
+    // overwhelming majority of legacy Brazilian / Western-European
+    // Firebird databases — Athenas, IBExpert exports, RM Sistemas,
+    // delphi-era ERPs — wrote their NONE columns through a
+    // Windows-1252 client. STRICT raises on non-UTF-8 and is the
+    // safest choice for known-UTF-8-source databases; ISO_8859_1
+    // covers Latin-1 inputs; BLOB surfaces the column as DuckDB BLOB
+    // (raw bytes). Aligned with fb-cdc-rust's `charset_for_none_fields`
+    // default. See enum NoneEncoding.
+    NoneEncoding none_encoding = NoneEncoding::WIN1252;
     // True when RDB$DATABASE.RDB$CHARACTER_SET_NAME = NONE. Drives
     // the warning + influences pushdown safety (text-filter literals
     // are UTF-8 in DuckDB and may not round-trip against NONE bytes).
@@ -75,7 +81,7 @@ void LoadTableSchema(FirebirdConnection &conn,
                      duckdb::vector<std::string> &out_names,
                      duckdb::vector<LogicalType> &out_types,
                      duckdb::vector<FirebirdColumnDesc> &out_descs,
-                     NoneEncoding none_encoding = NoneEncoding::STRICT);
+                     NoneEncoding none_encoding = NoneEncoding::WIN1252);
 
 // Reads `RDB$DATABASE.RDB$CHARACTER_SET_NAME`. Returns true when the
 // database-level default is NONE. Best-effort: any RDB$ error returns

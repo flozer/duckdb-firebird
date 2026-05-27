@@ -37,7 +37,7 @@ public:
                         optional_idx                     limit,
                         const std::string               &extra_predicate = {},
                         const std::vector<FirebirdColumnDesc> *column_descs = nullptr,
-                        NoneEncoding                     none_encoding = NoneEncoding::STRICT);
+                        NoneEncoding                     none_encoding = NoneEncoding::WIN1252);
 };
 
 } // namespace duckdb

@@ -470,7 +470,10 @@ static FirebirdConnectionInfo BuildConnectionInfo(const std::string &path,
                                                   AttachInfo &info,
                                                   NoneEncoding &out_none) {
     auto conn = FirebirdConnectionInfo::Parse(path);
-    out_none = NoneEncoding::STRICT;
+    // Match the firebird_scan default — most NONE-storage databases we
+    // see in the wild (Athenas-ERP, IBExpert exports, Delphi-era apps)
+    // wrote through a Windows-1252 client.
+    out_none = NoneEncoding::WIN1252;
     for (auto &kv : info.options) {
         const auto &key = kv.first;
         const auto &val = kv.second;

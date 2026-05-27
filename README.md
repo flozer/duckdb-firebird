@@ -90,39 +90,43 @@ bind time with a hint.
 When the **database itself** (or any text column) is declared
 `CHARACTER SET NONE`, Firebird does *not* transliterate the bytes
 to the client's `lc_ctype` — it just hands the raw bytes through.
-DuckDB's VARCHAR requires valid UTF-8, so the extension's default
-**strict** mode raises an informative error the first time it
-encounters non-UTF-8 bytes:
+DuckDB's VARCHAR requires valid UTF-8, so the extension has to
+choose how to decode those bytes.
 
-```
-IO Error: firebird: column 'NAME' has Firebird CHARACTER SET NONE and
-the row's bytes are not valid UTF-8. Pass none_encoding='win1252'
-(or 'iso8859_1', or 'blob') to firebird_scan() / ATTACH so the
-extension knows how to surface the bytes.
-```
-
-Pick the mode that matches what your application wrote into Firebird:
-
-| `none_encoding=` | Effect |
-|---|---|
-| `'strict'` (default) | Accepts only valid UTF-8; raises otherwise. |
-| `'win1252'`          | Decodes bytes as Windows-1252 → UTF-8 (covers Brazilian Portuguese / Western European apps that wrote through a Windows client). |
-| `'iso8859_1'` (alias `'latin1'`) | Decodes bytes as ISO-8859-1 → UTF-8. |
-| `'blob'`             | Surfaces NONE text columns as DuckDB `BLOB` instead of `VARCHAR` (use when you don't know the encoding and want raw bytes). |
+The default is **`none_encoding='win1252'`** — aligned with
+firebird-cdc-rust's `charset_for_none_fields` setting and matches
+the overwhelming majority of legacy Brazilian / Western-European
+ERPs (Athenas, IBExpert exports, Delphi-era apps, RM Sistemas, …)
+that wrote their NONE columns through a Windows-1252 client.
 
 ```sql
--- firebird_scan
-SELECT * FROM firebird_scan('C:/data/legacy.fdb', 'TABENTRADASAIDA',
-                            none_encoding='win1252');
-
--- ATTACH catalog
-ATTACH 'C:/data/legacy.fdb' AS legacy
-    (TYPE firebird, user 'SYSDBA', password 'masterkey',
-     none_encoding 'win1252');
+-- No option needed for the common case:
+SELECT * FROM firebird_scan('C:/legacy/athenas.fdb', 'TABENTRADASAIDA');
+ATTACH 'C:/legacy/athenas.fdb' AS legacy (TYPE firebird,
+                                          user 'SYSDBA',
+                                          password 'masterkey');
 SELECT * FROM legacy.main.TABENTRADASAIDA;
 ```
 
-While `none_encoding` is active (anything other than `strict`),
+If your database wrote NONE columns through a different encoding,
+or if you want a hard fail when the bytes don't decode cleanly,
+pass `none_encoding` explicitly:
+
+| `none_encoding=` | Effect |
+|---|---|
+| `'win1252'` (default) | Decodes bytes as Windows-1252 → UTF-8. |
+| `'iso8859_1'` (alias `'latin1'`) | Decodes bytes as ISO-8859-1 → UTF-8 (covers strict Latin-1 inputs). |
+| `'strict'` | Accepts only valid UTF-8; raises an informative `IOException` otherwise. Use when the source is guaranteed UTF-8 and you want any drift to surface immediately. |
+| `'blob'` | Surfaces NONE text columns as DuckDB `BLOB` instead of `VARCHAR` — use when you don't know the encoding and want raw bytes. |
+
+> Note: do **not** confuse `none_encoding=` with `charset=`.
+> `charset=` controls Firebird's `lc_ctype` for the connection
+> (the wire client's encoding); `none_encoding=` controls how the
+> extension interprets bytes from **NONE-declared columns** *after*
+> they reach DuckDB. For Athenas-style databases use the defaults:
+> `charset=UTF8` + `none_encoding=win1252` (i.e. no overrides).
+
+While `none_encoding` is `'win1252'`, `'iso8859_1'`, or `'blob'`,
 filter pushdown on text columns whose Firebird charset is `NONE` is
 **disabled** — DuckDB's literals are UTF-8 and would not match the
 raw bytes server-side. Numeric / date filters are still pushed.

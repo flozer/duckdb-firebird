@@ -22,7 +22,7 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
                          idx_t col_idx,
                          Vector &target,
                          idx_t target_offset,
-                         NoneEncoding none_encoding = NoneEncoding::STRICT);
+                         NoneEncoding none_encoding = NoneEncoding::WIN1252);
 
 // Quotes a Firebird identifier for inclusion in generated SQL. Per the SQL
 // standard Firebird upper-cases unquoted identifiers; we always emit

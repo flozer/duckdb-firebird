@@ -114,10 +114,13 @@ static std::string TranscodeNoneCharset(const std::string &raw,
         if (IsValidUtf8(raw.data(), raw.size())) return raw;
         throw IOException(
             "firebird: column '" + col_name + "' has Firebird CHARACTER SET "
-            "NONE and the row's bytes are not valid UTF-8. Pass "
-            "none_encoding='win1252' (or 'iso8859_1', or 'blob') to "
-            "firebird_scan() / ATTACH so the extension knows how to surface "
-            "the bytes. See README → 'Charset handling: CHARACTER SET NONE'.");
+            "NONE and the row's bytes are not valid UTF-8 under strict mode. "
+            "For legacy Brazilian / Western-European ERPs (Athenas, IBExpert "
+            "exports, Delphi-era apps), pass none_encoding='win1252' — that "
+            "is also the default when this option is omitted. Other choices: "
+            "none_encoding='iso8859_1' (alias 'latin1') for pure Latin-1 "
+            "inputs, or none_encoding='blob' to surface raw bytes. See "
+            "README -> 'Charset handling: CHARACTER SET NONE'.");
     case NoneEncoding::WIN1252:    return Win1252ToUtf8(raw);
     case NoneEncoding::ISO_8859_1: return Latin1ToUtf8(raw);
     case NoneEncoding::BLOB:

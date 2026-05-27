@@ -13,6 +13,23 @@ require firebird
 
 require-env FIREBIRD_NONE_DB
 
+# --- Default mode (no option) is WIN1252 ------------------------------
+# Aligned with firebird-cdc-rust's `charset_for_none_fields` default:
+# the typical Athenas / IBExpert / Delphi-era Brazilian Firebird
+# database writes its NONE columns through a Windows-1252 client.
+
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT')
+ WHERE ID = 2;
+----
+2	São Paulo
+
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT')
+ WHERE ID = 3;
+----
+3	“hi”
+
 # --- ASCII row passes strict + every other encoding ------------------
 
 query II
@@ -160,12 +177,22 @@ SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding=
 ----
 2	São Paulo
 
+# --- Default none_encoding (no explicit option) returns the correct
+# row for an accented literal — confirms WIN1252 is the operational
+# default for CHARACTER SET NONE databases.
+
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT')
+ WHERE LABEL = 'São Paulo';
+----
+2	São Paulo
+
 # --- STRICT mode still pushes text filters (no transcoding needed) -
 # Row 1 is pure ASCII so the strict path doesn't error here. Verify
 # the pushdown path still returns the correct row.
 
 query II
-SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT')
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='strict')
  WHERE LABEL = 'pure ascii';
 ----
 1	pure ascii
