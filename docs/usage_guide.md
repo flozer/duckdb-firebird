@@ -166,7 +166,7 @@ FROM firebird_tables('C:/dados/empresa.fdb');
 
 ```sql
 SELECT *
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABPESSOAS')
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABPESSOAS')
 LIMIT 10;
 ```
 
@@ -189,7 +189,7 @@ senha:
 ```sql
 SELECT *
 FROM firebird_scan(
-    'C:/Athenas/restaurado.fdb',
+    'C:/legacy/erp.fdb',
     'TABPESSOAS',
     user='SYSDBA',
     password='masterkey',
@@ -215,7 +215,7 @@ Na maioria dos casos, nao passe nada:
 
 ```sql
 SELECT *
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABPESSOAS')
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABPESSOAS')
 LIMIT 10;
 ```
 
@@ -224,7 +224,7 @@ Se precisar ser explicito:
 ```sql
 SELECT *
 FROM firebird_scan(
-    'C:/Athenas/restaurado.fdb',
+    'C:/legacy/erp.fdb',
     'TABPESSOAS',
     none_encoding='win1252'
 );
@@ -262,12 +262,12 @@ combine `row_limit` e `row_offset`:
 ```sql
 -- Primeira pagina: 1000 linhas.
 SELECT *
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABENTRADASAIDA',
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABENTRADASAIDA',
                    row_limit=1000);
 
 -- Pagina seguinte: pula 1000, traz proximas 1000.
 SELECT *
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABENTRADASAIDA',
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABENTRADASAIDA',
                    row_limit=1000, row_offset=1000);
 ```
 
@@ -298,12 +298,12 @@ Exemplos:
 ```sql
 -- NOT IN
 SELECT COUNT(*)
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABENTRADASAIDA')
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABENTRADASAIDA')
 WHERE CODIGOEMPRESA NOT IN (99, 100, 101);
 
 -- LIKE com prefixo (apostrofo no literal e seguro):
 SELECT IDMASTER, OBSERVACOES
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABENTRADASAIDA')
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABENTRADASAIDA')
 WHERE OBSERVACOES LIKE 'CONTA PARA%'
 LIMIT 5;
 ```
@@ -323,7 +323,7 @@ Comece descobrindo as tabelas:
 
 ```sql
 SELECT *
-FROM firebird_tables('C:/Athenas/restaurado.fdb')
+FROM firebird_tables('C:/legacy/erp.fdb')
 ORDER BY table_name;
 ```
 
@@ -331,7 +331,7 @@ Veja algumas linhas:
 
 ```sql
 SELECT *
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABPESSOAS')
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABPESSOAS')
 LIMIT 20;
 ```
 
@@ -339,7 +339,7 @@ Conte linhas antes de materializar:
 
 ```sql
 SELECT count(*) AS linhas
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABPESSOAS');
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABPESSOAS');
 ```
 
 Olhe tipos inferidos pelo DuckDB:
@@ -347,13 +347,13 @@ Olhe tipos inferidos pelo DuckDB:
 ```sql
 DESCRIBE
 SELECT *
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABPESSOAS');
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABPESSOAS');
 ```
 
 Quando usar `ATTACH`, navegue com nomes qualificados:
 
 ```sql
-ATTACH 'C:/Athenas/restaurado.fdb' AS fb
+ATTACH 'C:/legacy/erp.fdb' AS fb
     (TYPE firebird, user 'SYSDBA', password 'masterkey');
 
 SHOW DATABASES;
@@ -369,7 +369,7 @@ Quando voce anexa a base como catalogo, as ferramentas padrao do
 DuckDB enxergam tudo:
 
 ```sql
-ATTACH 'C:/Athenas/restaurado.fdb' AS fb
+ATTACH 'C:/legacy/erp.fdb' AS fb
     (TYPE firebird, user 'SYSDBA', password 'masterkey');
 
 -- Listagem de tabelas (e views) do catalogo Firebird:
@@ -422,7 +422,7 @@ SELECT
     CNPJCPF,
     CIDADE,
     UF
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABPESSOAS');
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABPESSOAS');
 ```
 
 Crie views para as tabelas principais:
@@ -437,7 +437,7 @@ SELECT
     DATAMOVIMENTO,
     VALORTOTAL,
     TIPO
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABENTRADASAIDA');
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABENTRADASAIDA');
 ```
 
 Agora o analista consulta objetos com nomes mais amigaveis:
@@ -539,11 +539,11 @@ CREATE SCHEMA IF NOT EXISTS gold;
 
 CREATE OR REPLACE VIEW bronze.pessoas AS
 SELECT *
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABPESSOAS');
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABPESSOAS');
 
 CREATE OR REPLACE VIEW bronze.entrada_saida AS
 SELECT *
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABENTRADASAIDA');
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABENTRADASAIDA');
 
 CREATE OR REPLACE TABLE silver.pessoas AS
 SELECT *
@@ -614,7 +614,7 @@ SELECT
     DATAMOVIMENTO,
     VALORTOTAL,
     TIPO
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABENTRADASAIDA')
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABENTRADASAIDA')
 WHERE DATAMOVIMENTO >= current_date - INTERVAL 30 DAY;
 
 COMMIT;
@@ -725,7 +725,7 @@ con.execute("LOAD firebird")
 
 df = con.execute("""
     SELECT *
-    FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABPESSOAS')
+    FROM firebird_scan('C:/legacy/erp.fdb', 'TABPESSOAS')
     LIMIT 1000
 """).df()
 
@@ -786,7 +786,7 @@ materializada:
 ```sql
 -- Ao vivo: bom para dados recentes e exploracao inicial.
 SELECT count(*)
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABENTRADASAIDA')
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABENTRADASAIDA')
 WHERE DATAMOVIMENTO >= DATE '2024-01-01';
 
 -- Local: melhor para analise repetida.
@@ -822,7 +822,7 @@ LOAD firebird;
 
 -- 2. Explorar origem.
 SELECT *
-FROM firebird_tables('C:/Athenas/restaurado.fdb')
+FROM firebird_tables('C:/legacy/erp.fdb')
 ORDER BY table_name;
 
 -- 3. Criar schemas.
@@ -833,7 +833,7 @@ CREATE SCHEMA IF NOT EXISTS gold;
 -- 4. Criar view da origem.
 CREATE OR REPLACE VIEW bronze.pessoas AS
 SELECT *
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABPESSOAS');
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABPESSOAS');
 
 -- 5. Materializar local.
 CREATE OR REPLACE TABLE silver.pessoas AS
@@ -902,7 +902,7 @@ SELECT
     CODIGOPESSOA,
     DATAMOVIMENTO,
     VALORTOTAL
-FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABENTRADASAIDA')
+FROM firebird_scan('C:/legacy/erp.fdb', 'TABENTRADASAIDA')
 WHERE DATAMOVIMENTO >= DATE '2024-01-01';
 ```
 

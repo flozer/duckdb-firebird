@@ -397,7 +397,7 @@ The MVP flow against an Athenas-style legacy database:
 LOAD firebird;
 INSTALL httpfs; LOAD httpfs;
 
-ATTACH 'C:/Athenas/restaurado.fdb' AS fb
+ATTACH 'C:/legacy/erp.fdb' AS fb
     (TYPE firebird, user 'SYSDBA', password 'masterkey');
 
 CREATE SCHEMA IF NOT EXISTS bronze;
@@ -451,14 +451,14 @@ For an MVP commercial release:
 
 ## Release-testing checklist (run before every push to main)
 
-Live, against the Athenas fixture and the EMPLOYEE / FB4_TYPES
+Live, against an anonymized legacy ERP fixture and the EMPLOYEE / FB4_TYPES
 fixtures, on both FB4 and FB5 (swap `fbclient.dll` in
 `build\release\` between runs):
 
 ```sql
 LOAD firebird;
 
-ATTACH 'C:/Athenas/restaurado.fdb' AS fb
+ATTACH 'C:/legacy/erp.fdb' AS fb
     (TYPE firebird, user 'SYSDBA', password 'masterkey');
 
 -- Smoke: connectivity + row counts.
@@ -469,7 +469,7 @@ SELECT COUNT(*) FROM fb.main.TABENTRADASAIDA;
 SELECT * FROM fb.main.TABPESSOAS WHERE BAIRRO IS NOT NULL LIMIT 20;
 
 -- Paging (once #9 lands).
-SELECT * FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABPESSOAS',
+SELECT * FROM firebird_scan('C:/legacy/erp.fdb', 'TABPESSOAS',
                             row_limit=100, row_offset=900);
 
 -- Materialisation.

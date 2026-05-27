@@ -229,9 +229,9 @@ mistakes and lets Firebird reuse prepared plans. TIMESTAMP_TZ /
 TIME_TZ / INT128 / DECFLOAT remain residual in DuckDB on the bind
 path.
 
-### Live Athenas verification (FB5, May 2026)
+### Live legacy ERP verification (FB5, May 2026)
 
-A real ERP backup (`C:/Athenas/restaurado.fdb`) was used to smoke
+An anonymized legacy ERP backup was used to smoke
 each v0.5 flow end-to-end:
 
 | Flow | Result |

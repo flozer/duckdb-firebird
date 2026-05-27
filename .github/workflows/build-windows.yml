@@ -63,6 +63,9 @@ jobs:
           } else {
             $env:FIREBIRD_SDK_URL
           }
+          if ($url -notmatch '^https://github\.com/FirebirdSQL/firebird/releases/download/.+\.zip$') {
+            throw "Unsupported Firebird SDK URL. Use an official https://github.com/FirebirdSQL/firebird/releases/download/... .zip URL."
+          }
           Write-Host "Downloading $url"
           $zip = Join-Path $env:RUNNER_TEMP 'firebird-sdk.zip'
           Invoke-WebRequest -Uri $url -OutFile $zip
