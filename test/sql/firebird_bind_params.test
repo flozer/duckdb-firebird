@@ -1,0 +1,94 @@
+# name: test/sql/firebird_bind_params.test
+# description: Prepared-statement bind variables (v0.5 item #10)
+# group: [firebird]
+#
+# Exercises the new input-XSQLDA path: filter constants land as '?'
+# placeholders in the SQL sent to Firebird, with values bound through
+# isc_dsql_describe_bind / isc_dsql_execute. Strings always parametrise
+# (so embedded apostrophes can't break the SQL); HUGEINT / DECIMAL /
+# TIMESTAMP_TZ fall back to literal inline since their bind-side
+# encoding isn't supported in v0.5 yet.
+#
+# Requires the EMPLOYEE fixture + a TQUOTES table (created on the
+# fly below if missing).
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+# --- INTEGER equality bound through XSQLDA --------------------------
+
+query II
+SELECT EMP_ID, EMP_NAME FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE EMP_ID = 4;
+----
+4	Diana Davis
+
+# --- IN-list of INTEGERs all bound ----------------------------------
+
+query I rowsort
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE EMP_ID IN (1, 3, 5)
+ ORDER BY EMP_ID;
+----
+1
+3
+5
+
+# --- DATE comparison bound ------------------------------------------
+
+query II rowsort
+SELECT EMP_ID, HIRE_DATE FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE HIRE_DATE >= DATE '2020-01-01'
+ ORDER BY EMP_ID;
+----
+1	2020-03-15
+3	2022-11-20
+5	2021-06-30
+
+# --- VARCHAR with no special chars bound ----------------------------
+
+query II
+SELECT EMP_ID, EMP_NAME FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE EMP_NAME = 'Alice Andersson';
+----
+1	Alice Andersson
+
+# --- VARCHAR with apostrophe — must round-trip without breaking SQL -
+# The whole point of parameterising strings. The bind path means we
+# never need to double-quote, so user-supplied apostrophes can't
+# break the statement.
+
+statement ok
+CREATE OR REPLACE TABLE local_apostrophe_check AS
+SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'TQUOTES')
+ WHERE LABEL = 'D''Agua';
+
+query II
+SELECT ID, LABEL FROM local_apostrophe_check;
+----
+1	D'Agua
+
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'TQUOTES')
+ WHERE LABEL = 'O''Brien & Co';
+----
+1
+
+# --- BOOLEAN parameter bound ---------------------------------------
+
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE ACTIVE = TRUE;
+----
+4
+
+# --- IS NULL / IS NOT NULL still emit no parameters -----------------
+
+query I
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE NOTE IS NULL
+ ORDER BY EMP_ID;
+----
+2
+5

@@ -195,12 +195,68 @@ VARCHAR. The mapping now matches Firebird's `blr.h` upstream.
 The README's "Arrow Flight SQL via GizmoSQL" section documents the
 init.sql shape and the deployment constraint.
 
+## v0.5 additions (May 2026, feat/v0.5-analytics-platform branch)
+
+The v0.5 series adds analyst-facing capabilities on top of the v0.4
+core. All items below are verified against both FB5 (Windows local)
+and FB4 (embedded `C:\fb4`).
+
+| Capability | How verified |
+|---|---|
+| `row_offset` named param (paging) | `firebird_paging.test` — standalone `row_limit`, `row_limit + row_offset`, partitions guard, overflow guard |
+| Prepared statements with input XSQLDA bind | `firebird_bind_params.test` — apostrofe (`D'Agua`), `IN`, DATE, BOOLEAN, IS NULL |
+| `NOT IN` + boolean `NOT` pushdown | `firebird_predicates.test` — server-side translation confirmed via `EXPLAIN` |
+| `CHARACTER SET NONE` decoding modes | `firebird_none_charset.test` — `strict` / `win1252` (default) / `iso8859_1` / `blob`, with ATTACH + filter coverage |
+| `information_schema` + `SHOW` + `DESCRIBE` | `firebird_metadata.test` — full BI-tool introspection surface locked in |
+| `RDB$NULL_FLAG` propagation | `firebird_metadata.test` + `firebird_attach.test` — `is_nullable = NO` for declared NOT NULL columns; `NotNullConstraint` applied in CreateTableInfo |
+
+### Paging caveat
+
+`row_limit`/`row_offset` emit `ROWS M+1 TO M+N` in Firebird (1-based,
+inclusive). When paging is requested, the scan is forced serial
+(`partitions = 1` internally); requesting `partitions > 1` together
+with explicit paging is rejected at bind. This is physical paging,
+not keyset pagination — without a stable `ORDER BY`, successive pages
+may repeat or skip rows.
+
+### Bind variables (internal)
+
+Filter values that are safe to bind (DATE / TIMESTAMP / VARCHAR /
+INTEGER / BIGINT / FLOAT / DOUBLE / BOOLEAN, excluding unsigned ints
+and TZ types) are emitted as Firebird XSQLDA input parameters rather
+than inline. This is transparent to the user; it prevents escape
+mistakes and lets Firebird reuse prepared plans. TIMESTAMP_TZ /
+TIME_TZ / INT128 / DECFLOAT remain residual in DuckDB on the bind
+path.
+
+### Live Athenas verification (FB5, May 2026)
+
+A real ERP backup (`C:/Athenas/restaurado.fdb`) was used to smoke
+each v0.5 flow end-to-end:
+
+| Flow | Result |
+|---|---|
+| `row_limit=1000` on `TABENTRADASAIDA` | 1000 rows |
+| `row_limit=5, row_offset=100000` | 5 IDMASTER values, paged from offset |
+| VARCHAR bind, `OBSERVACOES LIKE 'CONTA PARA%'` | matches preserved with apostrophes |
+| NONE col bind, `BAIRRO = 'CENTRO'` on `TABPESSOAS` | 1446 rows (residual + win1252 default) |
+| `CODIGOEMPRESA NOT IN (99, 100, 101)` | 1 170 839 rows |
+| `DESCRIBE fb.main.TABPESSOAS` | full column list with correct types |
+| `information_schema.columns` filter on `fb.TABPESSOAS` | column list with `ordinal_position`, `is_nullable` |
+| `SHOW TABLES FROM fb` | 2786 entries |
+
 ## sqllogictest summary
 
 ```
-test/sql/firebird_scan.test    — 124 assertions, all green
-test/sql/firebird_attach.test  —  79 assertions, all green
-total                          — 203 assertions
+test/sql/firebird_scan.test          — 124 assertions, all green
+test/sql/firebird_attach.test        —  79 assertions, all green
+test/sql/firebird_paging.test        —  16 assertions, all green
+test/sql/firebird_bind_params.test   —  20 assertions, all green
+test/sql/firebird_predicates.test    —  13 assertions, all green
+test/sql/firebird_none_charset.test  —  42 assertions, all green
+test/sql/firebird_metadata.test      —  79 assertions, all green
+total (FB5)                          — 373 assertions
+total (FB4 embedded)                 — 373 assertions (FB4 covers TZ + DECFLOAT natively)
 ```
 
 CI: `.github/workflows/build-linux.yml` reproduces this entire setup
@@ -211,3 +267,17 @@ builds, and replays both test files) on every push to a
 `.github/workflows/build-windows.yml` builds the same code with
 `windows-latest` against a downloaded Firebird Windows SDK ZIP and
 uploads the resulting `firebird.duckdb_extension` as a release artifact.
+
+### Known gaps deferred past v0.5
+
+- `information_schema.tables.table_type` reports `BASE TABLE` for
+  Firebird views (`RDB$RELATION_TYPE = 1`). Distinguishing `VIEW`
+  needs a ViewCatalogEntry path in the storage extension; punted
+  past v0.5.
+- No LRU connection cache. The current pool tears down on DETACH and
+  rebuilds on next attach; fine for analyst sessions, revisited if
+  long-lived ATTACH workloads emerge.
+- No automatic `LIMIT` pushdown. The optimizer can move LIMIT below
+  the scan in some DuckDB plans, but the storage extension does not
+  yet rewrite `LIMIT N` into a Firebird `ROWS 1 TO N` automatically;
+  users opt in via `row_limit=`.

@@ -36,16 +36,30 @@ struct FirebirdBindData : public TableFunctionData {
     // LIMIT pushdown hook, so this is opt-in via the `row_limit=N` named
     // parameter for callers who know they only need the first N rows.
     optional_idx limit_override;
+    // Optional 0-based offset paired with `row_limit`. Emits Firebird's
+    // `ROWS M+1 TO M+N` form. v0.5 deliberately requires `row_limit`
+    // alongside `row_offset` (FirebirdScanBind raises a BinderException
+    // if only the offset is set) — pure offset is a "skip then drain"
+    // pattern that is expensive and surprising.
+    optional_idx offset_override;
     // Optional shared connection pool — populated by the ATTACH path
     // (FirebirdTableEntry::GetScanFunction). Direct firebird_scan() calls
     // leave this null, so each LocalState constructs its own connection.
     std::shared_ptr<FirebirdConnectionPool> pool;
-    // Pre-translated WHERE fragments that DuckDB's TableFilterSet path
-    // can't express — currently `col LIKE 'prefix%' ESCAPE '\'` lifted
-    // from the BoundFunctionExpression filter set. Each entry already
-    // has its identifiers / literals quoted; the builder splices them
-    // into the WHERE clause with AND glue.
-    duckdb::vector<std::string> extra_predicates;
+    // Pre-translated WHERE fragments lifted from BoundFunctionExpression
+    // filters that the TableFilterSet path doesn't carry — LIKE 'prefix%'
+    // ESCAPE '\\', NOT IN (?, ?, ...), BETWEEN ? AND ?, and the boolean
+    // NOT (...) wrapper around any of the above. Each entry already has
+    // its identifiers via QuoteIdent and emits `?` placeholders for the
+    // value positions; `params` holds the matching constants in the
+    // same order they appear inside `sql`. The scanner concatenates the
+    // SQL fragments with AND glue and threads the params through the
+    // bind path (FirebirdQueryBuilder + FirebirdConnection::OpenCursor).
+    struct ExtraPredicate {
+        std::string sql;
+        duckdb::vector<Value> params;
+    };
+    duckdb::vector<ExtraPredicate> extra_predicates;
     // How to handle Firebird text columns whose CHARACTER SET is NONE
     // (server does NOT transliterate, so the bytes arriving in our
     // buffers can be anything). The default is WIN1252 because the

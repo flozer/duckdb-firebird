@@ -21,44 +21,60 @@ namespace duckdb {
 // the safe set falls through as a "residual" filter that DuckDB re-applies
 // above the scan.
 
-static bool FormatLiteral(const Value &v, std::string &out) {
-    if (v.IsNull()) { out = "NULL"; return true; }
-
-    switch (v.type().id()) {
+// Whether the value's LogicalType can be safely bound as an input
+// parameter to a Firebird prepared statement (matches the encoding
+// branches in FirebirdStatement::BindInputParameters). NULL is fine
+// here too — the indicator slot carries the NULL flag and the
+// XSQLVAR's described sqltype tells the encoder which buffer shape
+// to use, so even a NULL VARCHAR / DATE / etc. binds correctly.
+//
+// Unsigned integer types are deliberately *not* in this whitelist:
+// Firebird has no unsigned counterpart, so the XSQLVAR for a column
+// or parameter is always signed and our encoder casts to the matching
+// signed width. A UBIGINT > INT64_MAX would silently wrap to a
+// negative value — better to let those filters stay residual in DuckDB.
+static bool IsBindableType(const LogicalType &t) {
+    switch (t.id()) {
     case LogicalTypeId::BOOLEAN:
-        out = v.GetValue<bool>() ? "TRUE" : "FALSE";
-        return true;
     case LogicalTypeId::TINYINT:
     case LogicalTypeId::SMALLINT:
     case LogicalTypeId::INTEGER:
     case LogicalTypeId::BIGINT:
-    case LogicalTypeId::HUGEINT:
-    case LogicalTypeId::UTINYINT:
-    case LogicalTypeId::USMALLINT:
-    case LogicalTypeId::UINTEGER:
-    case LogicalTypeId::UBIGINT:
     case LogicalTypeId::FLOAT:
     case LogicalTypeId::DOUBLE:
+    case LogicalTypeId::VARCHAR:
+    case LogicalTypeId::DATE:
+    case LogicalTypeId::TIME:
+    case LogicalTypeId::TIMESTAMP:
+        return true;
+    // HUGEINT, DECIMAL (variable width), unsigned ints, TIMESTAMP_TZ,
+    // TIME_TZ, BLOB, INTERVAL — not in v0.5 parameter encoding yet.
+    // Some still inline as literals through SafeLiteralInline below.
+    default:
+        return false;
+    }
+}
+
+// Fallback path for types we can't bind through XSQLDA but can safely
+// stringify as literals (HUGEINT, DECIMAL with any precision). Strings
+// are deliberately *not* included here — a VARCHAR with an embedded
+// apostrophe would corrupt the SQL even with quote-doubling on the
+// Firebird side if the storage charset doesn't match, so VARCHARs
+// always go through bind variables.
+//
+// TIMESTAMP_TZ / TIME_TZ are *also* excluded: DuckDB's `Value::ToString()`
+// emits a form like '2026-05-25 17:30:00+00' that Firebird's literal
+// parser does not accept uniformly across dialects (FB4 added the type
+// but the literal syntax varies). Filters with TZ literals stay
+// residual in DuckDB until we have a verified bind/literal story
+// (tracked in docs/roadmap.md "Milestone v0.5").
+static bool SafeLiteralInline(const Value &v, std::string &out) {
+    if (v.IsNull()) { out = "NULL"; return true; }
+    switch (v.type().id()) {
+    case LogicalTypeId::HUGEINT:
+    case LogicalTypeId::UHUGEINT:
     case LogicalTypeId::DECIMAL:
         out = v.ToString();
-        return true;
-    case LogicalTypeId::VARCHAR: {
-        // Single-quoted, doubling embedded quotes.
-        std::string s = v.GetValue<std::string>();
-        out.reserve(s.size() + 2);
-        out.push_back('\'');
-        for (char c : s) { if (c == '\'') out.push_back('\''); out.push_back(c); }
-        out.push_back('\'');
-        return true;
-    }
-    case LogicalTypeId::DATE:
-        out = "DATE '" + v.ToString() + "'";
-        return true;
-    case LogicalTypeId::TIME:
-        out = "TIME '" + v.ToString() + "'";
-        return true;
-    case LogicalTypeId::TIMESTAMP:
-        out = "TIMESTAMP '" + v.ToString() + "'";
         return true;
     default:
         return false;
@@ -77,12 +93,21 @@ static const char *ComparisonToSql(ExpressionType t) {
     }
 }
 
-// Recursively try to translate a TableFilter on `column_name`. Writes into
-// `out` on success and returns true. Caller is responsible for placing the
-// generated fragment inside the outer WHERE clause.
+// Recursively try to translate a TableFilter on `column_name`. Writes the
+// SQL fragment into `out` and any bindable constants into `params_out` on
+// success. Returns true on success; on failure (unsupported shape or
+// non-bindable constant) `out` / `params_out` are left in an
+// indeterminate state and the caller marks the filter residual.
+//
+// Why we never fall back to literal interpolation here: mixing bound and
+// inlined values in the same prepared statement is awkward (we'd need a
+// second branch in the encoder, and CHARACTER SET NONE strings would
+// still be a foot-gun on Firebird's side). Cleaner to either fully
+// parameterise the predicate or to leave the whole thing residual.
 static bool TranslateFilter(const std::string &column_name,
                             const TableFilter &filter,
-                            std::string &out) {
+                            std::string &out,
+                            std::vector<Value> &params_out) {
     switch (filter.filter_type) {
     case TableFilterType::IS_NULL:
         out = column_name + " IS NULL";
@@ -94,17 +119,33 @@ static bool TranslateFilter(const std::string &column_name,
         auto &c = filter.Cast<ConstantFilter>();
         const char *op = ComparisonToSql(c.comparison_type);
         if (!op) return false;
+        if (IsBindableType(c.constant.type())) {
+            out = column_name + " " + op + " ?";
+            params_out.push_back(c.constant);
+            return true;
+        }
+        // Fallback for types we can safely stringify (HUGEINT, DECIMAL,
+        // TIMESTAMP_TZ) but don't yet support as bind parameters. Strings
+        // are *not* in this fallback — they always parametrise.
         std::string lit;
-        if (!FormatLiteral(c.constant, lit)) return false;
-        out = column_name + " " + op + " " + lit;
-        return true;
+        if (SafeLiteralInline(c.constant, lit)) {
+            out = column_name + " " + op + " " + lit;
+            return true;
+        }
+        return false;
     }
     case TableFilterType::CONJUNCTION_AND: {
         auto &c = filter.Cast<ConjunctionAndFilter>();
         std::string acc;
+        // Snapshot the params accumulator so an unsupported child can
+        // roll back any params siblings already pushed for this branch.
+        const size_t saved = params_out.size();
         for (auto &child : c.child_filters) {
             std::string part;
-            if (!TranslateFilter(column_name, *child, part)) return false;
+            if (!TranslateFilter(column_name, *child, part, params_out)) {
+                params_out.resize(saved);
+                return false;
+            }
             if (!acc.empty()) acc += " AND ";
             acc += "(" + part + ")";
         }
@@ -114,9 +155,13 @@ static bool TranslateFilter(const std::string &column_name,
     case TableFilterType::CONJUNCTION_OR: {
         auto &c = filter.Cast<ConjunctionOrFilter>();
         std::string acc;
+        const size_t saved = params_out.size();
         for (auto &child : c.child_filters) {
             std::string part;
-            if (!TranslateFilter(column_name, *child, part)) return false;
+            if (!TranslateFilter(column_name, *child, part, params_out)) {
+                params_out.resize(saved);
+                return false;
+            }
             if (!acc.empty()) acc += " OR ";
             acc += "(" + part + ")";
         }
@@ -131,11 +176,20 @@ static bool TranslateFilter(const std::string &column_name,
             out = "(1=0)";
             return true;
         }
+        const size_t saved = params_out.size();
         std::string acc = column_name + " IN (";
         for (size_t i = 0; i < c.values.size(); ++i) {
-            std::string lit;
-            if (!FormatLiteral(c.values[i], lit)) return false;
             if (i) acc += ", ";
+            if (IsBindableType(c.values[i].type())) {
+                acc += "?";
+                params_out.push_back(c.values[i]);
+                continue;
+            }
+            std::string lit;
+            if (!SafeLiteralInline(c.values[i], lit)) {
+                params_out.resize(saved);
+                return false;
+            }
             acc += lit;
         }
         acc += ")";
@@ -149,7 +203,7 @@ static bool TranslateFilter(const std::string &column_name,
         // correctness impact (DuckDB still applies it).
         auto &c = filter.Cast<OptionalFilter>();
         if (!c.child_filter) return false;
-        return TranslateFilter(column_name, *c.child_filter, out);
+        return TranslateFilter(column_name, *c.child_filter, out, params_out);
     }
     default:
         return false;  // unsupported: re-evaluated in DuckDB
@@ -188,7 +242,8 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
     optional_idx                     limit,
     const std::string               &extra_predicate,
     const std::vector<FirebirdColumnDesc> *column_descs,
-    NoneEncoding                     none_encoding) {
+    NoneEncoding                     none_encoding,
+    optional_idx                     offset) {
 
     Result r;
     std::ostringstream sql;
@@ -246,9 +301,16 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
                 continue;
             }
             std::string frag;
-            if (TranslateFilter(QuoteIdent(all_column_names[source_col]), filter, frag)) {
+            // Snapshot the params accumulator: if the filter can't be
+            // fully parametrised the partial bindings have to roll back
+            // so we don't ship a mismatched (params.size() != '?' count)
+            // statement to the server.
+            const size_t saved_params = r.params.size();
+            if (TranslateFilter(QuoteIdent(all_column_names[source_col]), filter,
+                                frag, r.params)) {
                 conds.push_back("(" + frag + ")");
             } else {
+                r.params.resize(saved_params);
                 r.residual_filter_indices.push_back(filter_idx);
             }
             ++filter_idx;
@@ -275,10 +337,19 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
         sql << "(" << extra_predicate << ")";
     }
 
-    // --- LIMIT pushdown ------------------------------------------------------
-    // Firebird ≥ 1.5 uses ROWS N; older dialects use FIRST N. We emit ROWS.
+    // --- LIMIT / OFFSET pushdown --------------------------------------------
+    // Firebird >= 1.5 uses `ROWS N` for top-N and `ROWS m TO n` (1-based,
+    // inclusive) for offset+limit. We never emit offset without limit —
+    // FirebirdScanBind rejects that combination at bind time so the caller
+    // sees an actionable error instead of an over-fetch.
     if (limit.IsValid()) {
-        sql << " ROWS " << limit.GetIndex();
+        if (offset.IsValid()) {
+            const idx_t start = offset.GetIndex() + 1;       // 1-based
+            const idx_t end   = offset.GetIndex() + limit.GetIndex();
+            sql << " ROWS " << start << " TO " << end;
+        } else {
+            sql << " ROWS " << limit.GetIndex();
+        }
     }
 
     r.sql = sql.str();

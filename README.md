@@ -278,7 +278,7 @@ Built and tested against **DuckDB v1.5.3** (Variegata). The
 so this branch targets v1.5.3+. (A v1.4-compatible variant lived earlier
 in the history if you need to pin older.)
 
-## What's implemented (v0.4.4)
+## What's implemented (v0.5, pre-release on feat/v0.5-analytics-platform)
 
 | Feature                                                 | Status |
 |---|---|
@@ -301,19 +301,24 @@ in the history if you need to pin older.)
 | Type mapping — INTEGER / VARCHAR / DECIMAL(scale) / DATE / TIMESTAMP / TIME / BOOLEAN / BLOB SUB_TYPE 1 → VARCHAR / BLOB | ✅ |
 | End-to-end test fixture in CI (Linux + real Firebird 3) | ✅ |
 | Windows x64 build via GitHub Actions                    | ✅ |
-| LIMIT pushdown (automatic, from a `LIMIT N` next to the scan) | 🟡 deferred — see `docs/roadmap.md` item 9 |
-| `row_offset` paging                                     | ⏳ v0.5 — see roadmap item 10 |
-| Prepared statement reuse with bind variables           | ⏳ v0.5 — see roadmap item 11 |
-| Arrow `RecordBatch` produced directly by the extension | ⏳ v1.x — today DuckDB does the conversion, see roadmap item 13 |
+| `row_limit=N` / `row_offset=M` paging — Firebird `ROWS m TO n` | ✅ (v0.5; auto-serial; explicit `partitions > 1` is rejected) |
+| Prepared statements with input XSQLDA bind variables   | ✅ (v0.5; HUGEINT / DECIMAL still inline-literal, TZ types residual) |
+| Extended predicate pushdown: `NOT IN`, `NOT bool`      | ✅ (v0.5; via `pushdown_complex_filter`) |
+| `information_schema.tables` / `.columns`, `SHOW TABLES`, `DESCRIBE` | ✅ (v0.5; regression-locked) |
+| LIMIT pushdown (automatic, from a `LIMIT N` next to the scan) | 🟡 deferred — see `docs/roadmap.md` item 12 (waiting for an upstream DuckDB hook) |
+| LRU prepared-statement cache per connection            | ⏳ deferred — bind variables shipped, cache pending a benchmark |
+| Arrow `RecordBatch` produced directly by the extension | ⏳ v1.x — today DuckDB does the conversion, see roadmap "Milestone v1.x" |
 | Stable C extension ABI                                  | ⏳ next |
 
 > **Arrow note**: this extension hands rows to DuckDB as native
 > `Vector` / `DataChunk` columns. When an Arrow Flight SQL client
 > (GizmoSQL, ADBC, Polars) consumes the result, the DuckDB engine —
 > not the extension — converts to `arrow::RecordBatch` at the
-> result-stream boundary. So Arrow integration works end-to-end,
-> but the scanner itself is not Arrow-native. A direct
-> `firebird_arrow_scan` is on the v1.x roadmap.
+> result-stream boundary. Arrow integration therefore works
+> end-to-end through DuckDB; the scanner itself is intentionally
+> *not* Arrow-native. A direct `firebird_arrow_scan` would be a
+> separate product/API (see `docs/roadmap.md` "Milestone v1.x")
+> and is not in scope for v0.5.
 
 ## Repository layout
 

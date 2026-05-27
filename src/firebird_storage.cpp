@@ -40,6 +40,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
@@ -277,6 +278,15 @@ private:
                                 none_encoding_);
                 for (size_t i = 0; i < col_names.size(); ++i) {
                     info.columns.AddColumn(ColumnDefinition(col_names[i], col_types[i]));
+                    // Firebird NOT NULL → DuckDB NotNullConstraint, so
+                    // information_schema.columns.is_nullable reports
+                    // 'NO' for the real NOT NULL columns. LogicalIndex
+                    // is the column's position in this CreateTableInfo,
+                    // which matches our iteration order.
+                    if (i < col_descs.size() && !col_descs[i].nullable) {
+                        info.constraints.push_back(
+                            make_uniq<NotNullConstraint>(LogicalIndex(i)));
+                    }
                 }
 
                 auto entry = make_uniq<FirebirdTableEntry>(

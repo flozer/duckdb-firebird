@@ -1,0 +1,168 @@
+# name: test/sql/firebird_metadata.test
+# description: catalog metadata coverage — SHOW, DESCRIBE, information_schema
+# group: [firebird]
+#
+# v0.5 item #13. Locks in the introspection surface that BI tools
+# (Power BI, dbt, ADBC clients via GizmoSQL) use to discover the
+# attached Firebird catalog. Any future refactor that breaks this
+# surface will fail here.
+#
+# Requires the EMPLOYEE / FILE_STORAGE / TQUOTES / V_ACTIVE_EMP
+# fixtures already loaded into `${FIREBIRD_TEST_DB}` (the same set
+# the existing firebird_attach.test relies on, plus TQUOTES from
+# the bind-params suite).
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird,
+                                     user 'SYSDBA',
+                                     password 'masterkey');
+
+# --- SHOW TABLES FROM fb -------------------------------------------
+#
+# DuckDB's SHOW TABLES FROM <catalog> walks the schema entries
+# registered by the storage extension. Order matters: DuckDB sorts
+# the result alphabetically.
+
+query I
+SHOW TABLES FROM fb;
+----
+EMPLOYEE
+FILE_STORAGE
+TQUOTES
+V_ACTIVE_EMP
+
+# --- DESCRIBE fb.main.EMPLOYEE -------------------------------------
+#
+# DESCRIBE returns a 6-column result (column_name, column_type, null,
+# key, default, extra). We project the two columns the storage
+# extension actually populates — the others are NULL today.
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE fb.main.EMPLOYEE);
+----
+EMP_ID	INTEGER
+EMP_NAME	VARCHAR
+DEPT_NO	VARCHAR
+SALARY	DECIMAL(18,2)
+HIRE_DATE	DATE
+ACTIVE	BOOLEAN
+NOTE	VARCHAR
+
+# --- DESCRIBE works on views too ----------------------------------
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE fb.main.V_ACTIVE_EMP);
+----
+EMP_ID	INTEGER
+EMP_NAME	VARCHAR
+DEPT_NO	VARCHAR
+
+# --- information_schema.tables -------------------------------------
+#
+# Every relation we expose lands as table_type='BASE TABLE'. This is
+# a known simplification: the storage extension doesn't yet
+# distinguish RDB$RELATION_TYPE = 1 (views) from regular tables in
+# the catalog layer. Recorded here so the regression catches any
+# future flip.
+
+query IIII
+SELECT table_catalog, table_schema, table_name, table_type
+  FROM information_schema.tables
+ WHERE table_catalog = 'fb'
+ ORDER BY table_name;
+----
+fb	main	EMPLOYEE	BASE TABLE
+fb	main	FILE_STORAGE	BASE TABLE
+fb	main	TQUOTES	BASE TABLE
+fb	main	V_ACTIVE_EMP	BASE TABLE
+
+# --- information_schema.columns ------------------------------------
+
+query IIII
+SELECT column_name, data_type, ordinal_position, is_nullable
+  FROM information_schema.columns
+ WHERE table_catalog = 'fb' AND table_name = 'EMPLOYEE'
+ ORDER BY ordinal_position;
+----
+EMP_ID	INTEGER	1	NO
+EMP_NAME	VARCHAR	2	NO
+DEPT_NO	VARCHAR	3	YES
+SALARY	DECIMAL(18,2)	4	YES
+HIRE_DATE	DATE	5	YES
+ACTIVE	BOOLEAN	6	YES
+NOTE	VARCHAR	7	YES
+
+# `is_nullable` is sourced from
+# `COALESCE(rf.RDB$NULL_FLAG, f.RDB$NULL_FLAG, 0)`: the per-column
+# override wins over the domain default, and `1` means NOT NULL.
+# EMP_ID + EMP_NAME are declared NOT NULL in the fixture; the rest
+# accept NULL.
+
+# --- Cross-table coverage of information_schema.columns ------------
+
+query I
+SELECT COUNT(*) FROM information_schema.columns
+ WHERE table_catalog = 'fb';
+----
+16
+
+# --- Case-insensitive table lookup --------------------------------
+#
+# Firebird identifiers are upper-cased server-side unless quoted at
+# creation. Our catalog normalises to upper-case internally; queries
+# with mixed / lower case should resolve the same entry.
+
+query I
+SELECT COUNT(*) FROM fb.main.employee;
+----
+5
+
+query I
+SELECT COUNT(*) FROM fb.main.Employee;
+----
+5
+
+query I
+SELECT COUNT(*) FROM fb.main."EMPLOYEE";
+----
+5
+
+# --- main schema exposure ------------------------------------------
+#
+# We only register one schema ("main") regardless of the source
+# Firebird's RDB$OWNER_NAME segmentation. Anything else should
+# 404 at the binder.
+
+statement error
+SELECT * FROM fb.public.EMPLOYEE;
+----
+
+statement error
+SELECT * FROM fb.other.EMPLOYEE;
+----
+
+# --- Catalog is read-only ------------------------------------------
+#
+# All write paths against an attached Firebird catalog must raise.
+# (INSERT / CREATE / DROP go through our NotImplemented stubs;
+# UPDATE / DELETE are caught earlier by DuckDB's binder as
+# "Can only update/delete base table".)
+
+statement error
+INSERT INTO fb.main.EMPLOYEE VALUES (99, 'x', '600', 0, DATE '2026-01-01', TRUE, NULL);
+----
+
+statement error
+DROP TABLE fb.main.EMPLOYEE;
+----
+
+statement error
+CREATE TABLE fb.main.NEW_T (X INTEGER);
+----
+
+statement ok
+DETACH fb;

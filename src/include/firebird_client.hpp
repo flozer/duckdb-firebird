@@ -87,6 +87,14 @@ class FirebirdConnection;
 class FirebirdStatement {
 public:
     FirebirdStatement(FirebirdConnection &conn, const std::string &sql);
+    // Same shape as the constructor above, but binds the supplied
+    // parameters into the prepared statement's input XSQLDA before
+    // executing. Each Value is encoded into the format the server
+    // described for that placeholder; mismatches throw IOException.
+    // `params.size()` must match the number of `?` placeholders in the
+    // SQL — fewer or extra parameters is a programming error.
+    FirebirdStatement(FirebirdConnection &conn, const std::string &sql,
+                      const std::vector<Value> &params);
     ~FirebirdStatement();
 
     FirebirdStatement(const FirebirdStatement &) = delete;
@@ -135,11 +143,20 @@ private:
     FirebirdConnection &conn_;
     isc_stmt_handle stmt_ = 0;
     XSQLDA *out_sqlda_ = nullptr;
+    XSQLDA *in_sqlda_  = nullptr;
     std::vector<std::vector<char>> buffers_;
+    std::vector<std::vector<char>> in_buffers_;
     std::vector<short> indicators_;
+    std::vector<short> in_indicators_;
     std::vector<FirebirdColumnDesc> columns_;
 
+    void Prepare(const std::string &sql);
     void AllocateBuffers();
+    // Encodes `params` into the input XSQLDA buffers described by
+    // `isc_dsql_describe_bind`. Throws IOException on type mismatch
+    // or unsupported parameter type.
+    void BindInputParameters(const std::vector<Value> &params,
+                              const std::string &sql_for_error);
 };
 
 // Cache of idle FirebirdConnection objects. Cheap to skip when there's
@@ -184,6 +201,10 @@ public:
 
     // Convenience: prepare+execute a SELECT and return an open cursor.
     std::unique_ptr<FirebirdStatement> OpenCursor(const std::string &sql);
+    // Same, with input parameters bound through an XSQLDA. Used by the
+    // scanner once filter pushdown emits `?` placeholders.
+    std::unique_ptr<FirebirdStatement> OpenCursor(const std::string &sql,
+                                                  const std::vector<Value> &params);
 
     // Throws an IOException carrying isc_interprete'd messages, if status is
     // an error vector.

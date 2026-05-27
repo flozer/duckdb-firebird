@@ -1,0 +1,120 @@
+# name: test/sql/firebird_paging.test
+# description: row_limit + row_offset physical paging
+# group: [firebird]
+#
+# Exercises the `row_offset=M` named parameter introduced in the
+# v0.5 paging milestone. The pair (row_limit=N, row_offset=M) emits
+# `ROWS M+1 TO M+N` in the Firebird SQL — 1-based, inclusive.
+#
+# Contract decisions (v0.5):
+#   * `row_offset` REQUIRES `row_limit` — pure offset is rejected
+#     at bind time (Firebird's ROWS clause is bound-pair; offset-only
+#     paging is expensive and surprising).
+#   * Paging is global slice semantics. To prevent
+#     `row_limit=100, partitions=4` from returning 400 rows, the bind
+#     step silently forces `partitions=1` whenever row_limit or
+#     row_offset is set — the v0.4 syntax
+#     `firebird_scan(..., row_limit=100)` continues to work and now
+#     guarantees serial execution.
+#   * An explicit `partitions=N` (N > 1) combined with row_limit /
+#     row_offset is rejected at bind time so the conflict can't pass
+#     silently.
+#   * `row_offset + row_limit` must fit in idx_t; the bind step
+#     rejects values that would overflow the Firebird SQL.
+#
+# Requires the EMPLOYEE fixture (5 rows, EMP_ID 1..5).
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+# --- row_limit standalone — preserves v0.4 syntax -----------------
+
+query I
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE', row_limit=2)
+ ORDER BY EMP_ID;
+----
+1
+2
+
+# --- row_limit + explicit partitions=1 — same result ---------------
+
+query I
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE',
+                                  row_limit=2, partitions=1)
+ ORDER BY EMP_ID;
+----
+1
+2
+
+# --- row_offset + row_limit — new in v0.5, partitions implicit 1 ---
+
+query I
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE',
+                                  row_limit=2, row_offset=2)
+ ORDER BY EMP_ID;
+----
+3
+4
+
+# --- row_offset=0 + row_limit=3 == row_limit=3 alone ---------------
+
+query I
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE',
+                                  row_limit=3, row_offset=0)
+ ORDER BY EMP_ID;
+----
+1
+2
+3
+
+# --- row_offset past the end returns zero rows ---------------------
+
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE',
+                                    row_limit=2, row_offset=100);
+----
+0
+
+# --- row_offset without row_limit raises ---------------------------
+
+statement error
+SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE', row_offset=2);
+----
+row_offset requires row_limit
+
+# --- Negative offset rejected --------------------------------------
+
+statement error
+SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE',
+                            row_limit=1, row_offset=-1);
+----
+row_offset must be >= 0
+
+# --- Paging + explicit partitions > 1 rejected --------------------
+# The "auto" case (partitions=0 default) is *not* rejected — it's
+# coerced to partitions=1 internally so the v0.4 row_limit syntax
+# keeps working. Only an explicit `partitions=N` (N > 1) raises.
+
+statement error
+SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE',
+                            row_limit=2, partitions=4);
+----
+partitions > 1
+
+statement error
+SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE',
+                            row_limit=2, row_offset=2, partitions=2);
+----
+partitions > 1
+
+# --- Combine with filter pushdown — same slice contract -----------
+
+query I
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE',
+                                  row_limit=2, row_offset=1)
+ WHERE DEPT_NO = '600'
+ ORDER BY EMP_ID;
+----
+2
+4

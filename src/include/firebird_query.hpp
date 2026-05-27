@@ -27,6 +27,11 @@ public:
         // Indices into the original filter set that were *not* pushed down,
         // i.e. DuckDB still has to re-evaluate them.
         std::vector<idx_t> residual_filter_indices;
+        // Parameter values bound positionally to the `?` placeholders in
+        // `sql`. Empty when no filters were parametrised (the no-filter
+        // case, or filters whose literal types can't be bound — those go
+        // residual instead of being interpolated).
+        std::vector<Value> params;
     };
 
     static Result Build(const std::string &table_name,
@@ -37,7 +42,8 @@ public:
                         optional_idx                     limit,
                         const std::string               &extra_predicate = {},
                         const std::vector<FirebirdColumnDesc> *column_descs = nullptr,
-                        NoneEncoding                     none_encoding = NoneEncoding::WIN1252);
+                        NoneEncoding                     none_encoding = NoneEncoding::WIN1252,
+                        optional_idx                     offset = optional_idx());
 };
 
 } // namespace duckdb

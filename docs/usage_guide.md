@@ -254,6 +254,69 @@ Importante: `charset=` e `none_encoding=` nao sao a mesma coisa.
 `none_encoding=` controla como a extensao interpreta bytes de colunas
 Firebird declaradas como `CHARACTER SET NONE`.
 
+## 4.1 Paginacao por linhas (v0.5)
+
+Para fatias grandes onde voce nao quer trazer a tabela inteira,
+combine `row_limit` e `row_offset`:
+
+```sql
+-- Primeira pagina: 1000 linhas.
+SELECT *
+FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABENTRADASAIDA',
+                   row_limit=1000);
+
+-- Pagina seguinte: pula 1000, traz proximas 1000.
+SELECT *
+FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABENTRADASAIDA',
+                   row_limit=1000, row_offset=1000);
+```
+
+Internamente a extensao emite `ROWS M+1 TO M+N` no Firebird (1-based,
+inclusivo). O scan vira serial automaticamente quando ha paginacao,
+porque a ordem so faz sentido com um unico produtor. Pedir
+`partitions > 1` junto com paging explicito e rejeitado no bind.
+
+Caveat importante: isto e paginacao **fisica** (offset/limit), nao
+**keyset pagination**. Sem `ORDER BY` server-side, paginas sucessivas
+podem repetir ou pular linhas se o Firebird reordenar leituras entre
+chamadas. Para resultados estaveis em uma serie de paginas, prefira
+materializar uma tabela local e paginar la, ou aplique um
+`ORDER BY <chave estavel>` na consulta.
+
+## 4.2 Filtros e busca de texto (v0.5)
+
+A extensao empurra para o Firebird os predicados que ela sabe
+traduzir com seguranca, incluindo (v0.5):
+
+- `col NOT IN (...)` — vira uma clausula `NOT IN` server-side.
+- `NOT bool_col` / `bool_col = FALSE` — empurrado como `NOT col`.
+- `col LIKE 'prefixo%'` com texto estatico — empurrado.
+- `BETWEEN a AND b` — DuckDB decompoe em `>= AND <=`, ambos empurrados.
+
+Exemplos:
+
+```sql
+-- NOT IN
+SELECT COUNT(*)
+FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABENTRADASAIDA')
+WHERE CODIGOEMPRESA NOT IN (99, 100, 101);
+
+-- LIKE com prefixo (apostrofo no literal e seguro):
+SELECT IDMASTER, OBSERVACOES
+FROM firebird_scan('C:/Athenas/restaurado.fdb', 'TABENTRADASAIDA')
+WHERE OBSERVACOES LIKE 'CONTA PARA%'
+LIMIT 5;
+```
+
+Detalhe interno (v0.5): para tipos seguros e valores nao-literais
+(parametros, datas, strings com acento ou apostrofo), o filtro vai
+para o Firebird como **bind variable** via XSQLDA de entrada, em vez
+de inline no SQL. Isto evita escape errado e permite que o Firebird
+reutilize plano. Voce nao precisa fazer nada — a extensao cuida. Em
+colunas `CHARACTER SET NONE` com `none_encoding != 'strict'`, filtros
+de texto sao mantidos como residual em DuckDB (a comparacao precisa
+do decode da extensao para ser correta).
+
 ## 5. Explorar a base Firebird
 
 Comece descobrindo as tabelas:
@@ -299,6 +362,48 @@ SELECT *
 FROM fb.main.TABPESSOAS
 LIMIT 20;
 ```
+
+## 5.1 Descoberta de catalogo via ATTACH (v0.5)
+
+Quando voce anexa a base como catalogo, as ferramentas padrao do
+DuckDB enxergam tudo:
+
+```sql
+ATTACH 'C:/Athenas/restaurado.fdb' AS fb
+    (TYPE firebird, user 'SYSDBA', password 'masterkey');
+
+-- Listagem de tabelas (e views) do catalogo Firebird:
+SHOW TABLES FROM fb;
+
+-- Forma da tabela:
+DESCRIBE fb.main.TABPESSOAS;
+
+-- Catalogo padrao information_schema, util para BI / dbt / clients ADBC:
+SELECT table_catalog, table_schema, table_name, table_type
+  FROM information_schema.tables
+ WHERE table_catalog = 'fb'
+ ORDER BY table_name;
+
+SELECT column_name, data_type, ordinal_position, is_nullable
+  FROM information_schema.columns
+ WHERE table_catalog = 'fb' AND table_name = 'TABPESSOAS'
+ ORDER BY ordinal_position;
+```
+
+Pontos a saber:
+
+- Apenas um schema, `main`, e exposto, independente de `RDB$OWNER_NAME`
+  na origem. Consultar `fb.public.X` ou outro schema retorna erro.
+- A extensao normaliza identificadores para upper-case interno, igual
+  ao Firebird; `fb.main.tabpessoas`, `fb.main.Tabpessoas` e
+  `fb.main."TABPESSOAS"` resolvem para a mesma entrada.
+- `is_nullable` em `information_schema.columns` reflete a definicao
+  Firebird (`RDB$NULL_FLAG` no campo ou no dominio). Colunas
+  declaradas `NOT NULL` aparecem como `NO`.
+- Views Firebird (`RDB$RELATION_TYPE = 1`) aparecem junto com tabelas
+  e podem ser consultadas igual. No `information_schema.tables`, todas
+  vem hoje como `BASE TABLE` — esta simplificacao do catalog layer
+  esta registrada nos testes para ser revisitada.
 
 ## 6. Criar uma camada de views
 

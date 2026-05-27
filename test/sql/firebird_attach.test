@@ -33,8 +33,8 @@ SELECT column_name, data_type, is_nullable
  WHERE table_catalog = 'fb' AND table_name = 'EMPLOYEE'
  ORDER BY ordinal_position;
 ----
-EMP_ID	INTEGER	YES
-EMP_NAME	VARCHAR	YES
+EMP_ID	INTEGER	NO
+EMP_NAME	VARCHAR	NO
 DEPT_NO	VARCHAR	YES
 SALARY	DECIMAL(18,2)	YES
 HIRE_DATE	DATE	YES

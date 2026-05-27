@@ -1,0 +1,91 @@
+# name: test/sql/firebird_predicates.test
+# description: extended predicate pushdown — NOT IN, boolean NOT, BETWEEN
+# group: [firebird]
+#
+# v0.5 item #11. DuckDB's planner doesn't decompose every predicate
+# shape into the TableFilterSet entries our builder already handles,
+# so the pushdown_complex_filter hook now catches:
+#
+#   * col NOT IN (?, ?, ...) — bindable types only; mixed-type lists
+#     stay residual.
+#   * NOT bool_col — bare boolean column negation.
+#
+# BETWEEN is *already* decomposed by DuckDB into `col >= a AND col <= b`
+# and lands in the TableFilterSet path, so it doesn't need a dedicated
+# hook — we still assert the end-to-end behaviour below.
+#
+# CHARACTER SET NONE text columns under non-strict transcoding remain
+# residual (the IsNoneTextColumnGated invariant from v0.4.2). Verified
+# by the firebird_none_charset.test suite.
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+# --- NOT IN with INTEGER constants ----------------------------------
+
+query I rowsort
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE EMP_ID NOT IN (1, 3, 5)
+ ORDER BY EMP_ID;
+----
+2
+4
+
+# --- NOT IN with VARCHAR constants (parametrise) --------------------
+
+query I
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE DEPT_NO NOT IN ('600', '700')
+ ORDER BY EMP_ID;
+----
+3
+
+# --- NOT IN combined with a TableFilterSet predicate ----------------
+
+query I
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE EMP_ID NOT IN (1, 5)
+   AND ACTIVE = TRUE
+ ORDER BY EMP_ID;
+----
+2
+4
+
+# --- NOT bool — `NOT ACTIVE` --------------------------------------
+
+query II
+SELECT EMP_ID, EMP_NAME FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE NOT ACTIVE;
+----
+3	Carlos Chen
+
+# --- BETWEEN — DuckDB decomposes; we just confirm the result --------
+
+query I
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE EMP_ID BETWEEN 2 AND 4
+ ORDER BY EMP_ID;
+----
+2
+3
+4
+
+query I
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE HIRE_DATE BETWEEN DATE '2019-01-01' AND DATE '2020-12-31'
+ ORDER BY EMP_ID;
+----
+1
+2
+
+# --- Residual: predicate we can't push (function around column) ----
+# `CAST(EMP_ID AS VARCHAR) = '3'` ends up residual; DuckDB applies it
+# above the scan. The whole-table read is still served by Firebird;
+# we just verify correctness.
+
+query I
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE CAST(EMP_ID AS VARCHAR) = '3';
+----
+3

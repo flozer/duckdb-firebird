@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -13,6 +14,7 @@
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
 #include "firebird_client.hpp"
@@ -150,13 +152,19 @@ void LoadTableSchema(FirebirdConnection &conn,
     // can distinguish NONE columns (id = 0) from declared-charset
     // columns (Firebird transliterates those to UTF-8 wire). Non-text
     // columns get NULL → -1 sentinel.
+    // `RDB$NULL_FLAG` per Firebird convention: 1 means NOT NULL is set
+    // somewhere; NULL/0 means the column accepts NULL. The flag lives
+    // on RDB$RELATION_FIELDS (per-column override) and on RDB$FIELDS
+    // (domain default); COALESCE picks whichever is non-NULL, with the
+    // RF override winning when both are set.
     const std::string sql =
         "SELECT TRIM(rf.RDB$FIELD_NAME), "
         "       f.RDB$FIELD_TYPE, "
         "       COALESCE(f.RDB$FIELD_SUB_TYPE, 0), "
         "       COALESCE(f.RDB$FIELD_SCALE, 0), "
         "       COALESCE(f.RDB$FIELD_LENGTH, 0), "
-        "       COALESCE(f.RDB$CHARACTER_SET_ID, -1) "
+        "       COALESCE(f.RDB$CHARACTER_SET_ID, -1), "
+        "       COALESCE(rf.RDB$NULL_FLAG, f.RDB$NULL_FLAG, 0) "
         "  FROM RDB$RELATION_FIELDS rf "
         "  JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE "
         " WHERE rf.RDB$RELATION_NAME = " + SqlLiteral(upper) + " "
@@ -171,6 +179,8 @@ void LoadTableSchema(FirebirdConnection &conn,
         desc.sqlscale         = cursor->GetShort(3);
         desc.sqllen           = cursor->GetShort(4);
         desc.character_set_id = cursor->GetShort(5);
+        // RDB$NULL_FLAG: 1 means NOT NULL; absent / 0 means nullable.
+        desc.nullable         = (cursor->GetShort(6) != 1);
 
         // RDB$FIELD_TYPE uses Firebird's *internal* blr_* type codes which
         // differ from the SQL-level XSQLDA constants. Codes 7..37/261 are
@@ -374,10 +384,76 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
             if (l <= 0) throw BinderException("row_limit must be > 0");
             bind->limit_override = optional_idx(static_cast<idx_t>(l));
         }
+        else if (key == "row_offset") {
+            auto o = val.GetValue<int64_t>();
+            if (o < 0) throw BinderException("row_offset must be >= 0");
+            bind->offset_override = optional_idx(static_cast<idx_t>(o));
+        }
         else if (key == "none_encoding") {
             // ParseNoneEncoding throws on unknown values with the list of
             // accepted spellings.
             bind->none_encoding = ParseNoneEncoding(val.ToString());
+        }
+    }
+    // v0.5 contract: offset requires limit. Pure offset is a "skip then
+    // drain" pattern that is both expensive (Firebird still streams the
+    // skipped rows server-side, just throws them away on the wire) and
+    // semantically surprising — the caller almost certainly wanted a
+    // bounded slice. Force them to express the bound explicitly.
+    if (bind->offset_override.IsValid() && !bind->limit_override.IsValid()) {
+        throw BinderException(
+            "firebird_scan: row_offset requires row_limit. Firebird's "
+            "ROWS clause is bound-pair (`ROWS m TO n`), and pure-offset "
+            "paging is expensive and surprising. Pass `row_limit=N` "
+            "alongside `row_offset=M` to express the slice as "
+            "[M+1, M+N].");
+    }
+    // Paging is global slice semantics, but partitions=N would replicate
+    // the ROWS clause inside each per-partition query — a row_limit=100
+    // with partitions=4 would return up to 400 rows, not 100. Two
+    // protections:
+    //
+    // 1. An explicit `partitions=N` (N > 1) with row_limit / row_offset
+    //    raises a BinderException — the caller asked for parallelism
+    //    *and* paging, which are incompatible, so we make them choose.
+    //
+    // 2. The implicit case (partitions=0 default, or partitions=1) is
+    //    silently *forced* to serial. The user wrote
+    //    `firebird_scan(..., row_limit=100)` (which used to work in
+    //    v0.4) and expects 100 rows; we honour that by collapsing
+    //    partitions to 1 internally and skipping the PK probe below.
+    //    This preserves the v0.4 contract without giving up
+    //    correctness — paging via the auto-partition heuristic on a
+    //    large table would otherwise over-fetch silently.
+    const bool paging =
+        bind->limit_override.IsValid() || bind->offset_override.IsValid();
+    if (paging && bind->partitions_override > 1) {
+        throw BinderException(
+            "firebird_scan: row_limit / row_offset are global slice "
+            "semantics; combining them with partitions > 1 would "
+            "replicate the slice inside each partition (e.g. "
+            "row_limit=100 + partitions=4 fetches 400 rows, not 100). "
+            "Drop the partitions= argument (the scan will run serial "
+            "automatically) or set partitions=1 explicitly.");
+    }
+    if (paging) {
+        // Force serial — the partition queue below will get exactly
+        // one entry, the PK probe is skipped, and the builder emits
+        // one ROWS m TO n statement.
+        bind->partitions_override = 1;
+    }
+    // Overflow guard: row_offset + row_limit must fit in idx_t (the
+    // builder forms ROWS (offset+1) TO (offset+limit)). Reject extreme
+    // values at bind time so the scanner never builds malformed SQL.
+    if (bind->limit_override.IsValid() && bind->offset_override.IsValid()) {
+        const idx_t off = bind->offset_override.GetIndex();
+        const idx_t lim = bind->limit_override.GetIndex();
+        if (off > std::numeric_limits<idx_t>::max() - lim) {
+            throw BinderException(
+                "firebird_scan: row_offset + row_limit overflow — "
+                "their sum exceeds the maximum representable value "
+                "(" + std::to_string(std::numeric_limits<idx_t>::max()) +
+                "). Tighten one or the other.");
         }
     }
 
@@ -523,13 +599,18 @@ static bool OpenNextPartitionCursor(ClientContext & /*ctx*/,
     if (!gstate.NextPartition(spec)) return false;
 
     // Concatenate the partition range predicate with any extra predicates
-    // lifted from BoundFunctionExpression pushdown (currently just LIKE
-    // prefix). All fragments are already SQL-safe (literals quoted via
-    // SqlLiteral, identifiers via QuoteIdent).
+    // lifted from BoundFunctionExpression pushdown (LIKE prefix, NOT IN,
+    // BETWEEN, boolean NOT). All fragments are already SQL-safe
+    // (identifiers via QuoteIdent, literals via SqlLiteral, value
+    // positions via `?` placeholders); their params are concatenated
+    // *after* whatever TableFilterSet params the builder produced, in
+    // the same order they appear in the SQL.
     std::string combined = spec.where_clause;
+    duckdb::vector<Value> extra_params;
     for (auto &ep : bind.extra_predicates) {
         if (!combined.empty()) combined += " AND ";
-        combined += "(" + ep + ")";
+        combined += "(" + ep.sql + ")";
+        for (auto &p : ep.params) extra_params.push_back(p);
     }
 
     auto query = FirebirdQueryBuilder::Build(
@@ -541,9 +622,19 @@ static bool OpenNextPartitionCursor(ClientContext & /*ctx*/,
         bind.limit_override,
         combined,
         &bind.column_descs,
-        bind.none_encoding);
+        bind.none_encoding,
+        bind.offset_override);
 
-    local.cursor = local.conn->OpenCursor(query.sql);
+    // Append extra-predicate params to the builder's params, preserving
+    // positional order. The Firebird wire protocol resolves `?` slots
+    // strictly in textual order, so any predicate spliced into the
+    // combined string above must also have its values appear after the
+    // TableFilterSet values.
+    for (auto &p : extra_params) query.params.push_back(p);
+
+    local.cursor = query.params.empty()
+        ? local.conn->OpenCursor(query.sql)
+        : local.conn->OpenCursor(query.sql, query.params);
     // The XSQLDA gives us a character_set_id for SQL_TEXT / SQL_VARYING
     // (packed in sqlsubtype), but not for text BLOBs — and column_ids
     // maps cursor-column-index back to the original bind position, so
@@ -959,6 +1050,78 @@ static bool TryExtractLikePrefix(Expression &expr,
     return true;
 }
 
+// Same bindable-type whitelist the FirebirdQueryBuilder uses (kept in
+// sync — both files need the same predicate). Strings, signed
+// integers, floats, DATE / TIME / TIMESTAMP, BOOLEAN bind through the
+// input XSQLDA path; HUGEINT / DECIMAL / unsigned ints / TZ types fall
+// back to inline literals where safe and to residual otherwise.
+//
+// Unsigned ints are deliberately excluded: Firebird has no unsigned
+// counterpart, the XSQLVAR is signed, and a UBIGINT > INT64_MAX would
+// silently wrap to a negative value on the bind path. Filters with
+// such values stay residual.
+static bool ExprValueBindable(const LogicalType &t) {
+    switch (t.id()) {
+    case LogicalTypeId::BOOLEAN:
+    case LogicalTypeId::TINYINT:
+    case LogicalTypeId::SMALLINT:
+    case LogicalTypeId::INTEGER:
+    case LogicalTypeId::BIGINT:
+    case LogicalTypeId::FLOAT:
+    case LogicalTypeId::DOUBLE:
+    case LogicalTypeId::VARCHAR:
+    case LogicalTypeId::DATE:
+    case LogicalTypeId::TIME:
+    case LogicalTypeId::TIMESTAMP:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Detects `col NOT IN (lit, lit, ...)`. DuckDB emits this as a
+// BoundOperatorExpression with type COMPARE_NOT_IN; children[0] is the
+// column, children[1..] are the constants. We require every constant
+// to be bindable so the predicate ships through the input XSQLDA path
+// (strings always parametrise, mixed-type lists end up residual).
+static bool TryExtractNotIn(Expression &expr,
+                             idx_t &out_col,
+                             duckdb::vector<Value> &out_values) {
+    if (expr.GetExpressionClass() != ExpressionClass::BOUND_OPERATOR) return false;
+    auto &op = expr.Cast<BoundOperatorExpression>();
+    if (op.GetExpressionType() != ExpressionType::COMPARE_NOT_IN) return false;
+    if (op.children.size() < 2) return false;
+    if (op.children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) return false;
+
+    out_values.clear();
+    for (size_t i = 1; i < op.children.size(); ++i) {
+        auto &child = *op.children[i];
+        if (child.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) return false;
+        const auto &v = child.Cast<BoundConstantExpression>().value;
+        if (v.IsNull()) return false;                          // NULL in IN-list is squirrelly
+        if (!ExprValueBindable(v.type())) return false;
+        out_values.push_back(v);
+    }
+    out_col = op.children[0]->Cast<BoundColumnRefExpression>().binding.column_index;
+    return true;
+}
+
+// Detects `NOT bool_col` — boolean negation of a column reference. Used
+// to push `WHERE NOT ACTIVE` and friends as `NOT (...)` to Firebird.
+// Anything more complex than a bare column reference stays residual so
+// we don't have to reason about precedence / nullability flipping.
+static bool TryExtractNotBoolColumn(Expression &expr, idx_t &out_col) {
+    if (expr.GetExpressionClass() != ExpressionClass::BOUND_OPERATOR) return false;
+    auto &op = expr.Cast<BoundOperatorExpression>();
+    if (op.GetExpressionType() != ExpressionType::OPERATOR_NOT) return false;
+    if (op.children.size() != 1) return false;
+    auto &inner = *op.children[0];
+    if (inner.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) return false;
+    if (inner.return_type.id() != LogicalTypeId::BOOLEAN) return false;
+    out_col = inner.Cast<BoundColumnRefExpression>().binding.column_index;
+    return true;
+}
+
 // Whitelist hook called by DuckDB's planner *before* it commits a
 // TableFilterSet entry to pushdown. Returning false makes DuckDB add a
 // FILTER operator on top of the scan AND drop the filter from the set
@@ -991,38 +1154,87 @@ static void FirebirdScanPushdownComplexFilter(
     // the original column index.
     const auto &col_ids = get.GetColumnIds();
 
+    // Helper: resolve a projected column index from a BoundColumnRef onto
+    // the source column index in bind.column_names, returning -1 sentinel
+    // (cast to idx_t) when the binding is the virtual row-id or out of
+    // range. Returns true on success.
+    auto resolve_src_col = [&](idx_t projected_col, idx_t &out) -> bool {
+        if (projected_col >= col_ids.size()) return false;
+        auto src = col_ids[projected_col].GetPrimaryIndex();
+        if (src == COLUMN_IDENTIFIER_ROW_ID || src >= bind.column_names.size())
+            return false;
+        out = src;
+        return true;
+    };
+
+    // Helper: NONE-text columns under non-strict transcoding never push.
+    auto is_none_text_gated = [&](idx_t src_col_idx) -> bool {
+        if (src_col_idx >= bind.column_descs.size()) return false;
+        const auto &desc = bind.column_descs[src_col_idx];
+        if (bind.none_encoding == NoneEncoding::STRICT) return false;
+        if (desc.character_set_id != 0) return false;
+        return desc.sqltype == SQL_TEXT || desc.sqltype == SQL_VARYING ||
+               (desc.sqltype == SQL_BLOB && desc.sqlsubtype == 1);
+    };
+
     auto it = filters.begin();
     while (it != filters.end()) {
-        idx_t projected_col = 0;
-        std::string pattern;
-        if (!TryExtractLikePrefix(**it, projected_col, pattern)) {
-            ++it;
-            continue;
+        // --- LIKE 'prefix%' ----------------------------------------------
+        {
+            idx_t projected_col = 0;
+            std::string pattern;
+            if (TryExtractLikePrefix(**it, projected_col, pattern)) {
+                idx_t src;
+                if (!resolve_src_col(projected_col, src)) { ++it; continue; }
+                if (is_none_text_gated(src))             { ++it; continue; }
+                FirebirdBindData::ExtraPredicate ep;
+                ep.sql = QuoteIdent(bind.column_names[src]) +
+                         " LIKE " + SqlLiteral(pattern) +
+                         " ESCAPE '\\'";
+                bind.extra_predicates.push_back(std::move(ep));
+                it = filters.erase(it);
+                continue;
+            }
         }
-        if (projected_col >= col_ids.size()) { ++it; continue; }
-        auto src_col_idx = col_ids[projected_col].GetPrimaryIndex();
-        if (src_col_idx == COLUMN_IDENTIFIER_ROW_ID ||
-            src_col_idx >= bind.column_names.size()) {
-            ++it;
-            continue;
+
+        // --- col NOT IN (?, ?, ...) --------------------------------------
+        {
+            idx_t projected_col = 0;
+            duckdb::vector<Value> values;
+            if (TryExtractNotIn(**it, projected_col, values)) {
+                idx_t src;
+                if (!resolve_src_col(projected_col, src)) { ++it; continue; }
+                if (is_none_text_gated(src))             { ++it; continue; }
+                FirebirdBindData::ExtraPredicate ep;
+                std::string sql = QuoteIdent(bind.column_names[src]) + " NOT IN (";
+                for (size_t i = 0; i < values.size(); ++i) {
+                    if (i) sql += ", ";
+                    sql += "?";
+                }
+                sql += ")";
+                ep.sql    = std::move(sql);
+                ep.params = std::move(values);
+                bind.extra_predicates.push_back(std::move(ep));
+                it = filters.erase(it);
+                continue;
+            }
         }
-        // Skip pushdown for Firebird CHARACTER SET NONE text columns when
-        // the caller is transcoding bytes client-side: the SqlLiteral we
-        // emit here is UTF-8, but the server compares against raw bytes,
-        // so a literal like 'São' won't match a row whose actual storage
-        // is the CP1252 byte string. Let DuckDB filter post-transcode.
-        if (src_col_idx < bind.column_descs.size() &&
-            bind.column_descs[src_col_idx].character_set_id == 0 &&
-            bind.none_encoding != NoneEncoding::STRICT) {
-            ++it;
-            continue;
+
+        // --- NOT bool_col -------------------------------------------------
+        {
+            idx_t projected_col = 0;
+            if (TryExtractNotBoolColumn(**it, projected_col)) {
+                idx_t src;
+                if (!resolve_src_col(projected_col, src)) { ++it; continue; }
+                FirebirdBindData::ExtraPredicate ep;
+                ep.sql = "NOT " + QuoteIdent(bind.column_names[src]);
+                bind.extra_predicates.push_back(std::move(ep));
+                it = filters.erase(it);
+                continue;
+            }
         }
-        std::string frag = QuoteIdent(bind.column_names[src_col_idx]) +
-                           " LIKE " + SqlLiteral(pattern) +
-                           " ESCAPE '\\'";
-        bind.extra_predicates.push_back(std::move(frag));
-        // Tell DuckDB we have the filter covered — it won't re-evaluate it.
-        it = filters.erase(it);
+
+        ++it;
     }
 }
 
@@ -1043,6 +1255,7 @@ TableFunction GetFirebirdScanFunction() {
     fn.named_parameters["dialect"]       = LogicalType::INTEGER;
     fn.named_parameters["partitions"]    = LogicalType::BIGINT;
     fn.named_parameters["row_limit"]     = LogicalType::BIGINT;
+    fn.named_parameters["row_offset"]    = LogicalType::BIGINT;
     fn.named_parameters["none_encoding"] = LogicalType::VARCHAR;
 
     // Pushdown advertisements — DuckDB's planner now knows it can hand us
