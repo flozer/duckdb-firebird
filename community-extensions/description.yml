@@ -9,23 +9,8 @@
 
 extension:
   name: firebird
-  description: |
-    Federated read-only access to Firebird databases from DuckDB.
-    Adds:
-      - firebird_scan(connection_string, table_name [, ...named params])
-      - firebird_tables(connection_string) — table-name + PK discovery
-      - firebird_attach_sql(connection_string [, schema]) — emits the
-        DDL for a view-based attach
-      - ATTACH 'firebird://…' AS fb (TYPE firebird) — native catalog
-        with `SELECT * FROM fb.main.TABLE` support
-    Projection + filter pushdown (=, <>, <, >, <=, >=, IS NULL,
-    BETWEEN, IN, AND/OR, LIKE 'prefix%'), PK-range parallel scan
-    (opt-in), connection pool + metadata cache. Firebird 3/4/5
-    server compatibility, including INT128, DECIMAL(38, s),
-    TIMESTAMP WITH TIME ZONE, and TIME WITH TIME ZONE. Also
-    supports CHARACTER SET NONE Firebird databases via a
-    none_encoding=strict|win1252|iso8859_1|blob option.
-  version: 0.4.0
+  description: Federated read-only access to Firebird (3.0/4.0/5.0) databases from DuckDB, with projection + filter pushdown, INT128 / DECIMAL(38) / TIMESTAMP_TZ support, native ATTACH, and explicit CHARACTER SET NONE handling (strict / win1252 / iso8859_1 / blob).
+  version: 0.4.1
   language: C++
   build: cmake
   license: MIT
@@ -42,6 +27,6 @@ extension:
 
 repo:
   github: flozer/duckdb-firebird
-  # Pinned to the v0.4 release tag — community-extensions CI checks
-  # out exactly this ref to build the published artefacts.
-  ref: v0.4.0
+  # Pinned to the v0.4.1 release tag — community-extensions CI checks
+  # out exactly this ref to build + sign the published artefacts.
+  ref: v0.4.1
