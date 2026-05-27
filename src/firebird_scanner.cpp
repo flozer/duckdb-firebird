@@ -52,6 +52,7 @@ struct FirebirdGlobalState : public GlobalTableFunctionState {
 
     // Pushdown context captured at init time.
     std::vector<column_t>       column_ids;
+    std::vector<idx_t>          projection_ids;
     optional_ptr<TableFilterSet> filters;
 
     idx_t MaxThreads() const override { return max_threads; }
@@ -74,6 +75,13 @@ struct FirebirdLocalState : public LocalTableFunctionState {
     // destruction so it's available for the next query against the same
     // attached database.
     std::shared_ptr<FirebirdConnectionPool> pool;
+    // When filter_prune=true and projection_ids is non-empty, DuckDB
+    // expects the output chunk to carry only the projected columns —
+    // but column_ids may include additional columns needed for filter
+    // evaluation. We fetch into this scratch chunk (one slot per
+    // column_id) and then ReferenceColumns into the caller's chunk
+    // using projection_ids.
+    DataChunk fetch_chunk;
     bool exhausted = false;
 
     ~FirebirdLocalState() override {
@@ -474,6 +482,7 @@ static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
     // Capture pushdown context for the workers.
     gstate->column_ids = std::vector<column_t>(input.column_ids.begin(),
                                                input.column_ids.end());
+    gstate->projection_ids = input.projection_ids;
     gstate->filters    = input.filters;
     return std::move(gstate);
 }
@@ -530,7 +539,9 @@ static bool OpenNextPartitionCursor(ClientContext & /*ctx*/,
         gstate.column_ids,
         gstate.filters,
         bind.limit_override,
-        combined);
+        combined,
+        &bind.column_descs,
+        bind.none_encoding);
 
     local.cursor = local.conn->OpenCursor(query.sql);
     // The XSQLDA gives us a character_set_id for SQL_TEXT / SQL_VARYING
@@ -552,11 +563,35 @@ static bool OpenNextPartitionCursor(ClientContext & /*ctx*/,
 static void FirebirdScanFunction(ClientContext &ctx,
                                  TableFunctionInput &data,
                                  DataChunk &output) {
-    auto &local = data.local_state->Cast<FirebirdLocalState>();
-    auto &bind  = data.bind_data->Cast<FirebirdBindData>();
+    auto &local  = data.local_state->Cast<FirebirdLocalState>();
+    auto &bind   = data.bind_data->Cast<FirebirdBindData>();
+    auto &gstate = data.global_state->Cast<FirebirdGlobalState>();
+
+    // With filter_prune=true, the output chunk only carries the columns
+    // listed in projection_ids; the cursor however emits one slot per
+    // column_id. Allocate a scratch chunk shaped by column_ids the
+    // first time we're called and reference into the output.
+    //
+    // When projection_ids is empty (the planner kept all columns), or
+    // matches column_ids 1:1, we still go through the scratch path —
+    // it is uniform and the ReferenceColumns cost is negligible
+    // (vector pointer swaps, no copies).
+    if (local.fetch_chunk.ColumnCount() == 0) {
+        vector<LogicalType> fetch_types;
+        fetch_types.reserve(gstate.column_ids.size());
+        for (auto cid : gstate.column_ids) {
+            if (cid == COLUMN_IDENTIFIER_ROW_ID) {
+                fetch_types.push_back(LogicalType::BIGINT);
+            } else {
+                fetch_types.push_back(bind.column_types[cid]);
+            }
+        }
+        local.fetch_chunk.Initialize(Allocator::DefaultAllocator(), fetch_types);
+    }
+    local.fetch_chunk.Reset();
 
     const idx_t target = STANDARD_VECTOR_SIZE;
-    const idx_t n_out_cols = output.ColumnCount();
+    const idx_t n_fetch_cols = local.fetch_chunk.ColumnCount();
     idx_t row = 0;
 
     while (row < target) {
@@ -564,18 +599,26 @@ static void FirebirdScanFunction(ClientContext &ctx,
             if (!OpenNextPartitionCursor(ctx, data, local)) break;
         }
         if (!local.cursor->Fetch()) {
-            // Current partition done — drop the cursor and try to fetch
-            // the next one on the next iteration.
             local.cursor.reset();
             continue;
         }
-        for (idx_t c = 0; c < n_out_cols; ++c) {
-            FirebirdAppendValue(*local.cursor, c, output.data[c], row,
+        for (idx_t c = 0; c < n_fetch_cols; ++c) {
+            FirebirdAppendValue(*local.cursor, c,
+                                local.fetch_chunk.data[c], row,
                                 bind.none_encoding);
         }
         ++row;
     }
-    output.SetCardinality(row);
+    local.fetch_chunk.SetCardinality(row);
+
+    if (gstate.projection_ids.empty()) {
+        // No projection list — caller wants every fetched column.
+        output.Reference(local.fetch_chunk);
+    } else {
+        duckdb::vector<column_t> proj(gstate.projection_ids.begin(),
+                                      gstate.projection_ids.end());
+        output.ReferenceColumns(local.fetch_chunk, proj);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -916,6 +959,25 @@ static bool TryExtractLikePrefix(Expression &expr,
     return true;
 }
 
+// Whitelist hook called by DuckDB's planner *before* it commits a
+// TableFilterSet entry to pushdown. Returning false makes DuckDB add a
+// FILTER operator on top of the scan AND drop the filter from the set
+// we hand to the builder — exactly the behaviour we need for NONE text
+// columns whose bytes have to be transcoded client-side before any
+// UTF-8 literal can match them.
+static bool FirebirdScanSupportsPushdownType(const FunctionData &bind_data,
+                                             idx_t col_idx) {
+    auto &bind = bind_data.Cast<FirebirdBindData>();
+    if (col_idx >= bind.column_descs.size()) return true;
+    const auto &desc = bind.column_descs[col_idx];
+    if (bind.none_encoding == NoneEncoding::STRICT) return true;
+    if (desc.character_set_id != 0) return true;
+    const bool is_text_or_text_blob =
+        desc.sqltype == SQL_TEXT || desc.sqltype == SQL_VARYING ||
+        (desc.sqltype == SQL_BLOB && desc.sqlsubtype == 1);
+    return !is_text_or_text_blob;
+}
+
 static void FirebirdScanPushdownComplexFilter(
     ClientContext & /*ctx*/, LogicalGet &get, FunctionData *bind_data_p,
     vector<unique_ptr<Expression>> &filters) {
@@ -987,10 +1049,22 @@ TableFunction GetFirebirdScanFunction() {
     // narrowed column lists and TableFilterSet entries.
     fn.projection_pushdown = true;
     fn.filter_pushdown     = true;
-    fn.filter_prune        = false;  // not yet — we still need to recheck residuals
+    // filter_prune lets DuckDB tell us, via input.projection_ids, that
+    // some columns in input.column_ids are filter-only (not needed in
+    // the output). The scan loop fetches into a scratch chunk shaped
+    // by column_ids and then ReferenceColumns by projection_ids into
+    // the caller's output. Necessary for supports_pushdown_type to
+    // work without DataChunk-size mismatches.
+    fn.filter_prune        = true;
     // LIKE-prefix pushdown (BoundFunctionExpression that the TableFilter
     // path can't express). See FirebirdScanPushdownComplexFilter.
     fn.pushdown_complex_filter = FirebirdScanPushdownComplexFilter;
+    // Per-column opt-out from filter pushdown. Currently used to keep
+    // Firebird CHARACTER SET NONE text columns out of the pushed
+    // TableFilterSet when the caller is transcoding client-side: the
+    // SqlLiteral we'd emit is UTF-8 and would not match the raw bytes
+    // server-side. See FirebirdScanSupportsPushdownType.
+    fn.supports_pushdown_type = FirebirdScanSupportsPushdownType;
 
     return fn;
 }

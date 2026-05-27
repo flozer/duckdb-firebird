@@ -156,6 +156,25 @@ static bool TranslateFilter(const std::string &column_name,
     }
 }
 
+// A predicate that touches a Firebird CHARACTER SET NONE text column
+// CANNOT be safely pushed down when `none_encoding != STRICT`: the
+// SqlLiteral we'd emit is UTF-8 (DuckDB's internal encoding), but the
+// server compares against the raw bytes the writing application stored,
+// so a row containing the correct value can silently fail the predicate.
+//
+// STRICT mode is conceptually safe to push (the row would fail UTF-8
+// validation at fetch time anyway), but is left in DuckDB too for
+// uniformity — pushdown for NONE text is a v0.5 follow-up that would
+// need a verified reverse-transcode of the literal.
+static bool IsNoneTextColumnGated(const FirebirdColumnDesc &desc,
+                                   NoneEncoding mode) {
+    if (mode == NoneEncoding::STRICT) return false;
+    if (desc.character_set_id != 0) return false;
+    return desc.sqltype == SQL_TEXT ||
+           desc.sqltype == SQL_VARYING ||
+           (desc.sqltype == SQL_BLOB && desc.sqlsubtype == 1);
+}
+
 FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
     const std::string &table_name,
     const std::vector<std::string> &all_column_names,
@@ -163,7 +182,9 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
     const std::vector<column_t>     &column_ids,
     optional_ptr<TableFilterSet>     filters,
     optional_idx                     limit,
-    const std::string               &extra_predicate) {
+    const std::string               &extra_predicate,
+    const std::vector<FirebirdColumnDesc> *column_descs,
+    NoneEncoding                     none_encoding) {
 
     Result r;
     std::ostringstream sql;
@@ -209,6 +230,14 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
             column_t source_col = column_ids[projected_col];
             if (source_col == COLUMN_IDENTIFIER_ROW_ID ||
                 source_col >= all_column_names.size()) {
+                r.residual_filter_indices.push_back(filter_idx++);
+                continue;
+            }
+            // CHARACTER SET NONE text + caller is transcoding bytes
+            // client-side: drop the predicate and let DuckDB filter
+            // post-transcode. See IsNoneTextColumnGated() comment.
+            if (column_descs && source_col < column_descs->size() &&
+                IsNoneTextColumnGated((*column_descs)[source_col], none_encoding)) {
                 r.residual_filter_indices.push_back(filter_idx++);
                 continue;
             }

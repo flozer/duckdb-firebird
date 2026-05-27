@@ -117,5 +117,55 @@ SELECT ID, LABEL FROM att.main.TXT WHERE ID = 2;
 ----
 2	São Paulo
 
+# --- Filter on a NONE text column under ATTACH: must return the row
+# whose post-transcode value matches the UTF-8 literal. Before the
+# v0.4.2 supports_pushdown_type / filter_prune fix, this query would
+# push the predicate into Firebird, compare raw CP1252 bytes against
+# 'São Paulo' UTF-8 bytes, and silently miss the row.
+
+query II
+SELECT ID, LABEL FROM att.main.TXT WHERE LABEL = 'São Paulo';
+----
+2	São Paulo
+
 statement ok
 DETACH att;
+
+# --- CONSTANT_COMPARISON via firebird_scan() —---------------------
+
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='win1252')
+ WHERE LABEL = 'São Paulo';
+----
+2	São Paulo
+
+# --- IN_FILTER on a NONE text column ------------------------------
+
+query II rowsort
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='win1252')
+ WHERE LABEL IN ('São Paulo', 'pure ascii')
+ ORDER BY ID;
+----
+1	pure ascii
+2	São Paulo
+
+# --- AND: numeric filter (pushable) + text filter on NONE col -----
+# The numeric predicate goes to Firebird; the text predicate stays
+# in DuckDB, evaluated post-transcode.
+
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='win1252')
+ WHERE ID >= 2
+   AND LABEL = 'São Paulo';
+----
+2	São Paulo
+
+# --- STRICT mode still pushes text filters (no transcoding needed) -
+# Row 1 is pure ASCII so the strict path doesn't error here. Verify
+# the pushdown path still returns the correct row.
+
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT')
+ WHERE LABEL = 'pure ascii';
+----
+1	pure ascii
