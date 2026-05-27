@@ -170,7 +170,7 @@ NoneEncoding ParseNoneEncoding(const std::string &s) {
     }
     throw IOException(
         "firebird: unknown none_encoding='" + s + "'. Accepted: "
-        "'strict' (default), 'win1252', 'iso8859_1' (alias 'latin1'), 'blob'.");
+        "'win1252' (default), 'iso8859_1' (alias 'latin1'), 'strict', 'blob'.");
 }
 
 // --- error reporting ---------------------------------------------------------
