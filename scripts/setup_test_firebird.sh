@@ -29,9 +29,17 @@ fi
 mkdir -p "$(dirname "$FIREBIRD_TEST_DB")"
 # Firebird's server runs as the 'firebird' user — give it write access.
 if id -u firebird >/dev/null 2>&1; then
-    chown firebird:firebird "$(dirname "$FIREBIRD_TEST_DB")" || true
+    if command -v sudo >/dev/null 2>&1; then
+        sudo chown firebird:firebird "$(dirname "$FIREBIRD_TEST_DB")" || true
+    else
+        chown firebird:firebird "$(dirname "$FIREBIRD_TEST_DB")" || true
+    fi
 fi
-chmod 0777 "$(dirname "$FIREBIRD_TEST_DB")"
+if command -v sudo >/dev/null 2>&1; then
+    sudo chmod 0777 "$(dirname "$FIREBIRD_TEST_DB")"
+else
+    chmod 0777 "$(dirname "$FIREBIRD_TEST_DB")"
+fi
 
 rm -f "$FIREBIRD_TEST_DB"
 
