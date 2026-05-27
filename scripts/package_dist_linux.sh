@@ -73,11 +73,18 @@ if [ "$INCLUDE_FBCLIENT" = "1" ]; then
     if command -v ldconfig >/dev/null 2>&1; then
         FBCLIENT_PATH="$(ldconfig -p | awk '/libfbclient\.so/ {print $NF; exit}')"
     fi
-    if [ -z "$FBCLIENT_PATH" ] && command -v pkg-config >/dev/null 2>&1 && pkg-config --exists fbclient; then
-        LIBDIR="$(pkg-config --variable=libdir fbclient 2>/dev/null || true)"
-        if [ -n "$LIBDIR" ]; then
-            FBCLIENT_PATH="$(find "$LIBDIR" -maxdepth 1 -name 'libfbclient.so*' -type f | sort | tail -n 1)"
-        fi
+    if [ -z "$FBCLIENT_PATH" ] && command -v pkg-config >/dev/null 2>&1; then
+        for pc_name in fbclient firebird; do
+            if pkg-config --exists "$pc_name" 2>/dev/null; then
+                LIBDIR="$(pkg-config --variable=libdir "$pc_name" 2>/dev/null || true)"
+                if [ -n "$LIBDIR" ]; then
+                    FBCLIENT_PATH="$(find "$LIBDIR" -maxdepth 1 -name 'libfbclient.so*' -type f | sort | tail -n 1)"
+                    if [ -n "$FBCLIENT_PATH" ]; then
+                        break
+                    fi
+                fi
+            fi
+        done
     fi
     if [ -z "$FBCLIENT_PATH" ] || [ ! -f "$FBCLIENT_PATH" ]; then
         echo "ERROR: --include-fbclient requested but libfbclient.so was not found" >&2

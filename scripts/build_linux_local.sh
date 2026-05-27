@@ -70,17 +70,44 @@ if [ "$GENERATOR" = "ninja" ] && ! command -v ninja >/dev/null 2>&1; then
     exit 1
 fi
 
-if ! pkg-config --exists fbclient 2>/dev/null && [ -z "$FB_SDK_ROOT" ]; then
-    cat >&2 <<'EOF'
-ERROR: fbclient pkg-config entry not found.
+if [ -z "$FB_SDK_ROOT" ]; then
+    HAVE_FBCLIENT=0
+    if command -v pkg-config >/dev/null 2>&1; then
+        if pkg-config --exists fbclient 2>/dev/null || pkg-config --exists firebird 2>/dev/null; then
+            HAVE_FBCLIENT=1
+        fi
+    fi
+    if [ "$HAVE_FBCLIENT" = "0" ] && command -v ldconfig >/dev/null 2>&1; then
+        if ldconfig -p 2>/dev/null | grep -q 'libfbclient\.so'; then
+            HAVE_FBCLIENT=1
+        fi
+    fi
+    if [ "$HAVE_FBCLIENT" = "0" ]; then
+        for header in /usr/include/firebird/ibase.h /usr/include/ibase.h /usr/local/include/firebird/ibase.h /usr/local/include/ibase.h; do
+            if [ -f "$header" ]; then
+                HAVE_FBCLIENT=1
+                break
+            fi
+        done
+    fi
 
-Install Firebird client development files, for example:
-  sudo apt-get install -y firebird-dev
+    if [ "$HAVE_FBCLIENT" = "0" ]; then
+        cat >&2 <<'EOF'
+ERROR: Firebird client development files were not found.
+
+Install them, for example:
+  sudo apt-get update
+  sudo apt-get install -y firebird-dev libfbclient2
+
+On Ubuntu/WSL, firebird-dev may not provide a fbclient pkg-config file.
+That is OK: this script also accepts /usr/include/firebird/ibase.h plus
+libfbclient.so in the system linker cache.
 
 Or pass:
   scripts/build_linux_local.sh --fb-sdk-root /opt/firebird
 EOF
-    exit 1
+        exit 1
+    fi
 fi
 
 if [ "$SKIP_SUBMODULES" != "1" ]; then
