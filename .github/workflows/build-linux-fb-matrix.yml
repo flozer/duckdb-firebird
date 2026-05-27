@@ -123,7 +123,7 @@ jobs:
           fi
 
           # Suite tests connect over TCP — expose the URL form.
-          echo "FIREBIRD_TEST_DB=firebird://SYSDBA:masterkey@localhost:3050//var/lib/firebird/data/test.fdb?charset=UTF8" >> $GITHUB_ENV
+          echo "FIREBIRD_TEST_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/test.fdb?charset=UTF8" >> $GITHUB_ENV
 
       - name: Pin DuckDB version
         run: |
@@ -155,7 +155,7 @@ jobs:
               typeof(TS_TZ)    AS t_ts_tz,
               typeof(T_TZ)     AS t_t_tz
             FROM firebird_scan(
-                'firebird://SYSDBA:masterkey@localhost:3050//var/lib/firebird/data/biz4.fdb?charset=UTF8',
+                'firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/biz4.fdb?charset=UTF8',
                 'FB4_TYPES',
                 partitions=1)
            LIMIT 1;
