@@ -64,7 +64,16 @@ Useful options:
 scripts/build_linux_local.sh --clean
 scripts/build_linux_local.sh --debug
 SKIP_SUBMODULES=1 scripts/build_linux_local.sh
+SKIP_DUCKDB_PIN=1 scripts/build_linux_local.sh
 ```
+
+On WSL, builds from `/mnt/c` or `/mnt/d` are much slower than builds
+inside the Linux filesystem because the DuckDB submodule contains many
+small files. If the script appears to pause at
+`cd duckdb && git checkout v1.5.3`, it is usually the DuckDB pin step
+touching files on the Windows-mounted drive. After the first successful
+pin, use `SKIP_DUCKDB_PIN=1 scripts/build_linux_local.sh` for repeat
+builds, or clone the repo under `~/src` for much faster Linux builds.
 
 To produce a local distribution archive after a release build:
 

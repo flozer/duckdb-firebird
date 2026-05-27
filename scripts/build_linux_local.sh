@@ -8,6 +8,7 @@ DUCKDB_VERSION="${DUCKDB_VERSION:-v1.5.3}"
 BUILD_TYPE="${BUILD_TYPE:-release}"
 GENERATOR="${GEN:-ninja}"
 SKIP_SUBMODULES="${SKIP_SUBMODULES:-0}"
+SKIP_DUCKDB_PIN="${SKIP_DUCKDB_PIN:-0}"
 DO_CLEAN="${CLEAN:-0}"
 FB_SDK_ROOT="${FB_SDK_ROOT:-}"
 
@@ -19,12 +20,14 @@ Options:
   --debug              Build debug instead of release
   --clean              Remove build/<type> before building
   --skip-submodules    Do not run git submodule update
+  --skip-duckdb-pin    Do not run make set_duckdb_version
   --fb-sdk-root PATH   Pass -DFB_SDK_ROOT=PATH to CMake
   -h, --help           Show this help
 
 Environment:
   DUCKDB_VERSION=v1.5.3  DuckDB tag/commit to pin before build
   GEN=ninja              Generator used by the DuckDB extension Makefile
+  SKIP_DUCKDB_PIN=1      Same as --skip-duckdb-pin
 EOF
 }
 
@@ -33,6 +36,7 @@ while [ "$#" -gt 0 ]; do
         --debug) BUILD_TYPE="debug" ;;
         --clean) DO_CLEAN="1" ;;
         --skip-submodules) SKIP_SUBMODULES="1" ;;
+        --skip-duckdb-pin) SKIP_DUCKDB_PIN="1" ;;
         --fb-sdk-root)
             shift
             FB_SDK_ROOT="${1:-}"
@@ -114,7 +118,28 @@ if [ "$SKIP_SUBMODULES" != "1" ]; then
     git submodule update --init --recursive --depth=1
 fi
 
-DUCKDB_GIT_VERSION="$DUCKDB_VERSION" make set_duckdb_version
+if [ "$SKIP_DUCKDB_PIN" = "1" ]; then
+    echo "==> Skipping DuckDB pin (SKIP_DUCKDB_PIN=1)"
+else
+    CURRENT_DUCKDB_TAG=""
+    if [ -d duckdb/.git ] || [ -f duckdb/.git ]; then
+        CURRENT_DUCKDB_TAG="$(git -C duckdb describe --tags --exact-match HEAD 2>/dev/null || true)"
+    fi
+    if [ "$CURRENT_DUCKDB_TAG" = "$DUCKDB_VERSION" ]; then
+        echo "==> DuckDB already pinned at $DUCKDB_VERSION"
+    else
+        case "$REPO_ROOT" in
+            /mnt/*)
+                echo "==> Pinning DuckDB to $DUCKDB_VERSION"
+                echo "    Note: under /mnt/* on WSL this git checkout can take several minutes."
+                ;;
+            *)
+                echo "==> Pinning DuckDB to $DUCKDB_VERSION"
+                ;;
+        esac
+        DUCKDB_GIT_VERSION="$DUCKDB_VERSION" make set_duckdb_version
+    fi
+fi
 
 if [ "$DO_CLEAN" = "1" ]; then
     rm -rf "build/$BUILD_TYPE"
