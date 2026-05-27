@@ -65,6 +65,11 @@ user=SYSDBA;password=masterkey;database=server:/data/db.fdb;charset=UTF8
 A bare path (e.g. `/var/lib/firebird/test.fdb`) is also accepted for local
 databases; defaults apply (`SYSDBA` / `masterkey`, UTF-8, dialect 3).
 
+Security note: connection strings and SQL examples may be stored in shell
+history, notebooks, DuckDB logs, or application traces. Use least-privilege
+Firebird users for production access and avoid committing real credentials in
+scripts or documentation.
+
 ### Named parameter overrides
 
 ```sql
