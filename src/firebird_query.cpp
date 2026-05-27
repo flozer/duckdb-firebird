@@ -162,10 +162,14 @@ static bool TranslateFilter(const std::string &column_name,
 // server compares against the raw bytes the writing application stored,
 // so a row containing the correct value can silently fail the predicate.
 //
-// STRICT mode is conceptually safe to push (the row would fail UTF-8
-// validation at fetch time anyway), but is left in DuckDB too for
-// uniformity — pushdown for NONE text is a v0.5 follow-up that would
-// need a verified reverse-transcode of the literal.
+// In STRICT mode the row would fail UTF-8 validation at fetch time
+// anyway (the scanner raises an IOException there), so leaving the
+// predicate pushable is fine — Firebird does the filtering, DuckDB
+// never sees the offending bytes. Hence we return false for STRICT.
+// A future refactor could short-circuit STRICT NONE pushdown to
+// guarantee the error surfaces at the same point regardless of
+// pushdown decisions, but that needs a verified reverse-transcode
+// plan and is tracked in the v0.5 roadmap.
 static bool IsNoneTextColumnGated(const FirebirdColumnDesc &desc,
                                    NoneEncoding mode) {
     if (mode == NoneEncoding::STRICT) return false;
