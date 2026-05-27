@@ -85,6 +85,52 @@ DuckDB stores strings as UTF-8 internally. The extension **only accepts
 parameter; anything else (e.g. `WIN1252`, `ISO8859_1`) is rejected at
 bind time with a hint.
 
+#### CHARACTER SET NONE
+
+When the **database itself** (or any text column) is declared
+`CHARACTER SET NONE`, Firebird does *not* transliterate the bytes
+to the client's `lc_ctype` — it just hands the raw bytes through.
+DuckDB's VARCHAR requires valid UTF-8, so the extension's default
+**strict** mode raises an informative error the first time it
+encounters non-UTF-8 bytes:
+
+```
+IO Error: firebird: column 'NAME' has Firebird CHARACTER SET NONE and
+the row's bytes are not valid UTF-8. Pass none_encoding='win1252'
+(or 'iso8859_1', or 'blob') to firebird_scan() / ATTACH so the
+extension knows how to surface the bytes.
+```
+
+Pick the mode that matches what your application wrote into Firebird:
+
+| `none_encoding=` | Effect |
+|---|---|
+| `'strict'` (default) | Accepts only valid UTF-8; raises otherwise. |
+| `'win1252'`          | Decodes bytes as Windows-1252 → UTF-8 (covers Brazilian Portuguese / Western European apps that wrote through a Windows client). |
+| `'iso8859_1'` (alias `'latin1'`) | Decodes bytes as ISO-8859-1 → UTF-8. |
+| `'blob'`             | Surfaces NONE text columns as DuckDB `BLOB` instead of `VARCHAR` (use when you don't know the encoding and want raw bytes). |
+
+```sql
+-- firebird_scan
+SELECT * FROM firebird_scan('C:/data/legacy.fdb', 'TABENTRADASAIDA',
+                            none_encoding='win1252');
+
+-- ATTACH catalog
+ATTACH 'C:/data/legacy.fdb' AS legacy
+    (TYPE firebird, user 'SYSDBA', password 'masterkey',
+     none_encoding 'win1252');
+SELECT * FROM legacy.main.TABENTRADASAIDA;
+```
+
+While `none_encoding` is active (anything other than `strict`),
+filter pushdown on text columns whose Firebird charset is `NONE` is
+**disabled** — DuckDB's literals are UTF-8 and would not match the
+raw bytes server-side. Numeric / date filters are still pushed.
+Filters in DuckDB land are applied *after* transcoding, so they
+work as expected. This is the deliberate, conservative behaviour;
+do not work around it by re-enabling pushdown without a verified
+reverse-transcode plan.
+
 This is not a limitation for legacy Brazilian Portuguese / Latin-1
 databases. Firebird stores the bytes in whatever character set the table
 was declared with, but **the wire protocol transliterates** to whatever

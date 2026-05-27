@@ -57,8 +57,28 @@ struct FirebirdColumnDesc {
     int16_t sqlsubtype = 0;
     int16_t sqlscale = 0;
     int16_t sqllen = 0;
+    // Firebird CHARACTER SET id. 0 = NONE (storage charset is "no
+    // declared encoding — bytes are raw"). Non-zero = a real
+    // server-side charset; Firebird transliterates to the client's
+    // lc_ctype (which we keep at UTF8) before fetch, so the bytes
+    // arriving in our buffers are valid UTF-8.
+    int16_t character_set_id = -1; // -1 = unknown / not applicable
     bool nullable = true;
 };
+
+// How to surface text columns whose Firebird CHARACTER SET is NONE.
+// Firebird NONE means "bytes have no declared encoding" — the server
+// does not transliterate them, so we get whatever the writing app
+// stored. DuckDB's VARCHAR requires valid UTF-8, so we have to
+// choose what to do at fetch time.
+enum class NoneEncoding {
+    STRICT,      // require UTF-8; raise an informative error otherwise
+    WIN1252,     // decode bytes as Windows-1252 -> UTF-8
+    ISO_8859_1,  // decode bytes as ISO-8859-1 (Latin-1) -> UTF-8
+    BLOB,        // surface the column as DuckDB BLOB (raw bytes)
+};
+
+NoneEncoding ParseNoneEncoding(const std::string &s);
 
 class FirebirdConnection;
 
@@ -73,6 +93,15 @@ public:
     FirebirdStatement &operator=(const FirebirdStatement &) = delete;
 
     const std::vector<FirebirdColumnDesc> &columns() const { return columns_; }
+
+    // Set the character_set_id on column `col`. Used when the caller
+    // wants to augment what XSQLDA gives us with metadata pulled
+    // from RDB$FIELDS — needed for text BLOBs (sqltype=SQL_BLOB,
+    // subtype=1) where the XSQLVAR sqlsubtype is the *blob* subtype
+    // (1 = text), not the INTL character_set_id.
+    void OverrideCharsetId(idx_t col, int16_t cs_id) {
+        columns_[col].character_set_id = cs_id;
+    }
 
     // Returns false when no more rows are available.
     bool Fetch();

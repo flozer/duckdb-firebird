@@ -22,7 +22,9 @@ extension:
     BETWEEN, IN, AND/OR, LIKE 'prefix%'), PK-range parallel scan
     (opt-in), connection pool + metadata cache. Firebird 3/4/5
     server compatibility, including INT128, DECIMAL(38, s),
-    TIMESTAMP WITH TIME ZONE, and TIME WITH TIME ZONE.
+    TIMESTAMP WITH TIME ZONE, and TIME WITH TIME ZONE. Also
+    supports CHARACTER SET NONE Firebird databases via a
+    none_encoding=strict|win1252|iso8859_1|blob option.
   version: 0.4.0
   language: C++
   build: cmake

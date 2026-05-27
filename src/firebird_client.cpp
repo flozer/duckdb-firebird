@@ -146,6 +146,33 @@ void ValidateClientCharset(const std::string &charset) {
         charset + "-stored data to UTF-8 on the wire automatically.");
 }
 
+// none_encoding parser. Case-insensitive, accepts "iso8859_1" or
+// "iso-8859-1" or "latin1" as the Latin-1 spelling.
+NoneEncoding ParseNoneEncoding(const std::string &s) {
+    std::string upper;
+    upper.reserve(s.size());
+    for (char c : s) {
+        if (c == '-') continue;            // collapse "ISO-8859-1"
+        if (c == '_') continue;            // collapse "iso8859_1"
+        upper.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    }
+    if (upper == "STRICT" || upper == "UTF8" || upper == "UTF8STRICT") {
+        return NoneEncoding::STRICT;
+    }
+    if (upper == "WIN1252" || upper == "WINDOWS1252" || upper == "CP1252") {
+        return NoneEncoding::WIN1252;
+    }
+    if (upper == "ISO88591" || upper == "LATIN1") {
+        return NoneEncoding::ISO_8859_1;
+    }
+    if (upper == "BLOB" || upper == "OCTETS") {
+        return NoneEncoding::BLOB;
+    }
+    throw IOException(
+        "firebird: unknown none_encoding='" + s + "'. Accepted: "
+        "'strict' (default), 'win1252', 'iso8859_1' (alias 'latin1'), 'blob'.");
+}
+
 // --- error reporting ---------------------------------------------------------
 
 void FirebirdConnection::Check(const ISC_STATUS *status, const std::string &context) {
@@ -337,6 +364,16 @@ void FirebirdStatement::AllocateBuffers() {
         c.sqlscale   = v.sqlscale;
         c.sqllen     = v.sqllen;
         c.nullable   = (v.sqltype & 1) != 0;
+        // For SQL_TEXT / SQL_VARYING, Firebird packs the INTL_TTYPE into
+        // sqlsubtype: low byte = character_set_id, high byte = collation
+        // id. CS_NONE = 0 — the case we have to surface so the fetch
+        // path can transcode (or refuse) NONE bytes per none_encoding.
+        // For BLOBs, sqlsubtype is the *blob subtype* (1 = text), not
+        // a charset id; LoadTableSchema reads RDB$CHARACTER_SET_ID
+        // from RDB$FIELDS for those, so we leave it untouched here.
+        if (c.sqltype == SQL_TEXT || c.sqltype == SQL_VARYING) {
+            c.character_set_id = static_cast<int16_t>(v.sqlsubtype & 0xFF);
+        }
 
         // Allocate the data buffer that libfbclient will write into.
         size_t bufsz = 0;

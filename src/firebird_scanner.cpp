@@ -110,21 +110,45 @@ static std::string SqlLiteral(const std::string &s) {
     return out;
 }
 
+bool DatabaseCharsetIsNone(FirebirdConnection &conn) {
+    try {
+        auto cur = conn.OpenCursor(
+            "SELECT TRIM(RDB$CHARACTER_SET_NAME) FROM RDB$DATABASE");
+        if (!cur->Fetch()) return false;
+        if (cur->IsNull(0)) return true;  // NONE is sometimes stored NULL
+        auto name = cur->GetText(0);
+        std::string upper;
+        for (char c : name) {
+            upper.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+        }
+        return upper == "NONE";
+    } catch (...) {
+        return false;
+    }
+}
+
 void LoadTableSchema(FirebirdConnection &conn,
                      const std::string &table_name,
                      duckdb::vector<std::string> &out_names,
-                     duckdb::vector<LogicalType> &out_types) {
+                     duckdb::vector<LogicalType> &out_types,
+                     duckdb::vector<FirebirdColumnDesc> &out_descs,
+                     NoneEncoding none_encoding) {
     // Firebird stores identifiers upper-cased unless quoted at creation; we
     // upper-case here so callers can pass either form.
     std::string upper = table_name;
     for (auto &c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
 
+    // Pulls RDB$CHARACTER_SET_ID alongside the rest so the fetch path
+    // can distinguish NONE columns (id = 0) from declared-charset
+    // columns (Firebird transliterates those to UTF-8 wire). Non-text
+    // columns get NULL → -1 sentinel.
     const std::string sql =
         "SELECT TRIM(rf.RDB$FIELD_NAME), "
         "       f.RDB$FIELD_TYPE, "
         "       COALESCE(f.RDB$FIELD_SUB_TYPE, 0), "
         "       COALESCE(f.RDB$FIELD_SCALE, 0), "
-        "       COALESCE(f.RDB$FIELD_LENGTH, 0) "
+        "       COALESCE(f.RDB$FIELD_LENGTH, 0), "
+        "       COALESCE(f.RDB$CHARACTER_SET_ID, -1) "
         "  FROM RDB$RELATION_FIELDS rf "
         "  JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE "
         " WHERE rf.RDB$RELATION_NAME = " + SqlLiteral(upper) + " "
@@ -133,11 +157,12 @@ void LoadTableSchema(FirebirdConnection &conn,
     auto cursor = conn.OpenCursor(sql);
     while (cursor->Fetch()) {
         FirebirdColumnDesc desc;
-        desc.name        = cursor->GetText(0);
-        desc.sqltype     = cursor->GetShort(1);
-        desc.sqlsubtype  = cursor->GetShort(2);
-        desc.sqlscale    = cursor->GetShort(3);
-        desc.sqllen      = cursor->GetShort(4);
+        desc.name             = cursor->GetText(0);
+        desc.sqltype          = cursor->GetShort(1);
+        desc.sqlsubtype       = cursor->GetShort(2);
+        desc.sqlscale         = cursor->GetShort(3);
+        desc.sqllen           = cursor->GetShort(4);
+        desc.character_set_id = cursor->GetShort(5);
 
         // RDB$FIELD_TYPE uses Firebird's *internal* blr_* type codes which
         // differ from the SQL-level XSQLDA constants. Codes 7..37/261 are
@@ -168,8 +193,23 @@ void LoadTableSchema(FirebirdConnection &conn,
         default: /* leave as-is; FirebirdToDuckDBType degrades to VARCHAR */ break;
         }
 
+        // Map to a DuckDB LogicalType. When this is a text column on a
+        // NONE storage charset and the caller asked for none_encoding=BLOB,
+        // hand the bytes through as raw BLOB instead of pretending they
+        // are UTF-8.
+        LogicalType lt;
+        const bool is_text = (desc.sqltype == SQL_TEXT || desc.sqltype == SQL_VARYING);
+        const bool is_blob_subtype_text = (desc.sqltype == SQL_BLOB && desc.sqlsubtype == 1);
+        const bool is_none_charset = (desc.character_set_id == 0);
+        if (none_encoding == NoneEncoding::BLOB && is_none_charset &&
+            (is_text || is_blob_subtype_text)) {
+            lt = LogicalType::BLOB;
+        } else {
+            lt = FirebirdToDuckDBType(desc);
+        }
         out_names.push_back(desc.name);
-        out_types.push_back(FirebirdToDuckDBType(desc));
+        out_types.push_back(lt);
+        out_descs.push_back(desc);
     }
 
     if (out_names.empty()) {
@@ -326,10 +366,18 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
             if (l <= 0) throw BinderException("row_limit must be > 0");
             bind->limit_override = optional_idx(static_cast<idx_t>(l));
         }
+        else if (key == "none_encoding") {
+            // ParseNoneEncoding throws on unknown values with the list of
+            // accepted spellings.
+            bind->none_encoding = ParseNoneEncoding(val.ToString());
+        }
     }
 
     FirebirdConnection conn(bind->conn_info);
-    LoadTableSchema(conn, bind->table_name, bind->column_names, bind->column_types);
+    bind->db_charset_none = DatabaseCharsetIsNone(conn);
+    LoadTableSchema(conn, bind->table_name,
+                    bind->column_names, bind->column_types, bind->column_descs,
+                    bind->none_encoding);
 
     // PK probe is only worth its three RDB$ round-trips if we might actually
     // parallelize. If the caller forced partitions=1 we skip it entirely;
@@ -485,6 +533,19 @@ static bool OpenNextPartitionCursor(ClientContext & /*ctx*/,
         combined);
 
     local.cursor = local.conn->OpenCursor(query.sql);
+    // The XSQLDA gives us a character_set_id for SQL_TEXT / SQL_VARYING
+    // (packed in sqlsubtype), but not for text BLOBs — and column_ids
+    // maps cursor-column-index back to the original bind position, so
+    // splice the LoadTableSchema-derived charset id onto the cursor's
+    // FirebirdColumnDesc here. This is what the fetch path reads to
+    // decide whether to transcode / reject / pass-through.
+    for (idx_t c = 0; c < gstate.column_ids.size(); ++c) {
+        auto src_col = gstate.column_ids[c];
+        if (src_col == COLUMN_IDENTIFIER_ROW_ID) continue;
+        if (src_col >= bind.column_descs.size()) continue;
+        auto cs = bind.column_descs[src_col].character_set_id;
+        if (cs >= 0) local.cursor->OverrideCharsetId(c, cs);
+    }
     return true;
 }
 
@@ -492,6 +553,7 @@ static void FirebirdScanFunction(ClientContext &ctx,
                                  TableFunctionInput &data,
                                  DataChunk &output) {
     auto &local = data.local_state->Cast<FirebirdLocalState>();
+    auto &bind  = data.bind_data->Cast<FirebirdBindData>();
 
     const idx_t target = STANDARD_VECTOR_SIZE;
     const idx_t n_out_cols = output.ColumnCount();
@@ -508,7 +570,8 @@ static void FirebirdScanFunction(ClientContext &ctx,
             continue;
         }
         for (idx_t c = 0; c < n_out_cols; ++c) {
-            FirebirdAppendValue(*local.cursor, c, output.data[c], row);
+            FirebirdAppendValue(*local.cursor, c, output.data[c], row,
+                                bind.none_encoding);
         }
         ++row;
     }
@@ -881,6 +944,17 @@ static void FirebirdScanPushdownComplexFilter(
             ++it;
             continue;
         }
+        // Skip pushdown for Firebird CHARACTER SET NONE text columns when
+        // the caller is transcoding bytes client-side: the SqlLiteral we
+        // emit here is UTF-8, but the server compares against raw bytes,
+        // so a literal like 'São' won't match a row whose actual storage
+        // is the CP1252 byte string. Let DuckDB filter post-transcode.
+        if (src_col_idx < bind.column_descs.size() &&
+            bind.column_descs[src_col_idx].character_set_id == 0 &&
+            bind.none_encoding != NoneEncoding::STRICT) {
+            ++it;
+            continue;
+        }
         std::string frag = QuoteIdent(bind.column_names[src_col_idx]) +
                            " LIKE " + SqlLiteral(pattern) +
                            " ESCAPE '\\'";
@@ -900,13 +974,14 @@ TableFunction GetFirebirdScanFunction() {
                      FirebirdScanBind,
                      FirebirdScanInitGlobal,
                      FirebirdScanInitLocal);
-    fn.named_parameters["user"]       = LogicalType::VARCHAR;
-    fn.named_parameters["password"]   = LogicalType::VARCHAR;
-    fn.named_parameters["charset"]    = LogicalType::VARCHAR;
-    fn.named_parameters["role"]       = LogicalType::VARCHAR;
-    fn.named_parameters["dialect"]    = LogicalType::INTEGER;
-    fn.named_parameters["partitions"] = LogicalType::BIGINT;
-    fn.named_parameters["row_limit"]  = LogicalType::BIGINT;
+    fn.named_parameters["user"]          = LogicalType::VARCHAR;
+    fn.named_parameters["password"]      = LogicalType::VARCHAR;
+    fn.named_parameters["charset"]       = LogicalType::VARCHAR;
+    fn.named_parameters["role"]          = LogicalType::VARCHAR;
+    fn.named_parameters["dialect"]       = LogicalType::INTEGER;
+    fn.named_parameters["partitions"]    = LogicalType::BIGINT;
+    fn.named_parameters["row_limit"]     = LogicalType::BIGINT;
+    fn.named_parameters["none_encoding"] = LogicalType::VARCHAR;
 
     // Pushdown advertisements — DuckDB's planner now knows it can hand us
     // narrowed column lists and TableFilterSet entries.

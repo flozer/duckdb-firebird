@@ -1,6 +1,7 @@
 #include "firebird_types.hpp"
 
 #include <cmath>
+#include <cstdint>
 
 #include "duckdb/common/hugeint.hpp"
 #include "duckdb/common/types/date.hpp"
@@ -10,6 +11,121 @@
 #include "duckdb/common/exception.hpp"
 
 namespace duckdb {
+
+// --- character-set helpers ---------------------------------------------------
+//
+// Reaches the row-fetch path for columns whose Firebird storage CHARACTER
+// SET is NONE (id = 0). Firebird does not transliterate NONE columns to
+// the client's lc_ctype on the wire, so we receive whatever bytes the
+// writing application stored.
+
+// Returns true when every byte in [data, data+len) forms a valid UTF-8
+// sequence according to RFC 3629 (no overlongs, no surrogates).
+static bool IsValidUtf8(const char *data, size_t len) {
+    auto p = reinterpret_cast<const unsigned char *>(data);
+    const auto end = p + len;
+    while (p < end) {
+        const unsigned char c = *p;
+        if (c < 0x80) { ++p; continue; }
+        size_t want;
+        unsigned int min_codepoint;
+        if      ((c & 0xE0) == 0xC0) { want = 1; min_codepoint = 0x80; }
+        else if ((c & 0xF0) == 0xE0) { want = 2; min_codepoint = 0x800; }
+        else if ((c & 0xF8) == 0xF0) { want = 3; min_codepoint = 0x10000; }
+        else return false;
+        if (p + 1 + want > end) return false;
+        unsigned int cp = c & ((1u << (6 - want)) - 1);
+        for (size_t i = 1; i <= want; ++i) {
+            if ((p[i] & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (p[i] & 0x3F);
+        }
+        if (cp < min_codepoint) return false;          // overlong
+        if (cp >= 0xD800 && cp <= 0xDFFF) return false; // surrogates
+        if (cp > 0x10FFFF) return false;
+        p += 1 + want;
+    }
+    return true;
+}
+
+// Append the UTF-8 encoding of `cp` (a Unicode code point in [0, 0x10FFFF])
+// to `out`. Only used for input code points already known to be valid.
+static void AppendUtf8(std::string &out, uint32_t cp) {
+    if (cp < 0x80) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp < 0x800) {
+        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+}
+
+// Windows-1252 → Unicode for the 0x80..0x9F range (the rest of 0x80..0xFF
+// matches Latin-1 directly). Five positions are undefined (0x81, 0x8D,
+// 0x8F, 0x90, 0x9D) — we preserve the input byte as a Latin-1 round-trip
+// to avoid silent data loss.
+static uint32_t Cp1252HighByteToCodePoint(unsigned char b) {
+    static const uint16_t MAP[32] = {
+        0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+        0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008D, 0x017D, 0x008F,
+        0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+        0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178,
+    };
+    return MAP[b - 0x80];
+}
+
+static std::string Win1252ToUtf8(const std::string &in) {
+    std::string out;
+    out.reserve(in.size());
+    for (unsigned char b : in) {
+        if (b < 0x80) {
+            out.push_back(static_cast<char>(b));
+        } else if (b < 0xA0) {
+            AppendUtf8(out, Cp1252HighByteToCodePoint(b));
+        } else {
+            AppendUtf8(out, b);  // 0xA0..0xFF: Latin-1 == Unicode
+        }
+    }
+    return out;
+}
+
+static std::string Latin1ToUtf8(const std::string &in) {
+    std::string out;
+    out.reserve(in.size());
+    for (unsigned char b : in) {
+        if (b < 0x80) out.push_back(static_cast<char>(b));
+        else          AppendUtf8(out, b);
+    }
+    return out;
+}
+
+// Decide what to do when a text column whose Firebird charset is NONE
+// surfaces a byte string. Returns the UTF-8 string to ingest, or throws
+// IOException if `mode == STRICT` and the bytes aren't already valid
+// UTF-8. The BLOB mode is handled at the call site (target is BLOB and
+// receives the raw bytes directly).
+static std::string TranscodeNoneCharset(const std::string &raw,
+                                        NoneEncoding mode,
+                                        const std::string &col_name) {
+    switch (mode) {
+    case NoneEncoding::STRICT:
+        if (IsValidUtf8(raw.data(), raw.size())) return raw;
+        throw IOException(
+            "firebird: column '" + col_name + "' has Firebird CHARACTER SET "
+            "NONE and the row's bytes are not valid UTF-8. Pass "
+            "none_encoding='win1252' (or 'iso8859_1', or 'blob') to "
+            "firebird_scan() / ATTACH so the extension knows how to surface "
+            "the bytes. See README → 'Charset handling: CHARACTER SET NONE'.");
+    case NoneEncoding::WIN1252:    return Win1252ToUtf8(raw);
+    case NoneEncoding::ISO_8859_1: return Latin1ToUtf8(raw);
+    case NoneEncoding::BLOB:
+        // Caller materialises the BLOB directly without going through here.
+        return raw;
+    }
+    return raw;
+}
 
 // Firebird stores NUMERIC/DECIMAL as scaled integers (sqlscale is the negative
 // power-of-10 exponent). For widths up to DECIMAL(38,…) we can use DuckDB's
@@ -89,7 +205,8 @@ static void StoreDecimal(Vector &target, idx_t offset, T value) {
 void FirebirdAppendValue(FirebirdStatement &stmt,
                          idx_t col_idx,
                          Vector &target,
-                         idx_t target_offset) {
+                         idx_t target_offset,
+                         NoneEncoding none_encoding) {
     if (stmt.IsNull(col_idx)) {
         FlatVector::SetNull(target, target_offset, true);
         return;
@@ -102,6 +219,19 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
     case SQL_TEXT:
     case SQL_VARYING: {
         auto str = stmt.GetText(col_idx);
+        // CHARACTER SET NONE (id=0) bytes need either UTF-8 validation
+        // (STRICT), a transcode (WIN1252 / ISO_8859_1), or to be stored as
+        // BLOB raw. When the col's charset_id is unknown (-1, e.g. probe
+        // came from XSQLDA without a metadata fetch) we leave the bytes
+        // alone and let DuckDB's append handle them.
+        if (col.character_set_id == 0) {
+            if (none_encoding == NoneEncoding::BLOB) {
+                FlatVector::GetData<string_t>(target)[target_offset] =
+                    StringVector::AddStringOrBlob(target, str);
+                break;
+            }
+            str = TranscodeNoneCharset(str, none_encoding, col.name);
+        }
         FlatVector::GetData<string_t>(target)[target_offset] =
             StringVector::AddString(target, str);
         break;
@@ -211,6 +341,18 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
     case SQL_BLOB: {
         auto blob = stmt.ReadBlob(col_idx);
         if (col.sqlsubtype == 1) {
+            // Text BLOB. Mirror the SQL_VARYING / SQL_TEXT path for
+            // NONE-charset columns so the same none_encoding policy
+            // applies (otherwise we'd accept invalid UTF-8 silently
+            // through BLOBs while the matching VARCHAR path rejects).
+            if (col.character_set_id == 0) {
+                if (none_encoding == NoneEncoding::BLOB) {
+                    FlatVector::GetData<string_t>(target)[target_offset] =
+                        StringVector::AddStringOrBlob(target, blob);
+                    break;
+                }
+                blob = TranscodeNoneCharset(blob, none_encoding, col.name);
+            }
             FlatVector::GetData<string_t>(target)[target_offset] =
                 StringVector::AddString(target, blob);
         } else {

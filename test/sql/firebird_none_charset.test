@@ -1,0 +1,121 @@
+# name: test/sql/firebird_none_charset.test
+# description: CHARACTER SET NONE + none_encoding feature
+# group: [firebird]
+#
+# Requires the fixture from scripts/fixture_none_charset.sql applied
+# to a database whose default charset is NONE (scripts/fixture_create_none.sql
+# bootstraps one at C:\fbtest\none.fdb / /tmp/fbtest/none.fdb).
+#
+# Environment:
+#   FIREBIRD_NONE_DB    path to the NONE-charset database
+
+require firebird
+
+require-env FIREBIRD_NONE_DB
+
+# --- ASCII row passes strict + every other encoding ------------------
+
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='strict')
+ WHERE ID = 1;
+----
+1	pure ascii
+
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='win1252')
+ WHERE ID = 1;
+----
+1	pure ascii
+
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='iso8859_1')
+ WHERE ID = 1;
+----
+1	pure ascii
+
+# --- WIN1252 / Latin-1 row ------------------------------------------
+
+# Strict must reject when a non-ASCII byte appears.
+statement error
+SELECT * FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='strict')
+ WHERE ID = 2;
+----
+CHARACTER SET NONE
+
+# win1252 decoding: 0xE3 → ã, 0xE7 → ç (matches Latin-1 for these positions).
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='win1252')
+ WHERE ID = 2;
+----
+2	São Paulo
+
+# Latin-1 / iso8859_1 round-trip — same result for bytes in 0xA0..0xFF.
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='iso8859_1')
+ WHERE ID = 2;
+----
+2	São Paulo
+
+# --- CP1252-only bytes (curly quotes 0x93 / 0x94) -------------------
+
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='win1252')
+ WHERE ID = 3;
+----
+3	“hi”
+
+# Strict must reject these — they're not valid UTF-8 either.
+statement error
+SELECT * FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='strict')
+ WHERE ID = 3;
+----
+CHARACTER SET NONE
+
+# --- blob mode surfaces the raw bytes -------------------------------
+
+query I
+SELECT typeof(LABEL) FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='blob')
+ WHERE ID = 1;
+----
+BLOB
+
+query I
+SELECT octet_length(LABEL) FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='blob')
+ WHERE ID = 3;
+----
+4
+
+# --- Text BLOB (NOTE column) ----------------------------------------
+# Same transcoding policy applies to text BLOBs whose CHARACTER SET is NONE.
+
+query II
+SELECT ID, NOTE FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='win1252')
+ WHERE ID = 3;
+----
+3	€
+
+statement error
+SELECT * FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='strict')
+ WHERE ID = 3;
+----
+CHARACTER SET NONE
+
+# --- Bad none_encoding rejected at parse time -----------------------
+
+statement error
+SELECT * FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='utf16');
+----
+unknown none_encoding
+
+# --- ATTACH respects none_encoding ----------------------------------
+
+statement ok
+ATTACH '${FIREBIRD_NONE_DB}' AS att (TYPE firebird, user 'SYSDBA', password 'masterkey', none_encoding 'win1252');
+
+query II
+SELECT ID, LABEL FROM att.main.TXT WHERE ID = 2;
+----
+2	São Paulo
+
+statement ok
+DETACH att;

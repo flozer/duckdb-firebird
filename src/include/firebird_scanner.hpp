@@ -24,6 +24,11 @@ struct FirebirdBindData : public TableFunctionData {
     std::string table_name;
     duckdb::vector<std::string> column_names;
     duckdb::vector<LogicalType> column_types;
+    // Per-column Firebird metadata (charset id, sqltype, etc.). Same
+    // length / ordering as column_names. Used at fetch time to know
+    // whether a text column is CHARACTER SET NONE and at planning
+    // time to gate text-filter pushdown.
+    duckdb::vector<FirebirdColumnDesc> column_descs;
     std::unique_ptr<PrimaryKeyInfo> pk;
     idx_t partitions_override = 0;
     // Optional ROWS N hint pushed into every per-partition Firebird query.
@@ -41,6 +46,16 @@ struct FirebirdBindData : public TableFunctionData {
     // has its identifiers / literals quoted; the builder splices them
     // into the WHERE clause with AND glue.
     duckdb::vector<std::string> extra_predicates;
+    // How to handle Firebird text columns whose CHARACTER SET is NONE
+    // (server does NOT transliterate, so the bytes arriving in our
+    // buffers can be anything). Default STRICT raises on non-UTF-8;
+    // WIN1252 / ISO_8859_1 transcode to UTF-8; BLOB surfaces the
+    // column as DuckDB BLOB. See enum NoneEncoding.
+    NoneEncoding none_encoding = NoneEncoding::STRICT;
+    // True when RDB$DATABASE.RDB$CHARACTER_SET_NAME = NONE. Drives
+    // the warning + influences pushdown safety (text-filter literals
+    // are UTF-8 in DuckDB and may not round-trip against NONE bytes).
+    bool db_charset_none = false;
 };
 
 // --- discovery + probe helpers ---------------------------------------------
@@ -48,10 +63,24 @@ struct FirebirdBindData : public TableFunctionData {
 // Reads RDB$RELATION_FIELDS ⋈ RDB$FIELDS for `table_name` and populates the
 // output vectors with Firebird → DuckDB type mappings. Throws BinderException
 // if the table doesn't exist.
+//
+// `none_encoding` controls how Firebird CHARACTER SET NONE text columns
+// are surfaced when present: STRICT/WIN1252/ISO_8859_1 keep them as
+// VARCHAR (transcoded at fetch); BLOB surfaces them as BLOB.
+//
+// `out_descs` carries the raw Firebird per-column metadata; the caller
+// uses it to detect NONE columns and gate filter pushdown accordingly.
 void LoadTableSchema(FirebirdConnection &conn,
                      const std::string &table_name,
                      duckdb::vector<std::string> &out_names,
-                     duckdb::vector<LogicalType> &out_types);
+                     duckdb::vector<LogicalType> &out_types,
+                     duckdb::vector<FirebirdColumnDesc> &out_descs,
+                     NoneEncoding none_encoding = NoneEncoding::STRICT);
+
+// Reads `RDB$DATABASE.RDB$CHARACTER_SET_NAME`. Returns true when the
+// database-level default is NONE. Best-effort: any RDB$ error returns
+// false (we don't want a probe failure to break a working scan).
+bool DatabaseCharsetIsNone(FirebirdConnection &conn);
 
 // Best-effort PK probe — returns nullptr for tables without a single-column
 // numeric PK (composite, non-numeric, missing, or any RDB$ access error).
