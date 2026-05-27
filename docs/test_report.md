@@ -195,7 +195,7 @@ VARCHAR. The mapping now matches Firebird's `blr.h` upstream.
 The README's "Arrow Flight SQL via GizmoSQL" section documents the
 init.sql shape and the deployment constraint.
 
-## v0.5 additions (May 2026, feat/v0.5-analytics-platform branch)
+## v0.5 additions (May 2026 release series)
 
 The v0.5 series adds analyst-facing capabilities on top of the v0.4
 core. All items below are verified against both FB5 (Windows local)
@@ -259,14 +259,41 @@ total (FB5)                          — 373 assertions
 total (FB4 embedded)                 — 373 assertions (FB4 covers TZ + DECFLOAT natively)
 ```
 
-CI: `.github/workflows/build-linux.yml` reproduces this entire setup
-(installs `firebird3.0-server`, runs `scripts/setup_test_firebird.sh`,
-builds, and replays both test files) on every push to a
-`claude/duckdb-firebird-plugin-*` or `main` branch.
+CI: `.github/workflows/build-linux.yml` reproduces the single-server
+fixture setup (installs `firebird3.0-server`, runs
+`scripts/setup_test_firebird.sh`, builds, and replays the SQL suite) on
+every push to `main`.
+
+`.github/workflows/build-linux-fb-matrix.yml` runs the Firebird 3 / 4 /
+5 matrix through Docker, including the Firebird 4+ type smoke coverage.
 
 `.github/workflows/build-windows.yml` builds the same code with
 `windows-latest` against a downloaded Firebird Windows SDK ZIP and
 uploads the resulting `firebird.duckdb_extension` as a release artifact.
+
+### v0.5.1 public release verification
+
+`v0.5.1` points at `0cbf259` and includes the post-v0.5.0 public-repo
+hardening plus compatibility fixes:
+
+- `firebird://host:port/path` URL parsing now emits libfbclient's
+  `host/port:/path` remote database form.
+- Firebird TZ EX SQL type fallbacks are defined for Linux distro
+  headers that omit `SQL_TIMESTAMP_TZ_EX` / `SQL_TIME_TZ_EX`.
+- Linux Firebird fixture setup was hardened for GitHub-hosted runners.
+- GitHub Actions dependencies were updated by Dependabot.
+
+GitHub Actions on `main@0cbf259`:
+
+| Workflow | Result |
+|---|---|
+| Build + Test Linux x64 | success |
+| Build + Test Linux x64 (FB 3/4/5 matrix) | success |
+| Build Windows x64 | success |
+
+DuckDB community submission
+[`duckdb/community-extensions#1980`](https://github.com/duckdb/community-extensions/pull/1980)
+points to `repo.ref: v0.5.1` and remains a single-file descriptor PR.
 
 ### Known gaps deferred past v0.5
 

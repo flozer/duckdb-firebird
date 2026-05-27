@@ -118,6 +118,13 @@ no catalogo DuckDB local.
 
 ## 2. Instalacao e carregamento
 
+### Status atual
+
+A versao publica atual do projeto e `v0.5.1`. O pedido de publicacao no
+catalogo DuckDB Community esta aberto em
+[`duckdb/community-extensions#1980`](https://github.com/duckdb/community-extensions/pull/1980)
+e aponta para essa tag.
+
 ### Quando a extensao estiver publicada no catalogo community
 
 Depois que a extensao estiver disponivel no catalogo community do DuckDB:
@@ -910,4 +917,3 @@ WHERE DATAMOVIMENTO >= DATE '2024-01-01';
 
 Compartilhe o arquivo `.duckdb` quando o consumidor tambem usa DuckDB, ou
 exporte tabelas `gold` para Parquet/CSV com `COPY`.
-
