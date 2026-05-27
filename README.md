@@ -257,6 +257,11 @@ scripts\build_windows_local.bat
 scripts\package_dist.bat
 ```
 
+Release assets are automated by `.github/workflows/release-assets.yml`.
+Pushing a `v*` tag builds and uploads Linux `.tar.gz` and Windows `.zip`
+archives to the GitHub Release. The workflow can also be run manually with a
+tag input.
+
 See [docs/guide_linux.md](docs/guide_linux.md) and
 [docs/guide_windows.md](docs/guide_windows.md).
 

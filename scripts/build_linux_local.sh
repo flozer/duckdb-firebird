@@ -9,6 +9,7 @@ BUILD_TYPE="${BUILD_TYPE:-release}"
 GENERATOR="${GEN:-ninja}"
 SKIP_SUBMODULES="${SKIP_SUBMODULES:-0}"
 SKIP_DUCKDB_PIN="${SKIP_DUCKDB_PIN:-0}"
+AUTO_CLEAN_CMAKE_CACHE="${AUTO_CLEAN_CMAKE_CACHE:-1}"
 DO_CLEAN="${CLEAN:-0}"
 FB_SDK_ROOT="${FB_SDK_ROOT:-}"
 
@@ -28,6 +29,7 @@ Environment:
   DUCKDB_VERSION=v1.5.3  DuckDB tag/commit to pin before build
   GEN=ninja              Generator used by the DuckDB extension Makefile
   SKIP_DUCKDB_PIN=1      Same as --skip-duckdb-pin
+  AUTO_CLEAN_CMAKE_CACHE=0  Do not auto-remove mismatched CMake cache
 EOF
 }
 
@@ -68,6 +70,17 @@ for tool in git cmake python3; do
         exit 1
     fi
 done
+
+if ! command -v c++ >/dev/null 2>&1 && ! command -v g++ >/dev/null 2>&1; then
+    cat >&2 <<'EOF'
+ERROR: no C++ compiler found.
+
+Install the Linux build toolchain, for example:
+  sudo apt-get update
+  sudo apt-get install -y build-essential g++ ninja-build cmake pkg-config python3
+EOF
+    exit 1
+fi
 
 if [ "$GENERATOR" = "ninja" ] && ! command -v ninja >/dev/null 2>&1; then
     echo "ERROR: ninja not found. Install ninja-build or set GEN to another generator." >&2
@@ -143,6 +156,31 @@ fi
 
 if [ "$DO_CLEAN" = "1" ]; then
     rm -rf "build/$BUILD_TYPE"
+fi
+
+CMAKE_CACHE="build/$BUILD_TYPE/CMakeCache.txt"
+if [ -f "$CMAKE_CACHE" ]; then
+    CACHE_SOURCE_DIR="$(awk -F= '/^CMAKE_HOME_DIRECTORY:INTERNAL=/ {print $2; exit}' "$CMAKE_CACHE" || true)"
+    EXPECTED_SOURCE_DIR="$REPO_ROOT/duckdb"
+    if [ -n "$CACHE_SOURCE_DIR" ] && [ "$CACHE_SOURCE_DIR" != "$EXPECTED_SOURCE_DIR" ]; then
+        if [ "$AUTO_CLEAN_CMAKE_CACHE" = "1" ]; then
+            echo "==> Removing stale CMake cache from a different source path"
+            echo "    cache:    $CACHE_SOURCE_DIR"
+            echo "    expected: $EXPECTED_SOURCE_DIR"
+            rm -rf "build/$BUILD_TYPE"
+        else
+            cat >&2 <<EOF
+ERROR: build/$BUILD_TYPE was configured from a different source path.
+
+Cache source:    $CACHE_SOURCE_DIR
+Expected source: $EXPECTED_SOURCE_DIR
+
+Run:
+  scripts/build_linux_local.sh --clean
+EOF
+            exit 1
+        fi
+    fi
 fi
 
 EXT_FLAGS_VALUE="${EXT_FLAGS:-}"

@@ -75,6 +75,11 @@ touching files on the Windows-mounted drive. After the first successful
 pin, use `SKIP_DUCKDB_PIN=1 scripts/build_linux_local.sh` for repeat
 builds, or clone the repo under `~/src` for much faster Linux builds.
 
+If you alternate between Windows and WSL builds, the script removes a stale
+`build/release/CMakeCache.txt` automatically when it detects that CMake was
+configured from the other path style (`D:/...` vs `/mnt/d/...`). Use
+`AUTO_CLEAN_CMAKE_CACHE=0` if you want it to fail instead.
+
 To produce a local distribution archive after a release build:
 
 ```bash
