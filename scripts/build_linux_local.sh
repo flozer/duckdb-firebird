@@ -14,7 +14,7 @@ DO_CLEAN="${CLEAN:-0}"
 FB_SDK_ROOT="${FB_SDK_ROOT:-}"
 
 usage() {
-    cat <<'EOF'
+    cat <<EOF
 Usage: scripts/build_linux_local.sh [options]
 
 Options:
@@ -72,7 +72,7 @@ for tool in git cmake python3; do
 done
 
 if ! command -v c++ >/dev/null 2>&1 && ! command -v g++ >/dev/null 2>&1; then
-    cat >&2 <<'EOF'
+    cat >&2 <<EOF
 ERROR: no C++ compiler found.
 
 Install the Linux build toolchain, for example:
@@ -95,7 +95,7 @@ if [ -z "$FB_SDK_ROOT" ]; then
         fi
     fi
     if [ "$HAVE_FBCLIENT" = "0" ] && command -v ldconfig >/dev/null 2>&1; then
-        if ldconfig -p 2>/dev/null | grep -q 'libfbclient\.so'; then
+        if ldconfig -p 2>/dev/null | grep -q "libfbclient\\.so"; then
             HAVE_FBCLIENT=1
         fi
     fi
@@ -109,7 +109,7 @@ if [ -z "$FB_SDK_ROOT" ]; then
     fi
 
     if [ "$HAVE_FBCLIENT" = "0" ]; then
-        cat >&2 <<'EOF'
+        cat >&2 <<EOF
 ERROR: Firebird client development files were not found.
 
 Install them, for example:
@@ -160,7 +160,7 @@ fi
 
 CMAKE_CACHE="build/$BUILD_TYPE/CMakeCache.txt"
 if [ -f "$CMAKE_CACHE" ]; then
-    CACHE_SOURCE_DIR="$(awk -F= '/^CMAKE_HOME_DIRECTORY:INTERNAL=/ {print $2; exit}' "$CMAKE_CACHE" || true)"
+    CACHE_SOURCE_DIR="$(grep "^CMAKE_HOME_DIRECTORY:INTERNAL=" "$CMAKE_CACHE" | cut -d= -f2- | head -n 1 || true)"
     EXPECTED_SOURCE_DIR="$REPO_ROOT/duckdb"
     if [ -n "$CACHE_SOURCE_DIR" ] && [ "$CACHE_SOURCE_DIR" != "$EXPECTED_SOURCE_DIR" ]; then
         if [ "$AUTO_CLEAN_CMAKE_CACHE" = "1" ]; then
