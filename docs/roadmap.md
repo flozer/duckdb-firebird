@@ -180,7 +180,7 @@ Items are listed in delivery order; each has a clear acceptance test.
 
 ### 9. `row_offset` + physical paging — **DONE**
 
-Shipped in v0.5 (`feat/v0.5-analytics-platform`).
+Shipped in the v0.5 series and released in v0.5.0+.
 
 What landed:
 
@@ -217,7 +217,7 @@ pagination over a sortable PK for live workloads.
 ### 10. Prepared statements with bind variables — **second**
 
 Two-part item. Part (a) — input XSQLDA bind variables — is **DONE**
-in v0.5 (`feat/v0.5-analytics-platform`). Part (b) — LRU statement
+in the v0.5 series. Part (b) — LRU statement
 cache per connection — is **deferred** until there's a benchmark
 showing the reuse-gain justifies the lifetime-management complexity
 under the ATTACH connection pool.
@@ -391,7 +391,7 @@ and integrators stop conflating responsibilities:
 | Transformation   | Medallion modelling, contract testing          | dbt-duckdb                   |
 | Consumption      | Dashboards / ad-hoc                            | Power BI (Parquet import primary; ADBC Flight SQL for tooling that supports it) |
 
-The MVP flow against an Athenas-style legacy database:
+The MVP flow against a legacy ERP database:
 
 ```sql
 LOAD firebird;
@@ -517,10 +517,10 @@ stays out of this and keeps the README's "Arrow note" honest.
 
 `community-extensions/description.yml` already exists. Process:
 
-1. Tag `v0.5.0` on this repo.
+1. Tag the release on this repo (`v0.5.1` is the current public tag).
 2. Fork `duckdb/community-extensions`.
 3. Copy `description.yml` to `extensions/firebird/description.yml`,
-   set `repo.ref: v0.5.0`.
+   set `repo.ref` to the current public tag (`v0.5.1`).
 4. Open PR; their CI builds Linux/Windows/macOS binaries from the tag.
 
 **Acceptance**: `INSTALL firebird FROM community; LOAD firebird;`
