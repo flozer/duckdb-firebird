@@ -278,7 +278,7 @@ Built and tested against **DuckDB v1.5.3** (Variegata). The
 so this branch targets v1.5.3+. (A v1.4-compatible variant lived earlier
 in the history if you need to pin older.)
 
-## What's implemented (v0.3)
+## What's implemented (v0.4.4)
 
 | Feature                                                 | Status |
 |---|---|
@@ -289,20 +289,31 @@ in the history if you need to pin older.)
 | Connection pool + lazy metadata cache (per ATTACH)        | ✅ |
 | Firebird 4 types: HUGEINT (`INT128`), `TIMESTAMP_TZ`, `TIME_TZ`, DECIMAL(38) | ✅ |
 | `row_limit=N` named parameter (Firebird-side `ROWS N`)    | ✅ |
+| CHARACTER SET NONE handling (default `none_encoding='win1252'`; `strict` / `iso8859_1` / `blob` available) | ✅ |
 | **Views** (`RDB$RELATION_TYPE=1`) — scan + ATTACH catalog | ✅ |
 | **External tables** + global temporaries (types 2, 4, 5)  | ✅ |
 | Materialized-view pattern (CTAS from a Firebird view)     | ✅ |
-| Arrow Flight SQL via GizmoSQL — extension is v1.5 ABI compatible | 🟡 (works once GizmoSQL can reach `extensions.duckdb.org` to satisfy its `INSTALL icu;`/`INSTALL spatial;` prelude) |
-| Named parameter overrides (user / password / charset / role / dialect / **partitions**) | ✅ |
+| Arrow Flight SQL via GizmoSQL — extension is v1.5 ABI compatible | 🟡 (works once GizmoSQL accepts a signed build; community-extensions publication does that) |
+| Named parameter overrides (user / password / charset / role / dialect / **partitions** / **none_encoding**) | ✅ |
 | Projection pushdown                                     | ✅ |
-| Filter pushdown — `=`, `<>`, `<`, `>`, `<=`, `>=`, `AND`, `OR`, `IS NULL`, `BETWEEN`, **`IN(…)`**, optional-filter unwrap | ✅ |
+| Filter pushdown — `=`, `<>`, `<`, `>`, `<=`, `>=`, `AND`, `OR`, `IS NULL`, `BETWEEN`, **`IN(…)`**, optional-filter unwrap, **`LIKE 'prefix%'`** (gated on NONE-text when transcoding) | ✅ |
 | PK-range parallel scan (opt-in via `partitions=N`)      | ✅ |
 | Type mapping — INTEGER / VARCHAR / DECIMAL(scale) / DATE / TIMESTAMP / TIME / BOOLEAN / BLOB SUB_TYPE 1 → VARCHAR / BLOB | ✅ |
 | End-to-end test fixture in CI (Linux + real Firebird 3) | ✅ |
 | Windows x64 build via GitHub Actions                    | ✅ |
-| LIMIT pushdown                                          | 🟡 partial (builder accepts limit; planner hook tbd) |
-| `ATTACH 'fb://…' AS fb (TYPE firebird)`                 | ⏳ next |
+| LIMIT pushdown (automatic, from a `LIMIT N` next to the scan) | 🟡 deferred — see `docs/roadmap.md` item 9 |
+| `row_offset` paging                                     | ⏳ v0.5 — see roadmap item 10 |
+| Prepared statement reuse with bind variables           | ⏳ v0.5 — see roadmap item 11 |
+| Arrow `RecordBatch` produced directly by the extension | ⏳ v1.x — today DuckDB does the conversion, see roadmap item 13 |
 | Stable C extension ABI                                  | ⏳ next |
+
+> **Arrow note**: this extension hands rows to DuckDB as native
+> `Vector` / `DataChunk` columns. When an Arrow Flight SQL client
+> (GizmoSQL, ADBC, Polars) consumes the result, the DuckDB engine —
+> not the extension — converts to `arrow::RecordBatch` at the
+> result-stream boundary. So Arrow integration works end-to-end,
+> but the scanner itself is not Arrow-native. A direct
+> `firebird_arrow_scan` is on the v1.x roadmap.
 
 ## Repository layout
 

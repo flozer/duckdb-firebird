@@ -167,6 +167,147 @@ backslash escape semantics by the `ESCAPE '\'` clause.
 
 ---
 
+## Milestone v0.5 — Analytics performance
+
+PM review on v0.4.4 flagged three gaps that block calling the
+extension "high-performance Firebird analytics" without ressalvas:
+LIMIT/OFFSET pushdown, prepared-statement reuse with bind variables,
+and an honest Arrow story. The work below addresses each, in
+priority order. Acceptance criteria are spelled out so the items
+can be closed independently.
+
+### 9. Automatic LIMIT pushdown — promote from deferred
+
+`row_limit=N` (manual) already emits Firebird `ROWS N`. The
+**automatic** path needs to detect a top-level `LIMIT` next to the
+scan and inject the same SQL. Without it, an exploratory
+`SELECT * FROM fb.main.HUGE LIMIT 100` opens a full cursor on the
+Firebird side and relies on DuckDB to call `Stop` once 100 rows are
+emitted — fine for SuperServer locally, expensive over remote /
+Classic deployments.
+
+DuckDB v1.5.3 lacks a dedicated `pushdown_limit` hook on
+`TableFunction` (verified at v0.4.2). Two viable wires:
+
+- **Optimiser-side**: if a `LogicalLimit(n) → LogicalGet(firebird_scan)`
+  shape is detected, rewrite to set `FirebirdBindData.limit_override = n`
+  before plan freezes. Requires a custom `OptimizerExtension` callback;
+  duckdb-postgres uses the same pattern for its `LIMIT` pushdown.
+- **Operator-side**: register a `TableFunctionInitInput` extension
+  that carries a `limit` field once upstream lands the API. Track
+  https://github.com/duckdb/duckdb/issues — bump this item the moment
+  the hook is in.
+
+**Edge cases**:
+- `partitions > 1` + limit: collapse to `partitions = 1` (avoids
+  per-partition N over-fetch).
+- `LIMIT n OFFSET m`: emit `ROWS m + 1 TO m + n` (Firebird's
+  syntactic equivalent).
+- `LIMIT n` inside CTE / window / aggregate above the scan: leave
+  alone; the scan still benefits from row_limit if the user passes
+  it.
+
+**Acceptance**: `EXPLAIN SELECT * FROM fb.main.BIG_T LIMIT 100`
+shows `ROWS 100` on the FIREBIRD_SCAN node; cold query against a
+1 M-row table returns in milliseconds (= prepare + 100-row fetch),
+not seconds (= prepare + full-cursor scan).
+
+### 10. OFFSET / paging — `row_offset` named param
+
+Mirror the existing `row_limit`: a `row_offset=M` knob that emits
+`ROWS M+1 TO M+limit` in the Firebird SQL when both are set, or
+just `ROWS M+1 TO INTEGER_MAX` when only offset is set (Firebird
+requires both bounds with `TO`). Behaviour matches what callers
+would otherwise write by hand in `WHERE pk > last_seen`-style
+keyset pagination but stays purely physical.
+
+**Caveat**: physical paging is unstable under concurrent writes —
+the rows at positions [M, M+N) can shift between calls. Document
+this in the README alongside the named-parameter table; recommend
+keyset pagination over a sortable PK for live workloads.
+
+**Acceptance**: `SELECT * FROM firebird_scan(…, row_limit=100,
+row_offset=900)` emits `ROWS 901 TO 1000` and returns rows 901-1000
+of the natural Firebird row order.
+
+### 11. Prepared statement reuse with bind variables
+
+Today every cursor's SQL goes through `isc_dsql_prepare` fresh —
+filters are interpolated as literals into the WHERE clause. For
+repetitive workloads (dashboards, federated joins where DuckDB
+issues thousands of small lookups), each call pays the
+parse + plan + describe cost on the Firebird side.
+
+Plan:
+
+1. Detect the "shape-equivalent" SQL across calls (same projection,
+   same filter structure, only literal values differ) and emit
+   placeholder `?` parameters instead of inlined literals.
+2. Build an input XSQLDA describing the parameter types.
+3. Cache the `FirebirdStatement` keyed on the SQL skeleton on the
+   `FirebirdConnection`; re-execute with new bind values on hit.
+4. Pool eviction: LRU with a small fixed cap (16 statements per
+   connection seems sane — most workloads only have a handful of
+   shapes).
+
+Risk: Firebird's bind-by-position protocol differs subtly across
+client versions (FB3 vs FB4+) for the FB4 additions (`INT128`,
+`DECFLOAT`, `TIMESTAMP_TZ`). The parameter XSQLDA encoding for
+those needs to be exercised on real servers before claiming
+support.
+
+**Acceptance**: a benchmark issuing 10 000 sequential point-lookups
+`fb.main.CUST WHERE id = $1` against a remote Firebird returns
+end-to-end in under 2 × the time of the equivalent direct-isql
+loop. Today the same test pays ~3× because of per-query prepare.
+
+### 12. Predicate pushdown — fill the gaps
+
+Today: `=, <>, <, >, <=, >=, IS NULL, IS NOT NULL, IN, BETWEEN
+(via decompose), AND, OR, OPTIONAL_FILTER, LIKE 'prefix%'`. Gaps:
+
+- **`NOT IN (...)`**: structurally identical to `IN`; just negate.
+- **Boolean `NOT expr`**: detect `BoundOperatorExpression(NOT)`
+  with a translatable child in `pushdown_complex_filter`.
+- **`LIKE 'suffix'` / `LIKE '%pattern%'`**: still residual — but
+  worth a measured benchmark; on tables without an index on the
+  text column the round-trip cost may already be acceptable.
+- **`COL BETWEEN a AND b` not decomposed**: DuckDB usually
+  rewrites this to `>= a AND <= b` automatically; add a fallback
+  path in `pushdown_complex_filter` for the cases it doesn't.
+- **`CAST(col AS X) op literal`**: feasible when `X` is reachable
+  via Firebird's `CAST(...)` syntax with the same semantics.
+
+For each, the invariant is: only push down what we can prove is
+semantically equivalent to DuckDB's evaluation. Anything ambiguous
+stays in DuckDB. The existing `IsNoneTextColumnGated` check
+already does this for NONE-text columns; the new predicates plug
+into the same gate.
+
+**Acceptance**: `EXPLAIN` shows the new predicates on the
+FIREBIRD_SCAN's `Filters:` line; results match the original
+query character-by-character.
+
+### 13. Arrow story — honest documentation
+
+The extension produces DuckDB `Vector` / `DataChunk` natively; it
+does **not** emit Arrow `RecordBatch` directly. When a Flight SQL
+client (GizmoSQL, ADBC, Polars) reads from our scan, it's DuckDB
+that converts to Arrow at the result-stream boundary, not us.
+
+Update the README and the community-extensions description to say
+exactly that. Avoid "Arrow-native scanner" language. The path to
+true Arrow-native would be a parallel `firebird_arrow_scan`
+function that emits `arrow::RecordBatch` reusing the same XSQLDA
+fetch loop — viable but a v1.x task.
+
+**Acceptance**: a reader of the README cannot mistake the current
+behaviour for direct Arrow production. A note in
+`docs/architecture.md` (data-flow section) names the conversion
+point.
+
+---
+
 ## Milestone v1.0 — Distribution
 
 ### 8. Community-extensions submission
