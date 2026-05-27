@@ -68,18 +68,18 @@ FirebirdConnectionInfo FirebirdConnectionInfo::Parse(const std::string &conn_str
                 info.user = UrlDecode(userinfo);
             }
         }
-        // host[:port]/path -> libfbclient form "host[:port]:/path". We keep
+        // host[:port]/path -> libfbclient form "host[/port]:/path". We keep
         // the leading slash from the URL path so the result is unambiguous;
         // libfbclient accepts an aliased database (no slash) only when the
         // caller uses the key=value form.
-        //
-        // NOTE on ports: legacy libfbclient prefers "host/port" while modern
-        // builds also accept "host:port"; we pass through whatever the user
-        // wrote.
         auto slash = rest.find('/');
         std::string host = slash == std::string::npos ? rest          : rest.substr(0, slash);
         std::string path = slash == std::string::npos ? std::string() : rest.substr(slash);
         if (!host.empty()) {
+            auto port = host.rfind(':');
+            if (port != std::string::npos && host.find(']') == std::string::npos) {
+                host = host.substr(0, port) + "/" + host.substr(port + 1);
+            }
             info.database = host + ":" + path;
         } else {
             info.database = path;
