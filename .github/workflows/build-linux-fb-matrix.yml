@@ -117,9 +117,8 @@ jobs:
 
           if [ "${{ matrix.fb_major }}" != "3" ]; then
             docker cp scripts/fixture_biz4.sql fb:/tmp/fixture_biz4.sql
-            docker exec -i fb bash -c "isql -u SYSDBA -p masterkey" <<'SQL'
-            CREATE DATABASE '/var/lib/firebird/data/biz4.fdb' DEFAULT CHARACTER SET UTF8;
-            SQL
+            printf "%s\n" "CREATE DATABASE '/var/lib/firebird/data/biz4.fdb' DEFAULT CHARACTER SET UTF8;" \
+              | docker exec -i fb bash -c "isql -u SYSDBA -p masterkey"
             docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_biz4.sql /var/lib/firebird/data/biz4.fdb
           fi
 
