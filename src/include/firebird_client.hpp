@@ -25,6 +25,12 @@
 #ifndef SQL_TIME_TZ
 #define SQL_TIME_TZ      32756
 #endif
+#ifndef SQL_TIMESTAMP_TZ_EX
+#define SQL_TIMESTAMP_TZ_EX 32748
+#endif
+#ifndef SQL_TIME_TZ_EX
+#define SQL_TIME_TZ_EX      32750
+#endif
 #ifndef SQL_DEC16
 #define SQL_DEC16        32760
 #endif
