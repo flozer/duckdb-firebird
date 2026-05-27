@@ -167,7 +167,7 @@ jobs:
 
       - name: Upload extension artifact (linux_amd64) - fb${{ matrix.fb_major }}
         if: matrix.fb_major == '5'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: firebird.duckdb_extension-linux-x64
           path: build/release/extension/firebird/firebird.duckdb_extension
