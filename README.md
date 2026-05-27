@@ -229,12 +229,15 @@ COPY (SELECT sql FROM firebird_attach_sql('firebird://…', 'fb'))
 SELECT * FROM fb."EMPLOYEE" WHERE DEPT_NO = '600';
 ```
 
-A real `ATTACH 'fb://…' AS fb (TYPE firebird)` (full `StorageExtension`) is
-on the roadmap; the view-based recipe above covers the same federated-
-read use case in the meantime.
+Native `ATTACH ... AS fb (TYPE firebird)` is available for read-only
+catalog access. The generated-view recipe above remains useful when you
+want explicit local DuckDB views over selected Firebird tables.
 
 ## Quick-start guides
 
+- [`docs/usage_guide.md`](docs/usage_guide.md) — analyst-oriented guide
+  covering live scans, `ATTACH`, views, materialized DuckDB tables,
+  refresh patterns, exports, and troubleshooting.
 - [`docs/guide_windows.md`](docs/guide_windows.md) — end-to-end build
   and verification on Windows 11 with Firebird 5 + MSVC 2022.
 - [`docs/guide_linux.md`](docs/guide_linux.md) — same flow on Linux,
