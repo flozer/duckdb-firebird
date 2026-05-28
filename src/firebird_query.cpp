@@ -67,7 +67,7 @@ static bool IsBindableType(const LogicalType &t) {
 // parser does not accept uniformly across dialects (FB4 added the type
 // but the literal syntax varies). Filters with TZ literals stay
 // residual in DuckDB until we have a verified bind/literal story
-// (tracked in docs/roadmap.md "Milestone v0.5").
+// (tracked in docs/en/roadmap.md "Milestone v0.5").
 static bool SafeLiteralInline(const Value &v, std::string &out) {
     if (v.IsNull()) { out = "NULL"; return true; }
     switch (v.type().id()) {

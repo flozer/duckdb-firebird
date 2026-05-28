@@ -254,17 +254,23 @@ This sidesteps the catalog plumbing for now; users get federated
 queries against Firebird through familiar `schema.table` syntax, and
 the views inherit every pushdown the scanner supports.
 
-## What's *not* in v0.2 (deferred)
+## Deferred work (as of v0.5.1)
+
+Items shipped since the original v0.2 cut (Native `ATTACH`, projection
+and predicate pushdown, prepared statements, PK-range partitioning,
+HUGEINT / DECIMAL(38) / TIMESTAMP_TZ types, `CHARACTER SET NONE`
+handling, `information_schema`) are tracked in the
+[Current Status](../../README.md#current-status) section of the README.
+
+The items below remain open:
 
 | Item                                       | Notes |
 |---|---|
-| Native `ATTACH … AS fb (TYPE firebird)`    | Needs `StorageExtension` + `Catalog` / `SchemaCatalogEntry` / `TableCatalogEntry`. ~600 LoC of boilerplate. |
-| Connection pool                            | Right now each LocalState opens its own connection. Pool only helps if we open + tear down a lot of short-lived connections, which doesn't happen yet. After `ATTACH` lands it becomes essential. |
-| LIMIT pushdown into Firebird SQL           | The query builder accepts a limit; needs wiring through DuckDB's TableFunction limit pushdown hook. Modest win — DuckDB already stops calling the scan early once the limit is hit. |
-| LIKE / regex pushdown                      | Not a `TableFilter` type — sits in `EXPRESSION_FILTER`. Selective patterns (`LIKE 'prefix%'`) would benefit; broader patterns wouldn't. |
-| HUGEINT / DECIMAL(38) / TIMESTAMP_TZ types | Currently degrade to DOUBLE / VARCHAR. |
-| Stable C extension ABI                     | The Stable C ABI (`duckdb_extension.h`) does **not** support StorageExtensions — only scalar / aggregate / table / replacement functions. Migrating to it today would mean losing native `ATTACH ... AS fb (TYPE firebird)`. Tracked upstream; once the C ABI gains storage-extension support, we revisit. |
-| Community-extension signing / catalog      | `community-extensions/description.yml` is in the repo; submitting it to `duckdb/community-extensions` enables `INSTALL firebird FROM community; LOAD firebird;`. Multi-platform binaries are produced by that repo's CI on every release tag. |
+| Connection pool                            | Each LocalState opens its own connection. With native `ATTACH` shipped, short-lived connections happen via catalog metadata calls — a pool is now worth measuring. |
+| Automatic `LIMIT` pushdown into Firebird SQL | The query builder accepts a limit; needs wiring through [DuckDB](https://github.com/duckdb/duckdb)'s `TableFunction` limit pushdown hook. Modest win — DuckDB already stops calling the scan early once the limit is hit. Manual `row_limit=` / `row_offset=` already works. |
+| Broader `LIKE` / regex pushdown            | Selective `LIKE 'prefix%'` is shipped (v0.5). Broader patterns (`%word%`, regex) still sit in `EXPRESSION_FILTER` and remain residual in DuckDB. |
+| Stable C extension ABI                     | The Stable C ABI (`duckdb_extension.h`) does **not** support `StorageExtension` — only scalar / aggregate / table / replacement functions. Migrating today would mean losing native `ATTACH ... AS fb (TYPE firebird)`. Tracked upstream in [duckdb/duckdb](https://github.com/duckdb/duckdb); once the C ABI gains storage-extension support, we revisit. |
+| Scanner-native Arrow `RecordBatch` output  | The scanner produces DuckDB `Vector` / `DataChunk` columns; Arrow conversion happens at the DuckDB/GizmoSQL boundary. Native Arrow output is a v1.x candidate. |
 
 ## References
 

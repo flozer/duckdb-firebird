@@ -33,8 +33,8 @@ GEN=ninja make release
 
 See the platform guides for details:
 
-- `docs/guide_linux.md`
-- `docs/guide_windows.md`
+- `docs/en/guide_linux.md`
+- `docs/en/guide_windows.md`
 
 ## Testing
 

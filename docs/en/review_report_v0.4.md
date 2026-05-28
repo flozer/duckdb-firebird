@@ -245,13 +245,13 @@ security-audit passes flagged.
 The DECFLOAT(16/34) NULL-on-fetch behaviour is the one open
 limitation. It is documented in:
 
-- [`README.md`](../README.md) "Status" table — DECFLOAT marked 🟡.
-- [`docs/roadmap.md`](roadmap.md) deferred section — fix requires
+- [`README.md`](../../README.md) "Status" table — DECFLOAT marked 🟡.
+- [`docs/en/roadmap.md`](roadmap.md) deferred section — fix requires
   the Firebird OO API (`IDecFloat16::toString`).
-- [`docs/test_report.md`](test_report.md) "Firebird 5 live coverage"
+- [`docs/en/test_report.md`](test_report.md) "Firebird 5 live coverage"
   table — DEC16/DEC34 rows marked ⚠️ with workaround pointer (cast
   to `VARCHAR` or `DECIMAL(38, s)` at the source).
-- [`community-extensions/description.yml`](../community-extensions/description.yml)
+- [`community-extensions/description.yml`](../../community-extensions/description.yml)
   `extended_description` — same workaround text shipped to the
   community catalog page.
 

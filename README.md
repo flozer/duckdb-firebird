@@ -1,6 +1,6 @@
 <div align="center">
   <h1>duckdb-firebird</h1>
-  <p><strong>Query Firebird directly from DuckDB.</strong></p>
+  <p><strong>Query Firebird directly from <a href="https://github.com/duckdb/duckdb">DuckDB</a>.</strong></p>
   <p>
     Federated analytics over Firebird, Parquet, CSV, S3, and local DuckDB tables,
     with pushdown, native ATTACH, legacy charset handling, and materialization paths.
@@ -12,8 +12,8 @@
     <a href="https://github.com/duckdb/community-extensions/pull/1980"><img alt="community PR" src="https://img.shields.io/badge/DuckDB%20community-PR%20open-yellow.svg"></a>
   </p>
   <p>
-    <a href="docs/usage_guide.md">Usage guide</a> |
-    <a href="docs/roadmap.md">Roadmap</a> |
+    <a href="docs/en/usage_guide.md">Usage guide</a> |
+    <a href="docs/en/roadmap.md">Roadmap</a> |
     <a href="CONTRIBUTING.md">Contributing</a> |
     <a href="CODE_OF_CONDUCT.md">Code of conduct</a> |
     <a href="SECURITY.md">Security</a>
@@ -122,7 +122,7 @@ TO 'lake/erp/orders_2026.parquet'
 
 For a longer, analyst-oriented walkthrough, including materialized tables,
 incremental refresh, Parquet partitioning, MinIO, and Power BI/GizmoSQL usage,
-see [docs/usage_guide.md](docs/usage_guide.md).
+see [docs/en/usage_guide.md](docs/en/usage_guide.md).
 
 ## Connection Strings
 
@@ -262,20 +262,24 @@ Pushing a `v*` tag builds and uploads Linux `.tar.gz` and Windows `.zip`
 archives to the GitHub Release. The workflow can also be run manually with a
 tag input.
 
-See [docs/guide_linux.md](docs/guide_linux.md) and
-[docs/guide_windows.md](docs/guide_windows.md).
+See [docs/en/guide_linux.md](docs/en/guide_linux.md) and
+[docs/en/guide_windows.md](docs/en/guide_windows.md).
 
 ## Documentation
 
-- [docs/usage_guide.md](docs/usage_guide.md) - analyst guide: live scans,
+Docs are split by language under `docs/en/` (English, primary) and
+`docs/pt/` (Portuguese translations).
+
+- [docs/en/usage_guide.md](docs/en/usage_guide.md) - analyst guide: live scans,
   `ATTACH`, views, materialization, incremental refresh, Parquet, MinIO,
   dbt/GizmoSQL/Power BI patterns, and troubleshooting.
-- [docs/guide_windows.md](docs/guide_windows.md) - Windows build and smoke
+  (PT: [docs/pt/usage_guide.md](docs/pt/usage_guide.md))
+- [docs/en/guide_windows.md](docs/en/guide_windows.md) - Windows build and smoke
   tests.
-- [docs/guide_linux.md](docs/guide_linux.md) - Linux build and smoke tests.
-- [docs/roadmap.md](docs/roadmap.md) - performance roadmap and deferred work.
-- [docs/test_report.md](docs/test_report.md) - release verification notes.
-- [docs/architecture.md](docs/architecture.md) - implementation architecture.
+- [docs/en/guide_linux.md](docs/en/guide_linux.md) - Linux build and smoke tests.
+- [docs/en/roadmap.md](docs/en/roadmap.md) - performance roadmap and deferred work.
+- [docs/en/test_report.md](docs/en/test_report.md) - release verification notes.
+- [docs/en/architecture.md](docs/en/architecture.md) - implementation architecture.
 
 ## Repository Layout
 
@@ -289,7 +293,8 @@ src/
   include/
 test/sql/                  sqllogictest coverage
 scripts/                   fixtures and smoke scripts
-docs/                      guides, roadmap, reports
+docs/en/                   English guides, roadmap, reports (primary)
+docs/pt/                   Portuguese translations
 community-extensions/      DuckDB community descriptor copy
 ```
 
@@ -314,6 +319,11 @@ LOAD firebird;
 ```
 
 Until then, load a signed release artifact or a locally built extension.
+
+## Author
+
+**Fernando Lozer** — GitHub [@flozer](https://github.com/flozer) ·
+LinkedIn [/fernandolozer](https://www.linkedin.com/in/fernandolozer)
 
 ## Credits
 

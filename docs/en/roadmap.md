@@ -3,22 +3,20 @@
 Living plan. Ordered by dependency / ROI. Acceptance criteria spelled
 out so each item can be closed independently.
 
-## Compatibility matrix (target)
+## Compatibility matrix
 
-| Component | Today (v0.3) | Target (v0.4) | Target (v1.0) |
-|---|---|---|---|
-| DuckDB | v1.5.3 | v1.5.3 | v1.5.x + Stable C ABI when StorageExtension lands in it |
-| Firebird server | 3.0 (tested live), 4/5 (compile only) | 3.0, **4.0**, **5.0** all tested live | same |
-| Firebird client (`libfbclient`) | 3.0+ | 4.0+ recommended (INT128/TZ/DECFLOAT) | 4.0+ |
-| GizmoSQL | works *if* `extensions.duckdb.org` reachable | smoke test in CI + air-gapped recipe | bundled docker image |
-| Platforms | Linux x64, Windows x64 | + macOS arm64 | + Linux arm64 |
+| Component | Today (v0.5.1) | Target (v1.0) |
+|---|---|---|
+| [DuckDB](https://github.com/duckdb/duckdb) | v1.5.3 (pinned in CI and build scripts) | v1.5.x + Stable C ABI when `StorageExtension` lands in it |
+| Firebird server | 3.0, **4.0**, **5.0** all tested live (CI matrix) | same |
+| Firebird client (`libfbclient`) | 4.0+ recommended (INT128 / TZ / DECFLOAT) | 4.0+ |
+| GizmoSQL | works against the local build; air-gapped recipe documented | bundled docker image |
+| Platforms | Linux x64, Windows x64 | + macOS arm64, + Linux arm64 |
 
 The XSQLDA codes for `SQL_INT128 / SQL_TIMESTAMP_TZ / SQL_TIME_TZ /
-SQL_DEC16 / SQL_DEC34` are already in `firebird_types.cpp` and the
-mapping compiles against `ibase.h` headers shipped in Firebird 4+. What
-is missing is **live verification against a real FB4/FB5 server**, plus
-a couple of fixes the live test will surface (DECFLOAT, parallel
-workers, FB5 catalog drift).
+SQL_DEC16 / SQL_DEC34` are wired in `firebird_types.cpp` and verified
+live against Firebird 4+ servers. The remaining FB4+ gap is DECFLOAT
+NULL-on-fetch (tracked below; needs the Firebird OO API).
 
 ---
 

@@ -1,6 +1,6 @@
 # duckdb-firebird — exhaustive integration test report
 
-Local container running Firebird 3.0.11 SuperServer + DuckDB 1.4.4 with
+Local container running Firebird 3.0.11 SuperServer + [DuckDB](https://github.com/duckdb/duckdb) v1.5.3 with
 the extension statically linked. All tests executed against a live
 Firebird instance with a realistic ERP-style fixture.
 
