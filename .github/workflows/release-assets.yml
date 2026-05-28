@@ -1,0 +1,181 @@
+name: Build Release Assets
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to upload assets to (defaults to current ref/tag)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  DUCKDB_VERSION: v1.5.3
+  FIREBIRD_SDK_URL: https://github.com/FirebirdSQL/firebird/releases/download/v4.0.5/Firebird-4.0.5.3140-0-x64.zip
+
+jobs:
+  linux-x64:
+    name: linux-x64 release asset
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build g++ pkg-config python3 ccache \
+            firebird-dev libfbclient2
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=1G
+          echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
+
+      - name: Cache ccache
+        uses: actions/cache@v5
+        with:
+          path: ~/.ccache
+          key: ccache-release-linux-${{ env.DUCKDB_VERSION }}-${{ github.sha }}
+          restore-keys: ccache-release-linux-${{ env.DUCKDB_VERSION }}-
+
+      - name: Build
+        env:
+          DUCKDB_VERSION: ${{ env.DUCKDB_VERSION }}
+        run: scripts/build_linux_local.sh --clean
+
+      - name: Package
+        run: scripts/package_dist_linux.sh
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: duckdb-firebird-linux-x64
+          path: dist/duckdb-firebird-*-linux-x64.tar.gz
+          if-no-files-found: error
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes "Automated release assets for $RELEASE_TAG." \
+              || gh release view "$RELEASE_TAG" >/dev/null
+          fi
+          gh release upload "$RELEASE_TAG" dist/duckdb-firebird-*-linux-x64.tar.gz --clobber
+
+  windows-x64:
+    name: windows-x64 release asset
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Ninja
+        shell: pwsh
+        run: choco install ninja -y --no-progress
+
+      - name: Cache Firebird SDK
+        id: cache-fb-sdk
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}\firebird-sdk
+          key: firebird-sdk-${{ env.FIREBIRD_SDK_URL }}
+
+      - name: Download + extract Firebird Windows SDK
+        if: steps.cache-fb-sdk.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $url = $env:FIREBIRD_SDK_URL
+          if ($url -notmatch '^https://github\.com/FirebirdSQL/firebird/releases/download/.+\.zip$') {
+            throw "Unsupported Firebird SDK URL. Use an official https://github.com/FirebirdSQL/firebird/releases/download/... .zip URL."
+          }
+          $zip = Join-Path $env:RUNNER_TEMP 'firebird-sdk.zip'
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $dest = Join-Path $env:RUNNER_TEMP 'firebird-sdk'
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          New-Item -ItemType Directory -Path $dest | Out-Null
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+
+      - name: Locate Firebird SDK
+        id: fb-sdk
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'firebird-sdk'
+          $header = Get-ChildItem -Recurse -Filter 'ibase.h' $root | Select-Object -First 1
+          $lib    = Get-ChildItem -Recurse -Filter 'fbclient_ms.lib' $root | Select-Object -First 1
+          $dll    = Get-ChildItem -Recurse -Filter 'fbclient.dll' $root | Select-Object -First 1
+          if (-not $header) { throw "ibase.h not found under $root" }
+          if (-not $lib)    { throw "fbclient_ms.lib not found under $root" }
+          if (-not $dll)    { throw "fbclient.dll not found under $root" }
+          $sdkRoot = Split-Path -Parent (Split-Path -Parent $header.FullName)
+          "FB_SDK_ROOT=$sdkRoot" >> $env:GITHUB_ENV
+          "FBCLIENT_DLL=$($dll.FullName)" >> $env:GITHUB_ENV
+
+      - name: Pin DuckDB version
+        shell: bash
+        run: DUCKDB_GIT_VERSION=${DUCKDB_VERSION} make set_duckdb_version
+
+      - name: Build
+        shell: bash
+        env:
+          GEN: ninja
+        run: |
+          export FB_SDK_ROOT_FWD=$(echo "$FB_SDK_ROOT" | sed 's|\\|/|g')
+          EXT_FLAGS="-DFB_SDK_ROOT=$FB_SDK_ROOT_FWD" make release
+
+      - name: Stage fbclient.dll
+        shell: pwsh
+        run: |
+          Copy-Item -Path $env:FBCLIENT_DLL -Destination build\release\fbclient.dll -Force
+
+      - name: Package
+        shell: cmd
+        run: scripts\package_dist.bat
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: duckdb-firebird-windows-x64
+          path: dist/duckdb-firebird-*-windows-x64.zip
+          if-no-files-found: error
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+        run: |
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --title $env:RELEASE_TAG --notes "Automated release assets for $env:RELEASE_TAG."
+            if ($LASTEXITCODE -ne 0) {
+              gh release view $env:RELEASE_TAG *> $null
+              if ($LASTEXITCODE -ne 0) { throw "Release $env:RELEASE_TAG does not exist and could not be created." }
+            }
+          }
+          gh release upload $env:RELEASE_TAG dist/duckdb-firebird-*-windows-x64.zip --clobber

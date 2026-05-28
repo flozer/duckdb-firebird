@@ -85,6 +85,9 @@ else()
     find_package(PkgConfig)
     if(PkgConfig_FOUND)
         pkg_check_modules(FBCLIENT IMPORTED_TARGET fbclient)
+        if(NOT FBCLIENT_FOUND)
+            pkg_check_modules(FBCLIENT IMPORTED_TARGET firebird)
+        endif()
     endif()
 
     if(FBCLIENT_FOUND)
@@ -93,9 +96,27 @@ else()
         target_link_libraries(${EXTENSION_NAME}          ${FBCLIENT_LIBRARIES})
         target_link_libraries(${LOADABLE_EXTENSION_NAME} ${FBCLIENT_LIBRARIES})
     else()
-        # Last resort: rely on default search paths (Linux with /usr/lib).
-        target_link_libraries(${EXTENSION_NAME}          fbclient)
-        target_link_libraries(${LOADABLE_EXTENSION_NAME} fbclient)
+        find_path(FB_INCLUDE_DIR ibase.h
+            PATHS
+                /usr/include/firebird
+                /usr/include
+                /usr/local/include/firebird
+                /usr/local/include)
+        find_library(FB_LIBRARY fbclient)
+
+        if(FB_INCLUDE_DIR AND FB_LIBRARY)
+            message(STATUS "libfbclient via system discovery")
+            message(STATUS "  ibase.h:    ${FB_INCLUDE_DIR}")
+            message(STATUS "  fbclient:   ${FB_LIBRARY}")
+            target_include_directories(${EXTENSION_NAME}          PRIVATE ${FB_INCLUDE_DIR})
+            target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE ${FB_INCLUDE_DIR})
+            target_link_libraries(${EXTENSION_NAME}          ${FB_LIBRARY})
+            target_link_libraries(${LOADABLE_EXTENSION_NAME} ${FB_LIBRARY})
+        else()
+            # Last resort: rely on default search paths (Linux with /usr/lib).
+            target_link_libraries(${EXTENSION_NAME}          fbclient)
+            target_link_libraries(${LOADABLE_EXTENSION_NAME} fbclient)
+        endif()
     endif()
 endif()
 

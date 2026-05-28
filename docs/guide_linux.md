@@ -28,11 +28,12 @@ DUCKDB_GIT_VERSION=v1.5.3 make set_duckdb_version
 
 ## Step 2 — Build
 
-The repo's existing Makefile delegates to the DuckDB extension-ci-tools
-harness. On Linux it Just Works:
+The repo ships [`scripts/build_linux_local.sh`](../scripts/build_linux_local.sh),
+which pins DuckDB, checks for `libfbclient` headers, and delegates to
+the DuckDB extension-ci-tools Makefile:
 
 ```bash
-GEN=ninja make release
+scripts/build_linux_local.sh
 ```
 
 Expected output (≈8 min on 4 vCPU):
@@ -54,7 +55,37 @@ If `pkg-config --modversion fbclient` fails, point CMake at the SDK
 explicitly:
 
 ```bash
-EXT_FLAGS=-DFB_SDK_ROOT=/opt/firebird GEN=ninja make release
+scripts/build_linux_local.sh --fb-sdk-root /opt/firebird
+```
+
+Useful options:
+
+```bash
+scripts/build_linux_local.sh --clean
+scripts/build_linux_local.sh --debug
+SKIP_SUBMODULES=1 scripts/build_linux_local.sh
+SKIP_DUCKDB_PIN=1 scripts/build_linux_local.sh
+```
+
+On WSL, builds from `/mnt/c` or `/mnt/d` are much slower than builds
+inside the Linux filesystem because the DuckDB submodule contains many
+small files. If the script appears to pause at
+`cd duckdb && git checkout v1.5.3`, it is usually the DuckDB pin step
+touching files on the Windows-mounted drive. After the first successful
+pin, use `SKIP_DUCKDB_PIN=1 scripts/build_linux_local.sh` for repeat
+builds, or clone the repo under `~/src` for much faster Linux builds.
+
+If you alternate between Windows and WSL builds, the script removes a stale
+`build/release/CMakeCache.txt` automatically when it detects that CMake was
+configured from the other path style (`D:/...` vs `/mnt/d/...`). Use
+`AUTO_CLEAN_CMAKE_CACHE=0` if you want it to fail instead.
+
+To produce a local distribution archive after a release build:
+
+```bash
+scripts/package_dist_linux.sh
+# optional: bundle the system libfbclient.so too
+scripts/package_dist_linux.sh --include-fbclient
 ```
 
 ## Step 3 — Bring up a Firebird 5 fixture
