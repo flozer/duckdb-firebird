@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -18,8 +19,11 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 
 #include "firebird_client.hpp"
+#include "firebird_observability.hpp"
 #include "firebird_query.hpp"
 #include "firebird_types.hpp"
+
+#include "duckdb/common/types/timestamp.hpp"
 
 namespace duckdb {
 
@@ -589,7 +593,7 @@ static unique_ptr<LocalTableFunctionState> FirebirdScanInitLocal(
 // continues. The worker is "done" when the queue is empty and the
 // current cursor (if any) has been fully drained.
 
-static bool OpenNextPartitionCursor(ClientContext & /*ctx*/,
+static bool OpenNextPartitionCursor(ClientContext &ctx,
                                     TableFunctionInput &data,
                                     FirebirdLocalState &local) {
     auto &bind   = data.bind_data->Cast<FirebirdBindData>();
@@ -632,9 +636,85 @@ static bool OpenNextPartitionCursor(ClientContext & /*ctx*/,
     // TableFilterSet values.
     for (auto &p : extra_params) query.params.push_back(p);
 
-    local.cursor = query.params.empty()
-        ? local.conn->OpenCursor(query.sql)
-        : local.conn->OpenCursor(query.sql, query.params);
+    // --- Observability capture (Phase 1, Chunk B) ---------------------------
+    //
+    // Record the SQL we are *about to send* to Firebird, the redacted
+    // binds, and what pushdown the planner gave us. Capture happens
+    // before OpenCursor, so the slot reflects the "last query attempted"
+    // for this ClientContext - if OpenCursor itself fails server-side,
+    // firebird_last_query() will still show the SQL we tried (this is
+    // intentional for debugging; downstream chunks may add an error
+    // field when timings/status land).
+    //
+    // Per-ClientContext slot, so one connection never reads another's
+    // last query. Capture runs on every partition cursor open; under
+    // parallel scan the surfaced row is literally the most recently
+    // opened partition (parallel_scan flag flags it). Timings, rows_read,
+    // and connection_id are out of scope for Chunk B per PM directive.
+    {
+        FirebirdQueryTelemetry rec;
+        rec.remote_sql  = query.sql;
+        rec.table_name  = bind.table_name;
+        rec.binds_redacted.reserve(query.params.size());
+        for (auto &p : query.params) {
+            rec.binds_redacted.push_back(RedactBindValue(p));
+        }
+        rec.projected_columns.reserve(gstate.column_ids.size());
+        for (auto cid : gstate.column_ids) {
+            if (cid == COLUMN_IDENTIFIER_ROW_ID) {
+                rec.projected_columns.push_back("<rowid>");
+            } else if (cid < bind.column_names.size()) {
+                rec.projected_columns.push_back(bind.column_names[cid]);
+            }
+        }
+        rec.pushed_filters = query.pushed_filter_sql;
+        for (auto &ep : bind.extra_predicates) {
+            rec.pushed_filters.push_back(ep.sql);
+        }
+        rec.residual_filters.reserve(query.residual_filter_indices.size());
+        for (auto idx : query.residual_filter_indices) {
+            rec.residual_filters.push_back("filter[" + std::to_string(idx) + "]");
+        }
+        rec.partitions    = static_cast<int32_t>(gstate.partitions.size());
+        rec.parallel_scan = rec.partitions > 1;
+        rec.captured_at   = Timestamp::GetCurrentTimestamp();
+
+        // Ring buffer is opt-in via SET firebird_query_log_size = N.
+        // The default registered in firebird_extension.cpp is 0 (off).
+        // Missing setting -> treat as 0 so a stripped-down embed of the
+        // extension that never registered the option does not crash.
+        int64_t log_size = 0;
+        Value setting_val;
+        if (ctx.TryGetCurrentSetting("firebird_query_log_size", setting_val)) {
+            if (!setting_val.IsNull()) {
+                log_size = setting_val.GetValue<int64_t>();
+            }
+        }
+        GetObservabilityState(ctx)->RecordQuery(rec, log_size);
+    }
+
+    {
+        // Time the OpenCursor call so firebird_time_us picks up the
+        // server round-trip cost (prepare + execute + first XSQLDA).
+        // On exception we tag the observability slot with the error
+        // message so firebird_last_query() can correlate the failed SQL
+        // with what Firebird returned, then rethrow.
+        auto fb_t0 = std::chrono::steady_clock::now();
+        try {
+            local.cursor = query.params.empty()
+                ? local.conn->OpenCursor(query.sql)
+                : local.conn->OpenCursor(query.sql, query.params);
+        } catch (const std::exception &e) {
+            GetObservabilityState(ctx)->SetError(
+                std::string("OpenCursor: ") + e.what());
+            throw;
+        }
+        auto fb_t1 = std::chrono::steady_clock::now();
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(fb_t1 - fb_t0).count();
+        auto obs = GetObservabilityState(ctx);
+        obs->AddFirebirdTimeUs(static_cast<int64_t>(us));
+        obs->UpdateTotalTimeUs();
+    }
     // The XSQLDA gives us a character_set_id for SQL_TEXT / SQL_VARYING
     // (packed in sqlsubtype), but not for text BLOBs — and column_ids
     // maps cursor-column-index back to the original bind position, so
@@ -685,22 +765,51 @@ static void FirebirdScanFunction(ClientContext &ctx,
     const idx_t n_fetch_cols = local.fetch_chunk.ColumnCount();
     idx_t row = 0;
 
-    while (row < target) {
-        if (!local.cursor) {
-            if (!OpenNextPartitionCursor(ctx, data, local)) break;
+    // Observability (Chunk C): accumulate only the time spent in the
+    // wire-level Fetch() calls. OpenCursor is timed separately in
+    // OpenNextPartitionCursor; if we also wrapped the whole loop here
+    // we would double-count the OpenCursor cost. The value-copy loop
+    // (FirebirdAppendValue) is local CPU work and stays outside the
+    // FB-time tally.
+    int64_t fetch_us = 0;
+    try {
+        while (row < target) {
+            if (!local.cursor) {
+                if (!OpenNextPartitionCursor(ctx, data, local)) break;
+            }
+            auto t0 = std::chrono::steady_clock::now();
+            const bool got = local.cursor->Fetch();
+            auto t1 = std::chrono::steady_clock::now();
+            fetch_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                            t1 - t0).count();
+            if (!got) {
+                local.cursor.reset();
+                continue;
+            }
+            for (idx_t c = 0; c < n_fetch_cols; ++c) {
+                FirebirdAppendValue(*local.cursor, c,
+                                    local.fetch_chunk.data[c], row,
+                                    bind.none_encoding);
+            }
+            ++row;
         }
-        if (!local.cursor->Fetch()) {
-            local.cursor.reset();
-            continue;
-        }
-        for (idx_t c = 0; c < n_fetch_cols; ++c) {
-            FirebirdAppendValue(*local.cursor, c,
-                                local.fetch_chunk.data[c], row,
-                                bind.none_encoding);
-        }
-        ++row;
+    } catch (const std::exception &e) {
+        GetObservabilityState(ctx)->SetError(
+            std::string("Fetch: ") + e.what());
+        throw;
     }
     local.fetch_chunk.SetCardinality(row);
+
+    {
+        auto obs = GetObservabilityState(ctx);
+        if (row > 0) {
+            obs->AddRows(static_cast<int64_t>(row));
+        }
+        if (fetch_us > 0) {
+            obs->AddFirebirdTimeUs(fetch_us);
+        }
+        obs->UpdateTotalTimeUs();
+    }
 
     if (gstate.projection_ids.empty()) {
         // No projection list — caller wants every fetched column.

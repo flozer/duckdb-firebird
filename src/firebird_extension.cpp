@@ -1,6 +1,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "firebird_extension.hpp"
+#include "firebird_observability.hpp"
 #include "firebird_scanner.hpp"
 #include "firebird_storage.hpp"
 
@@ -15,6 +16,8 @@ static void LoadInternal(ExtensionLoader &loader) {
     loader.RegisterFunction(GetFirebirdScanFunction());
     loader.RegisterFunction(GetFirebirdTablesFunction());
     loader.RegisterFunction(GetFirebirdAttachFunction());
+    loader.RegisterFunction(GetFirebirdLastQueryFunction());
+    loader.RegisterFunction(GetFirebirdQueryLogFunction());
 
     // Register the StorageExtension so DuckDB knows how to handle
     //   ATTACH 'firebird://…' AS fb (TYPE firebird);
@@ -29,6 +32,18 @@ static void LoadInternal(ExtensionLoader &loader) {
     auto storage_ext = GetFirebirdStorageExtension();
     StorageExtension::Register(config, "firebird",
                                shared_ptr<StorageExtension>(storage_ext.release()));
+
+    // Chunk E - firebird_query_log() ring buffer is opt-in. The default
+    // (0) disables capture; users opt in per session via:
+    //   SET firebird_query_log_size = 16;
+    // Per-ClientContext storage (FirebirdObservabilityState) ensures one
+    // session never reads another's ring buffer.
+    config.AddExtensionOption(
+        "firebird_query_log_size",
+        "Maximum entries kept by firebird_query_log() per session. "
+        "0 disables the log (default).",
+        LogicalType::BIGINT,
+        Value::BIGINT(0));
 }
 
 void FirebirdExtension::Load(ExtensionLoader &loader) {
