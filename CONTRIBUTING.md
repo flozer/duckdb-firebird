@@ -14,6 +14,9 @@ pushdown rules matter more than clever shortcuts.
 3. Do not include real Firebird databases, customer data, production paths,
    private keys, tokens, or passwords.
 4. Use synthetic fixtures under `scripts/` and `test/sql/`.
+5. Update the public function manual when changing user-facing SQL. This is a
+   project premise: every new function, option, parameter, output column, or
+   semantic change must update `docs/pt/function_manual.md` or a linked manual.
 
 ## Development Setup
 
@@ -51,6 +54,7 @@ At minimum, changes should cover the affected area:
 - `test/sql/firebird_bind_params.test`
 - `test/sql/firebird_predicates.test`
 - `test/sql/firebird_metadata.test`
+- `test/sql/firebird_observability.test`
 
 For release candidates, verify both Firebird 4 and Firebird 5 when possible.
 
