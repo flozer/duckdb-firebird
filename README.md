@@ -13,6 +13,7 @@
   </p>
   <p>
     <a href="docs/en/usage_guide.md">Usage guide</a> |
+    <a href="docs/pt/function_manual.md">Function manual</a> |
     <a href="docs/en/roadmap.md">Roadmap</a> |
     <a href="CONTRIBUTING.md">Contributing</a> |
     <a href="CODE_OF_CONDUCT.md">Code of conduct</a> |
@@ -122,7 +123,9 @@ TO 'lake/erp/orders_2026.parquet'
 
 For a longer, analyst-oriented walkthrough, including materialized tables,
 incremental refresh, Parquet partitioning, MinIO, and Power BI/GizmoSQL usage,
-see [docs/en/usage_guide.md](docs/en/usage_guide.md).
+see [docs/en/usage_guide.md](docs/en/usage_guide.md). For a public how-to of
+each SQL function and option, see
+[docs/pt/function_manual.md](docs/pt/function_manual.md).
 
 ## Connection Strings
 
