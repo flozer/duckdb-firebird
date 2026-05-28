@@ -49,7 +49,22 @@ if [ ! -f "$EXT" ]; then
     exit 1
 fi
 
-VERSION="$(awk -F: '/^[[:space:]]+version:/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' community-extensions/description.yml)"
+# Version source priority:
+#   1. GITHUB_REF_NAME when it looks like a tag (`v<semver>`) - the
+#      release-assets.yml workflow runs on tag push, so this is the
+#      authoritative source for published artifacts.
+#   2. community-extensions/description.yml - the developer-edited
+#      version field. Useful for local builds outside CI.
+#   3. "unknown" - last resort so the archive still gets produced.
+VERSION=""
+if [ -n "${GITHUB_REF_NAME:-}" ]; then
+    case "$GITHUB_REF_NAME" in
+        v*) VERSION="${GITHUB_REF_NAME#v}" ;;
+    esac
+fi
+if [ -z "$VERSION" ]; then
+    VERSION="$(awk -F: '/^[[:space:]]+version:/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' community-extensions/description.yml)"
+fi
 if [ -z "$VERSION" ]; then
     VERSION="unknown"
 fi
