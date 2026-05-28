@@ -262,6 +262,20 @@ Pushing a `v*` tag builds and uploads Linux `.tar.gz` and Windows `.zip`
 archives to the GitHub Release. The workflow can also be run manually with a
 tag input.
 
+To cut a release:
+
+```bash
+git tag v0.5.2
+git push origin v0.5.2
+```
+
+The tag push triggers parallel Linux and Windows builds, creates the GitHub
+Release if it does not exist, and uploads the packaged archives as release
+assets. Regular pushes/merges to `main` build the extension on both platforms
+(see `build-linux.yml` and `build-windows.yml`) but only as workflow artifacts;
+they do not publish a GitHub Release. This keeps release publication an
+explicit, intentional act.
+
 See [docs/en/guide_linux.md](docs/en/guide_linux.md) and
 [docs/en/guide_windows.md](docs/en/guide_windows.md).
 
