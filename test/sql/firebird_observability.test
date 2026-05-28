@@ -1,0 +1,277 @@
+# name: test/sql/firebird_observability.test
+# description: Phase 1 observability surface - firebird_last_query() captures
+#              the last remote SQL attempted, with redacted binds and pushdown
+#              metadata, scoped to the current ClientContext.
+# group: [firebird]
+#
+# Requires the EMPLOYEE fixture from scripts/setup_test_firebird.sh and the
+# following environment variables:
+#   FIREBIRD_TEST_DB   absolute path to a Firebird .fdb file
+#   ISC_PASSWORD       SYSDBA password
+# CI populates them via build-linux.yml.
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+require-env ISC_PASSWORD
+
+# ---------------------------------------------------------------------------
+#  Schema sanity: firebird_last_query() always exposes 15 columns, even
+#  with nothing captured yet.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM firebird_last_query());
+----
+15
+
+# Before any firebird_scan call on THIS context, the slot is empty.
+
+query I
+SELECT COUNT(*) FROM firebird_last_query();
+----
+0
+
+# ---------------------------------------------------------------------------
+#  Capture path: projection + predicate pushdown produce a populated row.
+# ---------------------------------------------------------------------------
+
+statement ok
+SELECT EMP_ID, EMP_NAME
+  FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE EMP_ID > 2
+ ORDER BY EMP_ID;
+
+query I
+SELECT COUNT(*) FROM firebird_last_query();
+----
+1
+
+# remote_sql is the actual SELECT shipped to Firebird, with projection
+# pushdown (only EMP_ID + EMP_NAME) and predicate pushdown (EMP_ID > ?).
+
+query T
+SELECT remote_sql LIKE 'SELECT %"EMP_ID"%"EMP_NAME"% FROM "EMPLOYEE"% WHERE %"EMP_ID" > ?%'
+  FROM firebird_last_query();
+----
+true
+
+# table_name carries ONLY the relation name, never the connection string.
+
+query T
+SELECT table_name FROM firebird_last_query();
+----
+EMPLOYEE
+
+# projected_columns matches the planner's request, in order.
+
+query T
+SELECT array_to_string(projected_columns, ',') FROM firebird_last_query();
+----
+EMP_ID,EMP_NAME
+
+# pushed_filters lists each WHERE fragment that survived translation.
+
+query T
+SELECT array_to_string(pushed_filters, ',') FROM firebird_last_query();
+----
+"EMP_ID" > ?
+
+# Numeric bind surfaces raw (PM-approved Phase 1 policy; redaction
+# strict|debug switch is future work).
+
+query T
+SELECT binds[1] FROM firebird_last_query();
+----
+2
+
+# Residuals: this filter pushed cleanly, no residuals expected.
+
+query I
+SELECT array_length(residual_filters) FROM firebird_last_query();
+----
+0
+
+# ---------------------------------------------------------------------------
+#  Chunk C metrics: rows_read, firebird_time_us, total_time_us,
+#  error_message. Time fields aren't asserted as exact values (CI noise);
+#  we only require that they are populated and consistent.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT rows_read FROM firebird_last_query();
+----
+3
+
+query T
+SELECT firebird_time_us >= 0 AND total_time_us >= firebird_time_us
+  FROM firebird_last_query();
+----
+true
+
+query T
+SELECT error_message = '' FROM firebird_last_query();
+----
+true
+
+# ---------------------------------------------------------------------------
+#  Redaction: text/blob binds are surfaced as "<text:redacted>".
+#  No content, no length leak.
+# ---------------------------------------------------------------------------
+
+statement ok
+SELECT COUNT(*)
+  FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE EMP_NAME = 'SECRET_PASS_123_NEVER_SHOW_THIS';
+
+query T
+SELECT binds[1] FROM firebird_last_query();
+----
+<text:redacted>
+
+# Cross-check: the secret literal must not appear anywhere we surface.
+
+query I
+SELECT COUNT(*)
+  FROM firebird_last_query()
+ WHERE remote_sql                              LIKE '%SECRET_PASS_123%'
+    OR array_to_string(binds, ',')             LIKE '%SECRET_PASS_123%'
+    OR table_name                              LIKE '%SECRET_PASS_123%'
+    OR array_to_string(pushed_filters, ',')    LIKE '%SECRET_PASS_123%'
+    OR array_to_string(residual_filters, ',')  LIKE '%SECRET_PASS_123%'
+    OR error_message                           LIKE '%SECRET_PASS_123%';
+----
+0
+
+# ---------------------------------------------------------------------------
+#  ATTACH path: scanning a table through ATTACH must populate observability
+#  for the current context the same way firebird_scan() does.
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fbobs (TYPE firebird);
+
+statement ok
+SELECT EMP_ID FROM fbobs.main.EMPLOYEE WHERE EMP_ID = 4;
+
+query T
+SELECT remote_sql LIKE 'SELECT %"EMP_ID"% FROM "EMPLOYEE"% WHERE %"EMP_ID"%'
+  FROM firebird_last_query();
+----
+true
+
+query T
+SELECT table_name FROM firebird_last_query();
+----
+EMPLOYEE
+
+statement ok
+DETACH fbobs;
+
+# ---------------------------------------------------------------------------
+#  No-filter scan: pushed_filters/residual_filters can both be empty;
+#  remote_sql still captured. partitions >= 1 always.
+# ---------------------------------------------------------------------------
+
+statement ok
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE');
+
+query I
+SELECT partitions >= 1 AND remote_sql LIKE 'SELECT %FROM "EMPLOYEE"%'
+  FROM firebird_last_query();
+----
+1
+
+# ---------------------------------------------------------------------------
+#  Chunk E: firebird_query_log() ring buffer.
+#  Opt-in via SET firebird_query_log_size = N. Default 0 = disabled.
+#  Per-ClientContext, most-recent-first, rotation drops oldest.
+# ---------------------------------------------------------------------------
+
+# Default: log disabled, returns zero rows regardless of recent scans.
+
+query I
+SELECT COUNT(*) FROM firebird_query_log();
+----
+0
+
+# Enable size=3, run four scans -> log keeps the three most recent.
+
+statement ok
+SET firebird_query_log_size = 3;
+
+statement ok
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE') WHERE EMP_ID = 2;
+
+statement ok
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE') WHERE EMP_ID = 3;
+
+statement ok
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE') WHERE EMP_ID = 4;
+
+statement ok
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE') WHERE EMP_ID = 5;
+
+query I
+SELECT COUNT(*) FROM firebird_query_log();
+----
+3
+
+# Most-recent-first: EMP_ID=5 then 4 then 3. EMP_ID=2 was rotated out.
+
+query T
+SELECT array_to_string(list_transform(
+         (SELECT list(binds[1]) FROM firebird_query_log()), b -> b), ',');
+----
+5,4,3
+
+# Disabling the log: the next RecordQuery clears any leftover entries
+# so the off state is truly empty.
+
+statement ok
+SET firebird_query_log_size = 0;
+
+statement ok
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE') WHERE EMP_ID = 1;
+
+query I
+SELECT COUNT(*) FROM firebird_query_log();
+----
+0
+
+# Re-enable with a larger window; old entries do not reappear.
+
+statement ok
+SET firebird_query_log_size = 5;
+
+statement ok
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE') WHERE EMP_ID = 1;
+
+query I
+SELECT COUNT(*) FROM firebird_query_log();
+----
+1
+
+# Log entries carry the same redaction as firebird_last_query() - text
+# binds never expose content or length, regardless of source.
+
+statement ok
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE EMP_NAME = 'SECRET_LOG_LITERAL_QWERTY';
+
+query I
+SELECT COUNT(*) FROM firebird_query_log()
+ WHERE remote_sql                              LIKE '%SECRET_LOG_LITERAL%'
+    OR array_to_string(binds, ',')             LIKE '%SECRET_LOG_LITERAL%'
+    OR table_name                              LIKE '%SECRET_LOG_LITERAL%'
+    OR array_to_string(pushed_filters, ',')    LIKE '%SECRET_LOG_LITERAL%'
+    OR array_to_string(residual_filters, ',')  LIKE '%SECRET_LOG_LITERAL%'
+    OR error_message                           LIKE '%SECRET_LOG_LITERAL%';
+----
+0
+
+# Clean up so the session leaves the log in a known state.
+
+statement ok
+SET firebird_query_log_size = 0;

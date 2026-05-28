@@ -32,6 +32,12 @@ public:
         // case, or filters whose literal types can't be bound — those go
         // residual instead of being interpolated).
         std::vector<Value> params;
+        // Human-readable record of the conditions that *were* pushed into
+        // the WHERE clause. One entry per pushed condition (already
+        // qualified with column name + operator + `?` / literal). Consumed
+        // by the observability surface (firebird_last_query()); does not
+        // affect SQL generation.
+        std::vector<std::string> pushed_filter_sql;
     };
 
     static Result Build(const std::string &table_name,

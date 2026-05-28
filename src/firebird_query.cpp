@@ -309,6 +309,7 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
             if (TranslateFilter(QuoteIdent(all_column_names[source_col]), filter,
                                 frag, r.params)) {
                 conds.push_back("(" + frag + ")");
+                r.pushed_filter_sql.push_back(frag);
             } else {
                 r.params.resize(saved_params);
                 r.residual_filter_indices.push_back(filter_idx);
