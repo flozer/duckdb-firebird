@@ -1,7 +1,7 @@
 # duckdb-firebird - Guia de uso para analistas
 
 Este guia mostra como usar a extensao `firebird` para consultar bases
-Firebird a partir do DuckDB, criar uma camada local de analytics em
+Firebird a partir do [DuckDB](https://github.com/duckdb/duckdb), criar uma camada local de analytics em
 arquivo `.duckdb`, materializar dados em tabelas rapidas e exportar
 resultados para Parquet/CSV.
 

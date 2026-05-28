@@ -1,7 +1,8 @@
 # duckdb-firebird — Windows quick-start
 
-Verified on Windows 11 Pro 26200 + Firebird 5.0.4 SuperServer + DuckDB
-v1.5.3 (built from source) + MSVC 19.44 (Visual Studio 2022 Build
+Verified on Windows 11 Pro 26200 + Firebird 5.0.4 SuperServer +
+[DuckDB](https://github.com/duckdb/duckdb) v1.5.3 (built from source) +
+MSVC 19.44 (Visual Studio 2022 Build
 Tools). Times below are from a fresh setup on a modern laptop.
 
 ## Step 0 — Requirements
@@ -38,7 +39,7 @@ cd ..
 
 ## Step 2 — Build
 
-The repo ships [`scripts/build_windows_local.bat`](../scripts/build_windows_local.bat),
+The repo ships [`scripts/build_windows_local.bat`](../../scripts/build_windows_local.bat),
 which loads `vcvars64.bat`, points CMake at the FB5 SDK paths, and
 calls Ninja. From a regular `cmd.exe` (or PowerShell that lets you run
 .bat):
@@ -107,7 +108,7 @@ QUIT;
 ```
 
 A canned fixture with FB4 types is at
-[`scripts/fixture_biz4.sql`](../scripts/fixture_biz4.sql) — apply it
+[`scripts/fixture_biz4.sql`](../../scripts/fixture_biz4.sql) — apply it
 with:
 
 ```cmd

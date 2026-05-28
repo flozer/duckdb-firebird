@@ -28,9 +28,9 @@ DUCKDB_GIT_VERSION=v1.5.3 make set_duckdb_version
 
 ## Step 2 — Build
 
-The repo ships [`scripts/build_linux_local.sh`](../scripts/build_linux_local.sh),
-which pins DuckDB, checks for `libfbclient` headers, and delegates to
-the DuckDB extension-ci-tools Makefile:
+The repo ships [`scripts/build_linux_local.sh`](../../scripts/build_linux_local.sh),
+which pins [DuckDB](https://github.com/duckdb/duckdb), checks for `libfbclient` headers, and delegates to
+the [DuckDB extension-ci-tools](https://github.com/duckdb/extension-ci-tools) Makefile:
 
 ```bash
 scripts/build_linux_local.sh
@@ -109,7 +109,7 @@ isql-fb -u SYSDBA -p masterkey -i scripts/fixture_biz4.sql /tmp/fbtest/biz4.fdb
 The repo's CI script `scripts/setup_test_firebird.sh` is the
 authoritative reference for the older FB3 fixture; the FB4 fixture
 above is the new one used by the Windows guide and by the live
-verification report in `docs/test_report.md`.
+verification report in `test_report.md`.
 
 ## Step 4 — Smoke test
 
@@ -200,5 +200,5 @@ user the server runs as can't read the `.fdb`. Check
 On a single-host SuperServer, the server scheduler serialises queries
 against the same file — extra cursors only add overhead. `partitions=`
 is opt-in for remote or Classic/SuperClassic deployments where
-parallelism is cheap. See `docs/architecture.md` "Why the conservative
+parallelism is cheap. See `architecture.md` "Why the conservative
 default?".

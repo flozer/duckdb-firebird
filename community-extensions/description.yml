@@ -18,6 +18,9 @@ extension:
   # community CI must spin up the vcpkg toolchain to satisfy the
   # ibase.h / fbclient_ms dependency before configuring CMake.
   requires_toolchains: vcpkg
+  # Maintainer: Fernando Lozer
+  # GitHub:   https://github.com/flozer
+  # LinkedIn: https://www.linkedin.com/in/fernandolozer
   maintainers:
     - flozer
   # Platforms where libfbclient is reachable via the build's vcpkg
@@ -27,6 +30,7 @@ extension:
 
 repo:
   github: flozer/duckdb-firebird
-  # Pinned to the v0.4.4 release tag — community-extensions CI checks
-  # out exactly this ref to build + sign the published artefacts.
+  # Pinned to the current public release tag — community-extensions
+  # CI checks out exactly this ref to build + sign the published
+  # artefacts.
   ref: v0.5.1

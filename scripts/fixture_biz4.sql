@@ -1,6 +1,6 @@
 /* duckdb-firebird FB4/FB5 fixture.
  *
- * Creates a "biz4" database used by docs/guide_windows.md to exercise
+ * Creates a "biz4" database used by docs/en/guide_windows.md to exercise
  * every type added in Firebird 4 (INT128, DECIMAL(38, s), DECFLOAT 16/34,
  * TIMESTAMP/TIME WITH TIME ZONE) plus a handful of plain types for
  * federated-join examples.
