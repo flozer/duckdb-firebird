@@ -30,10 +30,17 @@ if not exist "%FBCLIENT%" (
     exit /b 1
 )
 
-REM Version: parse from community-extensions/description.yml via
-REM PowerShell -- cmd.exe's for /f + findstr quoting fights the
-REM "  version:" indent. PowerShell is one line, less brittle.
-for /f "delims=" %%v in ('powershell -NoProfile -Command "((Select-String -Path community-extensions/description.yml -Pattern '^^  version:').Line -split ':')[1].Trim()"') do set "VERSION=%%v"
+REM Version source priority:
+REM   1. GITHUB_REF_NAME when it looks like a tag (v<semver>) -- the
+REM      release-assets.yml workflow runs on tag push, so this is the
+REM      authoritative source for published artifacts.
+REM   2. community-extensions/description.yml -- local dev fallback.
+REM   3. "unknown" -- last resort.
+set "VERSION="
+if defined GITHUB_REF_NAME (
+    if "%GITHUB_REF_NAME:~0,1%"=="v" set "VERSION=%GITHUB_REF_NAME:~1%"
+)
+if "%VERSION%"=="" for /f "delims=" %%v in ('powershell -NoProfile -Command "((Select-String -Path community-extensions/description.yml -Pattern '^^  version:').Line -split ':')[1].Trim()"') do set "VERSION=%%v"
 if "%VERSION%"=="" set "VERSION=unknown"
 
 set "STAGE=dist\duckdb-firebird-%VERSION%-windows-x64"
