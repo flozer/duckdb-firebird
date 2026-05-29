@@ -5,7 +5,7 @@ out so each item can be closed independently.
 
 ## Compatibility matrix
 
-| Component | Today (v0.5.3) | Target (v1.0) |
+| Component | Today (v0.5.7) | Target (v1.0) |
 |---|---|---|
 | [DuckDB](https://github.com/duckdb/duckdb) | v1.5.3 (pinned in CI and build scripts) | v1.5.x + Stable C ABI when `StorageExtension` lands in it |
 | Firebird server | 3.0, **4.0**, **5.0** all tested live (CI matrix) | same |
