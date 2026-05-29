@@ -34,6 +34,14 @@ Build with the DuckDB extension harness:
 GEN=ninja make release
 ```
 
+The build no longer links `libfbclient`; headers ship vendored under
+`third_party/firebird/include/` (Interbase Public License - see
+`THIRD_PARTY_NOTICES.md`). A system Firebird client is **only** needed
+at runtime, when the test suite or your interactive DuckDB session
+calls a `firebird_*` function. Point the loader at a specific binary
+with `DUCKDB_FIREBIRD_CLIENT_LIBRARY=/path/to/libfbclient.so` when the
+default search path does not find one.
+
 See the platform guides for details:
 
 - `docs/en/guide_linux.md`
