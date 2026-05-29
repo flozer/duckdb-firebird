@@ -44,6 +44,33 @@ static void LoadInternal(ExtensionLoader &loader) {
         "0 disables the log (default).",
         LogicalType::BIGINT,
         Value::BIGINT(0));
+
+    // Phase 2 - FirebirdConnectionPool tuning. Defaults reproduce the
+    // pre-Phase-2 behaviour (enabled, unlimited LIFO, no expiry) so an
+    // ATTACH without any SET keeps reusing connections exactly as
+    // before. Settings are consumed at ATTACH time by FirebirdAttach,
+    // which builds a FirebirdConnectionPoolConfig and hands it to the
+    // catalog. Per-session: a SET on one connection does not retune
+    // the pool of another ATTACH already in flight.
+    config.AddExtensionOption(
+        "firebird_pool_enabled",
+        "Enable the per-ATTACH FirebirdConnectionPool. When false, every "
+        "Acquire opens a fresh connection and Release destroys it.",
+        LogicalType::BOOLEAN,
+        Value::BOOLEAN(true));
+    config.AddExtensionOption(
+        "firebird_pool_max_size",
+        "Maximum number of idle connections kept in the pool. "
+        "0 = unlimited (default). Caps the idle queue, not active leases.",
+        LogicalType::BIGINT,
+        Value::BIGINT(0));
+    config.AddExtensionOption(
+        "firebird_pool_idle_timeout_ms",
+        "How long (in milliseconds) a released connection may sit in the "
+        "idle queue before it is discarded on the next Acquire. "
+        "0 = no expiry (default). Clock starts at Release().",
+        LogicalType::BIGINT,
+        Value::BIGINT(0));
 }
 
 void FirebirdExtension::Load(ExtensionLoader &loader) {

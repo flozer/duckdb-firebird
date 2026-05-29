@@ -89,6 +89,11 @@ struct FirebirdLocalState : public LocalTableFunctionState {
     // using projection_ids.
     DataChunk fetch_chunk;
     bool exhausted = false;
+    // Phase 2 Chunk C - observability: pulled from the pool lease at
+    // InitLocal time. connection_reused stays false for the direct
+    // firebird_scan() path (no pool), true when AcquireWithInfo handed
+    // back a recycled idle connection.
+    bool connection_reused = false;
 
     ~FirebirdLocalState() override {
         // Order matters: the cursor has to be torn down before the
@@ -574,9 +579,15 @@ static unique_ptr<LocalTableFunctionState> FirebirdScanInitLocal(
     auto &bind = input.bind_data->Cast<FirebirdBindData>();
     auto local = make_uniq<FirebirdLocalState>();
     if (bind.pool) {
-        // ATTACH path — reuse a warm connection if the pool has one.
+        // ATTACH path - reuse a warm connection if the pool has one.
+        // Use the info-bearing acquire so observability can surface
+        // connection_reused; the direct firebird_scan() path below
+        // does not go through the pool and keeps connection_reused
+        // at its default false.
         local->pool = bind.pool;
-        local->conn = bind.pool->Acquire();
+        auto lease = bind.pool->AcquireWithInfo();
+        local->conn              = std::move(lease.conn);
+        local->connection_reused = lease.reused;
     } else {
         local->conn = make_uniq<FirebirdConnection>(bind.conn_info);
     }
@@ -678,6 +689,15 @@ static bool OpenNextPartitionCursor(ClientContext &ctx,
         rec.partitions    = static_cast<int32_t>(gstate.partitions.size());
         rec.parallel_scan = rec.partitions > 1;
         rec.captured_at   = Timestamp::GetCurrentTimestamp();
+        // Phase 2 Chunk C - pool identity from the active lease. For
+        // the direct firebird_scan() path the connection was not
+        // leased from any pool, but it still carries a process-wide
+        // monotonic id assigned at construction; connection_reused
+        // stays false because nothing was recycled.
+        if (local.conn) {
+            rec.connection_id = local.conn->Id();
+        }
+        rec.connection_reused = local.connection_reused;
 
         // Ring buffer is opt-in via SET firebird_query_log_size = N.
         // The default registered in firebird_extension.cpp is 0 (off).

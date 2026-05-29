@@ -204,21 +204,74 @@ static void DpbAppend(std::vector<char> &dpb, char tag, const std::string &val) 
 // --- FirebirdConnectionPool --------------------------------------------------
 
 std::unique_ptr<FirebirdConnection> FirebirdConnectionPool::Acquire() {
+    return AcquireWithInfo().conn;
+}
+
+FirebirdConnectionLease FirebirdConnectionPool::AcquireWithInfo() {
+    if (!config_.enabled) {
+        // Pool disabled: every Acquire creates a fresh connection and
+        // Release drops it. Idle queue is never touched.
+        auto fresh = std::make_unique<FirebirdConnection>(info_);
+        total_created_.fetch_add(1, std::memory_order_relaxed);
+        return { std::move(fresh), false };
+    }
+
     {
         std::lock_guard<std::mutex> g(lock_);
+
+        // Drain expired entries first. idle_ is filled with push_back at
+        // Release time, so the front is the oldest by released_at.
+        if (config_.idle_timeout_ms > 0 && !idle_.empty()) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto cutoff = std::chrono::milliseconds(config_.idle_timeout_ms);
+            size_t drop = 0;
+            while (drop < idle_.size() &&
+                   now - idle_[drop].released_at > cutoff) {
+                ++drop;
+            }
+            if (drop > 0) {
+                idle_.erase(idle_.begin(), idle_.begin() + drop);
+                total_discarded_.fetch_add(static_cast<int64_t>(drop),
+                                           std::memory_order_relaxed);
+            }
+        }
+
         if (!idle_.empty()) {
-            auto conn = std::move(idle_.back());
+            auto conn = std::move(idle_.back().conn);
             idle_.pop_back();
-            return conn;
+            total_reused_.fetch_add(1, std::memory_order_relaxed);
+            return { std::move(conn), true };
         }
     }
-    return std::make_unique<FirebirdConnection>(info_);
+
+    auto fresh = std::make_unique<FirebirdConnection>(info_);
+    total_created_.fetch_add(1, std::memory_order_relaxed);
+    return { std::move(fresh), false };
 }
 
 void FirebirdConnectionPool::Release(std::unique_ptr<FirebirdConnection> conn) {
     if (!conn) return;
+
+    if (!config_.enabled) {
+        // Pool disabled: never park, destroy on release.
+        total_discarded_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
     std::lock_guard<std::mutex> g(lock_);
-    idle_.push_back(std::move(conn));
+
+    // max_size caps the idle queue, not the number of active leases.
+    // Past the cap we drop the connection that was just returned.
+    if (config_.max_size > 0 &&
+        static_cast<int64_t>(idle_.size()) >= config_.max_size) {
+        total_discarded_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    IdleEntry e;
+    e.conn = std::move(conn);
+    e.released_at = std::chrono::steady_clock::now();
+    idle_.push_back(std::move(e));
 }
 
 size_t FirebirdConnectionPool::IdleCount() {
@@ -228,7 +281,13 @@ size_t FirebirdConnectionPool::IdleCount() {
 
 // --- FirebirdConnection ------------------------------------------------------
 
-FirebirdConnection::FirebirdConnection(const FirebirdConnectionInfo &info) : info_(info) {
+// Process-wide monotonic counter feeding FirebirdConnection::Id(). Used
+// only for observability correlation; not a Firebird attachment id.
+static std::atomic<int64_t> g_firebird_connection_id_counter{0};
+
+FirebirdConnection::FirebirdConnection(const FirebirdConnectionInfo &info)
+    : info_(info),
+      id_(g_firebird_connection_id_counter.fetch_add(1, std::memory_order_relaxed)) {
     ValidateClientCharset(info_.charset);
     Attach();
     try {

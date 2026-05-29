@@ -1,0 +1,161 @@
+# name: test/sql/firebird_pool.test
+# description: Phase 2 connection pool surface - settings defaults,
+#              negative validation, opt-out, and ATTACH-time reuse as
+#              surfaced through firebird_last_query().
+# group: [firebird]
+#
+# Requires the EMPLOYEE fixture from scripts/setup_test_firebird.sh and
+# the same env vars the other firebird_* tests use.
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+require-env ISC_PASSWORD
+
+# ---------------------------------------------------------------------------
+#  Defaults
+# ---------------------------------------------------------------------------
+
+query T
+SELECT current_setting('firebird_pool_enabled');
+----
+true
+
+query I
+SELECT current_setting('firebird_pool_max_size');
+----
+0
+
+query I
+SELECT current_setting('firebird_pool_idle_timeout_ms');
+----
+0
+
+# ---------------------------------------------------------------------------
+#  Negative values rejected at ATTACH time (BinderException).
+# ---------------------------------------------------------------------------
+
+statement ok
+SET firebird_pool_max_size = -1;
+
+statement error
+ATTACH '${FIREBIRD_TEST_DB}' AS bad_size (TYPE firebird);
+----
+firebird_pool_max_size must be >= 0
+
+# Restore + try the other negative case.
+
+statement ok
+SET firebird_pool_max_size = 0;
+
+statement ok
+SET firebird_pool_idle_timeout_ms = -100;
+
+statement error
+ATTACH '${FIREBIRD_TEST_DB}' AS bad_to (TYPE firebird);
+----
+firebird_pool_idle_timeout_ms must be >= 0
+
+statement ok
+SET firebird_pool_idle_timeout_ms = 0;
+
+# ---------------------------------------------------------------------------
+#  Direct firebird_scan() never goes through the pool. connection_id
+#  carries a real (>= 0) process-wide id; connection_reused stays false.
+# ---------------------------------------------------------------------------
+
+statement ok
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE EMP_ID = 1;
+
+query T
+SELECT connection_id >= 0 AND connection_reused = false
+  FROM firebird_last_query();
+----
+true
+
+# ---------------------------------------------------------------------------
+#  ATTACH path with the pool enabled (default).
+#
+#  By the time the first user query runs, the catalog initialization
+#  itself has already opened and released one connection into the pool,
+#  so the very first SELECT typically arrives as connection_reused=true.
+#  That is expected behaviour (catalog warm-up), not a bug; the test
+#  only requires that successive queries land on the SAME connection_id
+#  to prove pool reuse end-to-end.
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fbp_on (TYPE firebird);
+
+statement ok
+SELECT EMP_ID FROM fbp_on.main.EMPLOYEE WHERE EMP_ID = 1;
+
+statement ok
+CREATE OR REPLACE TABLE t_pool_on_first AS
+SELECT connection_id, connection_reused FROM firebird_last_query();
+
+statement ok
+SELECT EMP_ID FROM fbp_on.main.EMPLOYEE WHERE EMP_ID = 2;
+
+statement ok
+CREATE OR REPLACE TABLE t_pool_on_second AS
+SELECT connection_id, connection_reused FROM firebird_last_query();
+
+# Both queries hit the same pooled connection (same id) and at least
+# the second is a recycled lease.
+
+query T
+SELECT (SELECT connection_id      FROM t_pool_on_first)
+     = (SELECT connection_id      FROM t_pool_on_second)
+   AND (SELECT connection_reused  FROM t_pool_on_second) = true;
+----
+true
+
+statement ok
+DETACH fbp_on;
+
+# ---------------------------------------------------------------------------
+#  ATTACH path with the pool disabled.
+#
+#  When firebird_pool_enabled = false, every Acquire opens a fresh
+#  connection. Successive queries get DIFFERENT ids and connection_reused
+#  stays false.
+# ---------------------------------------------------------------------------
+
+statement ok
+SET firebird_pool_enabled = false;
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fbp_off (TYPE firebird);
+
+statement ok
+SELECT EMP_ID FROM fbp_off.main.EMPLOYEE WHERE EMP_ID = 3;
+
+statement ok
+CREATE OR REPLACE TABLE t_pool_off_first AS
+SELECT connection_id, connection_reused FROM firebird_last_query();
+
+statement ok
+SELECT EMP_ID FROM fbp_off.main.EMPLOYEE WHERE EMP_ID = 4;
+
+statement ok
+CREATE OR REPLACE TABLE t_pool_off_second AS
+SELECT connection_id, connection_reused FROM firebird_last_query();
+
+query T
+SELECT (SELECT connection_id      FROM t_pool_off_first)
+    <> (SELECT connection_id      FROM t_pool_off_second)
+   AND (SELECT connection_reused  FROM t_pool_off_first)  = false
+   AND (SELECT connection_reused  FROM t_pool_off_second) = false;
+----
+true
+
+statement ok
+DETACH fbp_off;
+
+# Restore defaults for any later test in this binary.
+
+statement ok
+SET firebird_pool_enabled = true;
