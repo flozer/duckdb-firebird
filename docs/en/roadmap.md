@@ -5,7 +5,7 @@ out so each item can be closed independently.
 
 ## Compatibility matrix
 
-| Component | Today (v0.5.1) | Target (v1.0) |
+| Component | Today (v0.5.3) | Target (v1.0) |
 |---|---|---|
 | [DuckDB](https://github.com/duckdb/duckdb) | v1.5.3 (pinned in CI and build scripts) | v1.5.x + Stable C ABI when `StorageExtension` lands in it |
 | Firebird server | 3.0, **4.0**, **5.0** all tested live (CI matrix) | same |
@@ -370,6 +370,69 @@ break BI / dbt-style introspection:
 **Acceptance**: a new `test/sql/firebird_metadata.test` exercises
 each form against the EMPLOYEE + FB4_TYPES fixtures and matches
 the expected name/type rows verbatim.
+
+---
+
+## Milestone v0.5.x — Observability + connection pool
+
+Phase 1 (v0.5.2 / v0.5.3) and Phase 2 (v0.5.4 candidate) cover the
+operational surface a federated reader needs to be honest with its
+users: what SQL was sent, what it cost, and which connection ran it.
+
+### 14. Remote-query telemetry — **DONE (v0.5.2 / v0.5.3)**
+
+Two zero-arg table functions scoped to the current `ClientContext`:
+
+- `firebird_last_query()` — last attempted remote query (1 row max).
+- `firebird_query_log()` — ring buffer, opt-in via
+  `SET firebird_query_log_size = N`.
+
+15 columns shared between both: `remote_sql`, redacted `binds`,
+`table_name`, `projected_columns`, `pushed_filters`,
+`residual_filters`, `rows_read`, `firebird_time_us`,
+`total_time_us`, `connection_id`, `connection_reused`,
+`parallel_scan`, `partitions`, `captured_at`, sanitized
+`error_message`. Text and BLOB binds surface as `<text:redacted>`;
+`password=...` and `scheme://user:pass@host` patterns are stripped
+from error text.
+
+**Acceptance**: `test/sql/firebird_observability.test` covers
+defaults, projection + predicate pushdown surfacing, no-leak
+sentinel cross-check, ATTACH path, ring-buffer rotation + disable.
+
+### 15. Configurable connection pool — **DONE (v0.5.4 candidate)**
+
+`FirebirdConnectionPool` grows three opt-in knobs read at `ATTACH`
+time and validated up front:
+
+- `SET firebird_pool_enabled = true|false` — default `true`. When
+  `false`, every `Acquire` opens a fresh connection and `Release`
+  destroys it.
+- `SET firebird_pool_max_size = N` — caps the idle queue (not
+  active leases). `0` = unlimited (default).
+- `SET firebird_pool_idle_timeout_ms = MS` — discards connections
+  that sat in the idle queue longer than `MS`. Clock starts at
+  `Release()`. `0` = no expiry (default).
+
+Connection identity surfaces through the observability slot:
+`connection_id` is a process-wide monotonic id assigned by the
+extension (not a Firebird attachment id); `connection_reused` is
+`true` when the lease came from the idle queue.
+
+Settings are read at the `ATTACH` that creates the pool. A later
+`SET` does **not** retune an existing pool; users must
+`DETACH` + `ATTACH` to apply a change.
+
+By design, the direct `firebird_scan(...)` table function does
+**not** go through any pool — each call builds its own one-shot
+connection. That keeps the no-`ATTACH` path simple and avoids
+forcing pool semantics onto callers that don't want a catalog.
+
+**Acceptance**: `test/sql/firebird_pool.test` covers defaults,
+negative-value rejection, ATTACH reuse, opt-out fresh-every-time,
+and direct-scan id behaviour. Pool defaults reproduce pre-Phase-2
+behaviour (unlimited LIFO, no expiry, enabled) so existing
+deployments observe no change.
 
 ---
 

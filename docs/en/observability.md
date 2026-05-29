@@ -44,8 +44,8 @@ connection.
 | `rows_read` | BIGINT | Rows pulled from Firebird this scan |
 | `firebird_time_us` | BIGINT | Sum of `Fetch()` wire time |
 | `total_time_us` | BIGINT | Wall clock since capture |
-| `connection_id` | BIGINT | Reserved (default `-1`) |
-| `connection_reused` | BOOLEAN | Reserved (default `false`) |
+| `connection_id` | BIGINT | Process-wide monotonic id assigned by the extension at `FirebirdConnection` construction; not a Firebird attachment id. Surfaces a real value for both `ATTACH` (from the pool lease) and direct `firebird_scan()` (no pool, but still a real id). |
+| `connection_reused` | BOOLEAN | `true` when the connection came back from the pool's idle queue; `false` when freshly constructed. Direct `firebird_scan()` always reports `false`. Under `ATTACH`, the very first user SELECT may already report `true` because catalog initialization warmed the pool first - that is expected, not a bug. |
 | `parallel_scan` | BOOLEAN | `true` when `partitions > 1` |
 | `partitions` | INTEGER | Partition count for this scan |
 | `captured_at` | TIMESTAMP | Local capture time |
