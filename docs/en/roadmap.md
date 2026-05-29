@@ -434,6 +434,47 @@ and direct-scan id behaviour. Pool defaults reproduce pre-Phase-2
 behaviour (unlimited LIFO, no expiry, enabled) so existing
 deployments observe no change.
 
+### Hotfix v0.5.5 — runtime `libfbclient` loading
+
+`v0.5.4` shipped a `vcpkg.json` declaring `libfbclient` as a
+build-time dependency, but the upstream vcpkg registry used by
+`duckdb/community-extensions` does not carry a `libfbclient` port,
+so the community CI failed before CMake on every platform of
+PR #1980. `v0.5.5` removes the build-time dependency entirely.
+
+What changed:
+
+- `vcpkg.json` removed; descriptor drops
+  `requires_toolchains: vcpkg`.
+- `CMakeLists.txt` no longer links `libfbclient`. Headers ship
+  vendored under `third_party/firebird/include/` (Interbase
+  Public License; `THIRD_PARTY_NOTICES.md`).
+- New `src/firebird_client_loader.{hpp,cpp}` resolve the 16 ISC
+  entry points the extension actually calls
+  (`isc_attach_database` … `fb_interpret`, including
+  `isc_open_blob2`) via `dlopen` / `LoadLibrary` on the first
+  `firebird_*` call. Lazy + mutex-guarded; once-per-process.
+- `DUCKDB_FIREBIRD_CLIENT_LIBRARY` environment variable lets
+  callers pin a specific library; the override is authoritative
+  (failed load throws instead of falling back).
+- `firebird_client.cpp` defines TU-local macros that redirect
+  every ISC entry-point name to the loader table - no call-site
+  edits, error-context strings unaffected (preprocessor does not
+  expand inside `"..."`).
+- README + CONTRIBUTING + `docs/pt/function_manual.md` document
+  the runtime requirement and the env-override knob.
+
+**Acceptance**: build green on Windows local *without* linking
+fbclient; runtime smoke against the EMPLOYEE fixture green;
+`DUCKDB_FIREBIRD_CLIENT_LIBRARY` with a bad path raises the
+documented `IO Error: DUCKDB_FIREBIRD_CLIENT_LIBRARY is set to
+'...' but that file could not be loaded`; full regression sweep
+(8 firebird_* sqllogic suites) reports **398 assertions, 0 fail**.
+
+Once the v0.5.5 tag is published, `duckdb/community-extensions`
+PR #1980 must be re-pointed at `repo.ref: v0.5.5` so the
+community build matrix can pick up the runtime-loader path.
+
 ---
 
 ## Platform — separation of concerns

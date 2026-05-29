@@ -239,17 +239,53 @@ Flight SQL client consumes query results through DuckDB or GizmoSQL, DuckDB
 converts the result stream to Arrow at the boundary. Direct scanner-native Arrow
 is intentionally deferred.
 
+## Runtime requirement: Firebird client library
+
+Starting with **v0.5.5**, the extension loads the Firebird client
+library at runtime via `dlopen` / `LoadLibrary`. It is **not**
+embedded in the published binary, and the build no longer links
+`libfbclient` — including the community-extensions build that
+publishes `INSTALL firebird FROM community;`.
+
+You need a Firebird client reachable on the platform's default
+dynamic-loader search path **on the machine that runs the queries**:
+
+| Platform | Provide |
+|---|---|
+| Linux   | `libfbclient.so.2` (or `libfbclient.so`) - e.g. `apt-get install libfbclient2`, `dnf install libfbclient`, or a Firebird server install |
+| macOS   | `libfbclient.dylib` from a Firebird install |
+| Windows | `fbclient.dll` (or `fbclient_ms.dll`) from a Firebird install or the Firebird ODBC client distribution |
+
+If the library lives somewhere non-standard, set
+`DUCKDB_FIREBIRD_CLIENT_LIBRARY` to the absolute path before the first
+`firebird_*` call. The override is authoritative: when set non-empty
+and the path cannot be loaded, the extension raises a clear
+`IO Error: DUCKDB_FIREBIRD_CLIENT_LIBRARY is set to '...' but that file
+could not be loaded.` instead of silently falling back.
+
+When no client is reachable, the first `firebird_*` call fails with:
+
+```text
+IO Error: Firebird client library not found. Install the Firebird
+client (libfbclient on Linux/macOS, fbclient.dll on Windows) or set
+DUCKDB_FIREBIRD_CLIENT_LIBRARY=/path/to/library. Tried: ...
+```
+
 ## Build
 
 ```bash
-# Linux dependencies
-sudo apt-get install -y cmake ninja-build g++ pkg-config python3 ccache firebird-dev
+# Linux dependencies (firebird-dev is OPTIONAL - only needed if you
+# want to build against a system-installed ibase.h; the repo ships
+# vendored headers under third_party/firebird/include for the
+# community CI path).
+sudo apt-get install -y cmake ninja-build g++ pkg-config python3 ccache
 
 # Build and package
 scripts/build_linux_local.sh
 scripts/package_dist_linux.sh
 
-# Tests require a reachable Firebird test database
+# Tests require a reachable Firebird test database AND a Firebird
+# client library on the loader path.
 ./build/release/test/unittest test/sql/firebird_scan.test
 ```
 
@@ -307,12 +343,14 @@ community-extensions/      DuckDB community descriptor copy
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 - [SECURITY.md](SECURITY.md)
 - [LICENSE](LICENSE)
+- [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
 
 ## Community Catalog
 
 The DuckDB community-extension submission is tracked at
 [duckdb/community-extensions#1980](https://github.com/duckdb/community-extensions/pull/1980).
-The descriptor currently points to `repo.ref: v0.5.3`.
+The descriptor currently points to `repo.ref: v0.5.5` (runtime-loaded
+Firebird client; no `libfbclient` build dependency).
 
 After it is accepted, users should be able to install with:
 

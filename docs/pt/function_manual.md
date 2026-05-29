@@ -14,6 +14,34 @@ facil de encontrar.
 - **Para que serve**: casos de uso.
 - **Uso no dia a dia**: exemplos praticos.
 
+## Requisito de runtime
+
+A partir da v0.5.5 a extensao nao embute o cliente Firebird no binario
+publicado e o build nao linka `libfbclient`. Para qualquer funcao
+`firebird_*` funcionar e necessario ter, na maquina que executa as
+consultas, uma biblioteca cliente Firebird acessivel pelo loader
+dinamico do sistema:
+
+- Linux: `libfbclient.so.2` ou `libfbclient.so` (pacotes
+  `libfbclient2` / `firebird*-server`).
+- macOS: `libfbclient.dylib` (de uma instalacao Firebird).
+- Windows: `fbclient.dll` ou `fbclient_ms.dll` (de uma instalacao
+  Firebird ou do pacote Firebird ODBC client).
+
+Quando a biblioteca esta em caminho nao-padrao, defina
+`DUCKDB_FIREBIRD_CLIENT_LIBRARY` com o caminho absoluto antes da
+primeira chamada `firebird_*`. O override e autoritativo: se o caminho
+nao puder ser carregado, a extensao levanta um erro claro em vez de
+cair em fallback silencioso.
+
+Mensagem de erro quando nenhum cliente esta acessivel:
+
+```text
+IO Error: Firebird client library not found. Install the Firebird
+client (libfbclient on Linux/macOS, fbclient.dll on Windows) or set
+DUCKDB_FIREBIRD_CLIENT_LIBRARY=/path/to/library. Tried: ...
+```
+
 ## Nivel 1 - Leitura direta
 
 ### `firebird_scan(connection_string, table_name)`
