@@ -1,4 +1,5 @@
 #include "firebird_client.hpp"
+#include "firebird_client_loader.hpp"
 
 #include <cstdlib>
 #include <cstring>
@@ -9,6 +10,30 @@
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/time.hpp"
 #include "duckdb/common/types/timestamp.hpp"
+
+// Route every ISC entry-point this TU calls through the runtime-loaded
+// FirebirdClientApi table. The redirect is local to this translation
+// unit (the loader header declares the function table using the
+// original names via decltype, so it must be included BEFORE these
+// macros take effect). String literals naming these symbols in error
+// messages are unaffected because the preprocessor does not expand
+// inside `"..."`.
+#define isc_attach_database          (::duckdb::fbapi().isc_attach_database)
+#define isc_detach_database          (::duckdb::fbapi().isc_detach_database)
+#define isc_start_transaction        (::duckdb::fbapi().isc_start_transaction)
+#define isc_rollback_transaction     (::duckdb::fbapi().isc_rollback_transaction)
+#define isc_dsql_allocate_statement  (::duckdb::fbapi().isc_dsql_allocate_statement)
+#define isc_dsql_prepare             (::duckdb::fbapi().isc_dsql_prepare)
+#define isc_dsql_describe            (::duckdb::fbapi().isc_dsql_describe)
+#define isc_dsql_describe_bind       (::duckdb::fbapi().isc_dsql_describe_bind)
+#define isc_dsql_execute             (::duckdb::fbapi().isc_dsql_execute)
+#define isc_dsql_fetch               (::duckdb::fbapi().isc_dsql_fetch)
+#define isc_dsql_free_statement      (::duckdb::fbapi().isc_dsql_free_statement)
+#define isc_open_blob2               (::duckdb::fbapi().isc_open_blob2)
+#define isc_close_blob               (::duckdb::fbapi().isc_close_blob)
+#define isc_get_segment              (::duckdb::fbapi().isc_get_segment)
+#define isc_sqlcode                  (::duckdb::fbapi().isc_sqlcode)
+#define fb_interpret                 (::duckdb::fbapi().fb_interpret)
 
 namespace duckdb {
 
