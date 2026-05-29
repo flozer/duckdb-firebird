@@ -1,0 +1,205 @@
+# name: test/sql/firebird_dbt_sources.test
+# description: Phase 3 dbt sources generator - argument validation,
+#              YAML structure, ordering, PK semantics (simple vs composite
+#              vs view), no-leak.
+# group: [firebird]
+#
+# Requires the EMPLOYEE / FILE_STORAGE / TPK_COMPOSITE / TQUOTES /
+# V_ACTIVE_EMP fixtures from scripts/setup_test_firebird.sh.
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+require-env ISC_PASSWORD
+
+# ---------------------------------------------------------------------------
+#  Argument validation - the function refuses NULL, missing aliases, and
+#  non-Firebird catalogs. Errors must mention the function name so the
+#  caller doesn't have to guess what they're looking at.
+# ---------------------------------------------------------------------------
+
+statement error
+SELECT yaml FROM firebird_generate_dbt_sources(NULL);
+----
+firebird_generate_dbt_sources(catalog_name VARCHAR): catalog_name is required
+
+statement error
+SELECT yaml FROM firebird_generate_dbt_sources('nope_does_not_exist_xyz');
+----
+firebird_generate_dbt_sources: no attached catalog named 'nope_does_not_exist_xyz'
+
+statement error
+SELECT yaml FROM firebird_generate_dbt_sources('memory');
+----
+firebird_generate_dbt_sources: catalog 'memory' is not a Firebird ATTACH
+
+# ---------------------------------------------------------------------------
+#  Happy-path: ATTACH the fixture and snapshot the generated YAML into
+#  a local DuckDB table so every assertion below can scan the same row.
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird);
+
+statement ok
+CREATE OR REPLACE TABLE t_dbt_yaml AS
+SELECT yaml FROM firebird_generate_dbt_sources('fb');
+
+# Exactly one row, one column.
+
+query I
+SELECT COUNT(*) FROM t_dbt_yaml;
+----
+1
+
+# Header
+
+query T
+SELECT yaml LIKE 'version: 2%' FROM t_dbt_yaml;
+----
+true
+
+# Source name + schema. YamlQuote wraps both in double quotes.
+
+query T
+SELECT yaml LIKE '%- name: "fb"%' FROM t_dbt_yaml;
+----
+true
+
+query T
+SELECT yaml LIKE '%schema: "main"%' FROM t_dbt_yaml;
+----
+true
+
+# ---------------------------------------------------------------------------
+#  Table ordering: tables appear alphabetically by RDB$RELATION_NAME.
+#  EMPLOYEE -> FILE_STORAGE -> TPK_COMPOSITE -> TQUOTES -> V_ACTIVE_EMP.
+# ---------------------------------------------------------------------------
+
+query T
+SELECT instr(yaml, '"EMPLOYEE"')      < instr(yaml, '"FILE_STORAGE"')
+   AND instr(yaml, '"FILE_STORAGE"')  < instr(yaml, '"TPK_COMPOSITE"')
+   AND instr(yaml, '"TPK_COMPOSITE"') < instr(yaml, '"TQUOTES"')
+   AND instr(yaml, '"TQUOTES"')       < instr(yaml, '"V_ACTIVE_EMP"')
+  FROM t_dbt_yaml;
+----
+true
+
+# ---------------------------------------------------------------------------
+#  Column ordering for EMPLOYEE: RDB$FIELD_POSITION drives the YAML
+#  order. EMP_ID -> EMP_NAME -> DEPT_NO -> SALARY -> HIRE_DATE -> ...
+# ---------------------------------------------------------------------------
+
+query T
+SELECT instr(yaml, '"EMP_ID"')   < instr(yaml, '"EMP_NAME"')
+   AND instr(yaml, '"EMP_NAME"') < instr(yaml, '"DEPT_NO"')
+   AND instr(yaml, '"DEPT_NO"')  < instr(yaml, '"SALARY"')
+  FROM t_dbt_yaml;
+----
+true
+
+# ---------------------------------------------------------------------------
+#  data_type for a few representative columns uses the DuckDB-facing
+#  logical type via LogicalType::ToString(): NUMERIC(10,2) -> DECIMAL(18,2)
+#  (INT64-backed Firebird scaled int -> 18-digit DECIMAL).
+# ---------------------------------------------------------------------------
+
+query T
+SELECT yaml LIKE '%"EMP_ID"%data_type: "INTEGER"%'         FROM t_dbt_yaml;
+----
+true
+
+query T
+SELECT yaml LIKE '%"SALARY"%data_type: "DECIMAL(18,2)"%'   FROM t_dbt_yaml;
+----
+true
+
+query T
+SELECT yaml LIKE '%"HIRE_DATE"%data_type: "DATE"%'         FROM t_dbt_yaml;
+----
+true
+
+query T
+SELECT yaml LIKE '%"ACTIVE"%data_type: "BOOLEAN"%'         FROM t_dbt_yaml;
+----
+true
+
+# ---------------------------------------------------------------------------
+#  PK semantics
+#
+#  Single-column PKs (EMPLOYEE.EMP_ID, FILE_STORAGE.FILE_ID,
+#  TQUOTES.ID) carry tests: [not_null, unique]. Composite PK
+#  (TPK_COMPOSITE.PK_TPK_COMPOSITE = (A, B)) must NOT carry tests
+#  on either column. The view (V_ACTIVE_EMP) has no PK and must
+#  not carry tests on any of its columns.
+# ---------------------------------------------------------------------------
+
+# At least three (EMP_ID, FILE_ID, ID) emit not_null + unique blocks.
+
+query I
+SELECT (length(yaml) - length(replace(yaml, '- not_null', ''))) / length('- not_null')
+  FROM t_dbt_yaml;
+----
+3
+
+# Composite PK: TPK_COMPOSITE must list A, B, LABEL and emit zero tests
+# blocks under its table.
+
+query T
+SELECT yaml LIKE '%"TPK_COMPOSITE"%"A"%"B"%"LABEL"%' FROM t_dbt_yaml;
+----
+true
+
+# The block between '"TPK_COMPOSITE"' and the next '- name: "' header
+# carries the columns of TPK_COMPOSITE only. It must NOT contain
+# '- not_null' nor '- unique'.
+
+query T
+WITH s AS (
+    SELECT substring(
+        yaml,
+        instr(yaml, '"TPK_COMPOSITE"'),
+        instr(substring(yaml, instr(yaml, '"TPK_COMPOSITE"') + 15),
+              '- name: "') - 1
+    ) AS section
+    FROM t_dbt_yaml
+)
+SELECT section NOT LIKE '%- not_null%'
+   AND section NOT LIKE '%- unique%'
+  FROM s;
+----
+true
+
+# Same shape, applied to the view V_ACTIVE_EMP. Views have no PK so
+# none of their columns emit tests. The view block is the last one
+# in the YAML, so we slice from its header to end-of-string.
+
+query T
+WITH s AS (
+    SELECT substring(yaml, instr(yaml, '"V_ACTIVE_EMP"')) AS section
+    FROM t_dbt_yaml
+)
+SELECT section NOT LIKE '%- not_null%'
+   AND section NOT LIKE '%- unique%'
+  FROM s;
+----
+true
+
+# ---------------------------------------------------------------------------
+#  No-leak: the YAML must not contain the database path, the username,
+#  the password, nor a URI form of the connection string.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT COUNT(*) FROM t_dbt_yaml
+ WHERE yaml LIKE '%SYSDBA%'
+    OR yaml LIKE '%masterkey%'
+    OR yaml LIKE '%firebird://%'
+    OR yaml LIKE '%.fdb%'
+    OR yaml LIKE '%password%';
+----
+0
+
+statement ok
+DETACH fb;

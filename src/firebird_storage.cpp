@@ -24,6 +24,7 @@
 // data verbatim and never re-invokes the bind callback.
 
 #include "firebird_storage.hpp"
+#include "firebird_dbt_sources.hpp"
 #include "firebird_scanner.hpp"
 #include "firebird_client.hpp"
 
@@ -329,6 +330,13 @@ public:
           pool_(std::make_shared<FirebirdConnectionPool>(conn_info_, pool_config)),
           none_encoding_(none_encoding) {}
 
+    // Allow the dbt-sources metadata-extraction helper to lease a
+    // connection from this catalog's pool without exposing
+    // conn_info_ publicly. Implementation lives at file scope just
+    // below this class.
+    friend FirebirdMetadataLease AcquireFirebirdCatalogLease(
+        ClientContext &context, const string &catalog_name);
+
     string GetCatalogType() override { return "firebird"; }
 
     void Initialize(bool /*load_builtin*/) override {
@@ -553,6 +561,28 @@ FirebirdAttach(optional_ptr<StorageExtensionInfo> /*info*/,
     auto pool_config = BuildPoolConfig(context);
     return make_uniq<FirebirdCatalog>(db, std::move(conn), none_encoding,
                                        pool_config);
+}
+
+// ---------------------------------------------------------------------------
+//  Metadata-only lease used by firebird_generate_dbt_sources(...) and any
+//  future RDB$-introspection table function. Implemented here so it can
+//  see the private pool_/none_encoding_ members of FirebirdCatalog
+//  without exposing them publicly. Declared in firebird_dbt_sources.hpp.
+// ---------------------------------------------------------------------------
+
+FirebirdMetadataLease AcquireFirebirdCatalogLease(ClientContext &context,
+                                                   const string &catalog_name) {
+    ValidateFirebirdAttachAlias(context, catalog_name);
+    auto catalog_ptr = Catalog::GetCatalogEntry(context, catalog_name);
+    // ValidateFirebirdAttachAlias already confirmed catalog_ptr != null
+    // and GetCatalogType() == "firebird"; the Cast is safe.
+    auto &fb_catalog = catalog_ptr->Cast<FirebirdCatalog>();
+
+    FirebirdMetadataLease lease;
+    lease.pool          = fb_catalog.pool_;
+    lease.conn          = fb_catalog.pool_->Acquire();
+    lease.none_encoding = fb_catalog.none_encoding_;
+    return lease;
 }
 
 static unique_ptr<TransactionManager>

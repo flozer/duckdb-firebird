@@ -87,6 +87,18 @@ CREATE OR ALTER VIEW V_ACTIVE_EMP (EMP_ID, EMP_NAME, DEPT_NO) AS
     SELECT EMP_ID, EMP_NAME, DEPT_NO
       FROM EMPLOYEE WHERE ACTIVE = TRUE;
 COMMIT;
+
+-- Composite-PK fixture — guards firebird_generate_dbt_sources() against
+-- emitting "tests: [not_null, unique]" for any single column of a
+-- multi-segment PK. The dbt sources walker resolves this table's PK
+-- column to NULL, so its YAML block must carry no tests.
+CREATE TABLE TPK_COMPOSITE (
+    A     INTEGER NOT NULL,
+    B     INTEGER NOT NULL,
+    LABEL VARCHAR(20),
+    CONSTRAINT PK_TPK_COMPOSITE PRIMARY KEY (A, B)
+);
+COMMIT;
 EOF
 
 # Make the file world-readable so the test harness (running as a different

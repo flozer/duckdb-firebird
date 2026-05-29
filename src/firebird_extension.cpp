@@ -1,5 +1,6 @@
 #define DUCKDB_EXTENSION_MAIN
 
+#include "firebird_dbt_sources.hpp"
 #include "firebird_extension.hpp"
 #include "firebird_observability.hpp"
 #include "firebird_scanner.hpp"
@@ -18,6 +19,7 @@ static void LoadInternal(ExtensionLoader &loader) {
     loader.RegisterFunction(GetFirebirdAttachFunction());
     loader.RegisterFunction(GetFirebirdLastQueryFunction());
     loader.RegisterFunction(GetFirebirdQueryLogFunction());
+    loader.RegisterFunction(GetFirebirdDbtSourcesFunction());
 
     // Register the StorageExtension so DuckDB knows how to handle
     //   ATTACH 'firebird://…' AS fb (TYPE firebird);
