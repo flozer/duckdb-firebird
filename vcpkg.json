@@ -1,6 +1,6 @@
 {
   "name": "duckdb-firebird",
-  "version-string": "0.5.6",
+  "version-string": "0.5.7",
   "description": "DuckDB extension that scans Firebird databases via runtime-loaded libfbclient",
   "dependencies": []
 }
