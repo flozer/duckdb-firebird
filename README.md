@@ -7,7 +7,7 @@
   </p>
   <p>
     <a href="LICENSE"><img alt="license MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
-    <a href="https://github.com/flozer/duckdb-firebird/releases/tag/v0.5.3"><img alt="release v0.5.3" src="https://img.shields.io/badge/release-v0.5.3-blue.svg"></a>
+    <a href="https://github.com/flozer/duckdb-firebird/releases/tag/v0.5.6"><img alt="release v0.5.6" src="https://img.shields.io/badge/release-v0.5.6-blue.svg"></a>
     <a href="https://github.com/flozer/duckdb-firebird/actions/workflows/build-linux-fb-matrix.yml"><img alt="linux matrix" src="https://github.com/flozer/duckdb-firebird/actions/workflows/build-linux-fb-matrix.yml/badge.svg"></a>
     <a href="https://github.com/duckdb/community-extensions/pull/1980"><img alt="community PR" src="https://img.shields.io/badge/DuckDB%20community-PR%20open-yellow.svg"></a>
   </p>
@@ -215,7 +215,7 @@ DuckDB behavior.
 
 ## Current Status
 
-Release: **v0.5.3**.
+Release: **v0.5.6**.
 
 | Area | Status |
 |---|---|
@@ -349,7 +349,7 @@ community-extensions/      DuckDB community descriptor copy
 
 The DuckDB community-extension submission is tracked at
 [duckdb/community-extensions#1980](https://github.com/duckdb/community-extensions/pull/1980).
-The descriptor currently points to `repo.ref: v0.5.5` (runtime-loaded
+The descriptor currently points to `repo.ref: v0.5.6` (runtime-loaded
 Firebird client; no `libfbclient` build dependency).
 
 After it is accepted, users should be able to install with:
