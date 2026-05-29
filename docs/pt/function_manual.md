@@ -375,9 +375,18 @@ Saida compartilhada com `firebird_query_log()`:
 - `rows_read`: linhas lidas.
 - `firebird_time_us`: tempo de chamadas Firebird em microssegundos.
 - `total_time_us`: tempo total desde a captura.
-- `connection_id`: reservado; `-1` enquanto o pool nao expuser ID barato.
-- `connection_reused`: reservado; `false` enquanto o pool nao expuser dado
-  barato.
+- `connection_id`: ID monotonico global ao processo, atribuido pela extensao
+  no momento em que a `FirebirdConnection` e construida. Nao e um attachment
+  id do Firebird; serve apenas para correlacionar reuso de pool entre
+  consultas. Vale tanto no caminho `ATTACH` (vai do pool) quanto no
+  `firebird_scan(...)` direto (sem pool).
+- `connection_reused`: `true` quando a conexao veio reciclada da fila idle
+  do pool no `Acquire`; `false` quando foi recem-construida. `firebird_scan(...)`
+  direto nunca usa pool, entao fica em `false`. No caminho `ATTACH`, a
+  *primeira* consulta SQL do usuario pode ja aparecer como `true` porque a
+  inicializacao do catalogo (descoberta de esquema) abriu e devolveu uma
+  conexao ao pool antes de qualquer consulta SQL chegar. E aquecimento de
+  catalogo, nao bug.
 - `parallel_scan`: `true` quando `partitions > 1`.
 - `partitions`: numero de particoes.
 - `captured_at`: timestamp de captura.
@@ -535,6 +544,98 @@ Limpar/desligar:
 ```sql
 SET firebird_query_log_size = 0;
 ```
+
+### `SET firebird_pool_enabled = true|false`
+
+#### O que faz e como funciona
+
+Liga ou desliga o `FirebirdConnectionPool` por sessao DuckDB. Quando `true`
+(padrao), conexoes liberadas por uma consulta ATTACH voltam para a fila idle
+e sao reaproveitadas pela proxima consulta contra o mesmo banco anexado.
+Quando `false`, todo `Acquire` constroi conexao nova e todo `Release` a
+destroi imediatamente.
+
+Padrao:
+
+```sql
+SET firebird_pool_enabled = true;
+```
+
+Settings de pool sao lidas no momento do `ATTACH` que cria o catalogo. Um
+`SET` posterior nao reconfigura o pool ja em uso por um `ATTACH` existente -
+para aplicar, faca `DETACH` + `ATTACH` novamente.
+
+#### Para que serve
+
+- Desligar reuso para diagnosticar problema de estado preso (transacao,
+  cache do Firebird, etc).
+- Comparar custo de attach versus custo de query.
+- Forcar conexao fresca durante teste de seguranca/audit.
+
+#### Uso no dia a dia
+
+```sql
+SET firebird_pool_enabled = false;
+ATTACH 'firebird://...' AS fb (TYPE firebird);
+-- cada consulta abre conexao nova, connection_reused = false sempre.
+```
+
+### `SET firebird_pool_max_size = N`
+
+#### O que faz e como funciona
+
+Limita quantas conexoes idle podem ficar paradas na fila do pool. `0`
+(padrao) = sem limite. Quando a fila esta cheia, o `Release` descarta a
+conexao devolvida em vez de empilhar.
+
+O limite e sobre **fila idle**, nao sobre **leases ativos**: nada impede o
+scanner de paralelizar e segurar mais conexoes ativas simultaneamente; o
+`max_size` so atua quando elas voltam ao pool.
+
+Valores negativos sao rejeitados no `ATTACH` com `BinderException`
+("firebird_pool_max_size must be >= 0 (0 = unlimited), got ...").
+
+Padrao:
+
+```sql
+SET firebird_pool_max_size = 0;
+```
+
+Lido no `ATTACH`. Mudanca posterior nao retuna pool existente.
+
+#### Para que serve
+
+- Bater limite definido em politica interna (numero maximo de conexoes
+  simultaneas a um banco Firebird legado).
+- Conter consumo em servidores Firebird Embedded ou licenciados por
+  conexao.
+
+### `SET firebird_pool_idle_timeout_ms = MS`
+
+#### O que faz e como funciona
+
+Tempo, em milissegundos, que uma conexao pode ficar parada na fila idle
+antes de ser descartada na proxima `Acquire`. `0` (padrao) = sem expiracao.
+O relogio comeca no `Release()` que devolveu a conexao - nao no momento da
+criacao da conexao, nem no `Acquire` anterior.
+
+Valores negativos sao rejeitados no `ATTACH` com `BinderException`
+("firebird_pool_idle_timeout_ms must be >= 0 (0 = no expiry), got ...").
+
+Padrao:
+
+```sql
+SET firebird_pool_idle_timeout_ms = 0;
+```
+
+Lido no `ATTACH`. Mudanca posterior nao retuna pool existente.
+
+#### Para que serve
+
+- Forcar rotacao de conexoes paradas ha muito tempo, evitando que cache
+  ou estado interno do Firebird fique velho.
+- Liberar handles em sessoes longas que ficam ociosas entre rajadas de
+  consultas.
 
 ## Premissa de documentacao
 
