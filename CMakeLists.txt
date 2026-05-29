@@ -19,6 +19,7 @@ include_directories(src/include)
 set(EXTENSION_SOURCES
     src/firebird_extension.cpp
     src/firebird_client.cpp
+    src/firebird_client_loader.cpp
     src/firebird_types.cpp
     src/firebird_query.cpp
     src/firebird_scanner.cpp
@@ -31,94 +32,60 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
 # --- libfbclient ------------------------------------------------------------
 #
-# Resolution order:
-#   1. FB_SDK_ROOT (cmake or env var) — point at an unpacked Firebird
-#      install. Used by CI on Windows + macOS where libfbclient isn't in
-#      vcpkg and isn't shipped by the OS package manager.
-#   2. pkg-config (`fbclient`) — Linux distro packages.
-#   3. Bare `-lfbclient` — assume default include/lib search paths.
+# We do NOT link against libfbclient. The legacy ISC entry-points are
+# resolved at runtime by src/firebird_client_loader.cpp via dlopen /
+# LoadLibrary, so the build only needs the Firebird header tree at
+# compile time. The headers ship with the extension under
+# `third_party/firebird/include/`, which lets the community-extensions
+# CI build the extension on platforms where libfbclient is not
+# installed (or available via vcpkg).
+#
+# Header resolution order:
+#   1. FB_SDK_ROOT (cmake or env var) - point at an unpacked Firebird
+#      install. Developers can opt into the upstream FB5 SDK headers
+#      this way.
+#   2. Vendored copy under `third_party/firebird/include/` - the
+#      default. Always present; required for the community CI path.
+#
+# On Linux/macOS we additionally pass `-ldl` so the runtime loader
+# can call dlopen/dlsym (already standard on most distros, but
+# explicit linkage avoids surprises in slim build images).
 
 if(NOT DEFINED FB_SDK_ROOT AND DEFINED ENV{FB_SDK_ROOT})
     set(FB_SDK_ROOT $ENV{FB_SDK_ROOT})
 endif()
 
-if(FB_SDK_ROOT)
-    message(STATUS "libfbclient via FB_SDK_ROOT=${FB_SDK_ROOT}")
+set(FB_INCLUDE_DIR "")
 
+if(FB_SDK_ROOT)
     set(FB_INCLUDE_CANDIDATES
         "${FB_SDK_ROOT}/include"
         "${FB_SDK_ROOT}/Include"
         "${FB_SDK_ROOT}")
-    set(FB_LIB_CANDIDATES
-        "${FB_SDK_ROOT}/lib"
-        "${FB_SDK_ROOT}/Lib"
-        "${FB_SDK_ROOT}")
-
     find_path(FB_INCLUDE_DIR ibase.h PATHS ${FB_INCLUDE_CANDIDATES} NO_DEFAULT_PATH)
-
-    if(WIN32)
-        find_library(FB_LIBRARY
-            NAMES fbclient_ms fbclient
-            PATHS ${FB_LIB_CANDIDATES}
-            NO_DEFAULT_PATH)
+    if(NOT FB_INCLUDE_DIR)
+        message(WARNING
+            "FB_SDK_ROOT=${FB_SDK_ROOT} did not yield ibase.h; "
+            "falling back to vendored third_party/firebird headers.")
     else()
-        find_library(FB_LIBRARY
-            NAMES fbclient
-            PATHS ${FB_LIB_CANDIDATES}
-            NO_DEFAULT_PATH)
+        message(STATUS "libfbclient headers via FB_SDK_ROOT=${FB_SDK_ROOT}")
+        message(STATUS "  ibase.h:    ${FB_INCLUDE_DIR}")
     endif()
+endif()
 
-    if(NOT FB_INCLUDE_DIR OR NOT FB_LIBRARY)
-        message(FATAL_ERROR
-            "FB_SDK_ROOT=${FB_SDK_ROOT} did not yield ibase.h and a fbclient "
-            "import library. Looked for headers in ${FB_INCLUDE_CANDIDATES} "
-            "and libraries in ${FB_LIB_CANDIDATES}.")
-    endif()
+if(NOT FB_INCLUDE_DIR)
+    set(FB_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/firebird/include")
+    message(STATUS "libfbclient headers via vendored copy: ${FB_INCLUDE_DIR}")
+endif()
 
-    message(STATUS "  ibase.h:    ${FB_INCLUDE_DIR}")
-    message(STATUS "  fbclient:   ${FB_LIBRARY}")
+target_include_directories(${EXTENSION_NAME}          PRIVATE ${FB_INCLUDE_DIR})
+target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE ${FB_INCLUDE_DIR})
 
-    target_include_directories(${EXTENSION_NAME}          PRIVATE ${FB_INCLUDE_DIR})
-    target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE ${FB_INCLUDE_DIR})
-    target_link_libraries(${EXTENSION_NAME}          ${FB_LIBRARY})
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} ${FB_LIBRARY})
-else()
-    find_package(PkgConfig)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(FBCLIENT IMPORTED_TARGET fbclient)
-        if(NOT FBCLIENT_FOUND)
-            pkg_check_modules(FBCLIENT IMPORTED_TARGET firebird)
-        endif()
-    endif()
-
-    if(FBCLIENT_FOUND)
-        target_include_directories(${EXTENSION_NAME}          PRIVATE ${FBCLIENT_INCLUDE_DIRS})
-        target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE ${FBCLIENT_INCLUDE_DIRS})
-        target_link_libraries(${EXTENSION_NAME}          ${FBCLIENT_LIBRARIES})
-        target_link_libraries(${LOADABLE_EXTENSION_NAME} ${FBCLIENT_LIBRARIES})
-    else()
-        find_path(FB_INCLUDE_DIR ibase.h
-            PATHS
-                /usr/include/firebird
-                /usr/include
-                /usr/local/include/firebird
-                /usr/local/include)
-        find_library(FB_LIBRARY fbclient)
-
-        if(FB_INCLUDE_DIR AND FB_LIBRARY)
-            message(STATUS "libfbclient via system discovery")
-            message(STATUS "  ibase.h:    ${FB_INCLUDE_DIR}")
-            message(STATUS "  fbclient:   ${FB_LIBRARY}")
-            target_include_directories(${EXTENSION_NAME}          PRIVATE ${FB_INCLUDE_DIR})
-            target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE ${FB_INCLUDE_DIR})
-            target_link_libraries(${EXTENSION_NAME}          ${FB_LIBRARY})
-            target_link_libraries(${LOADABLE_EXTENSION_NAME} ${FB_LIBRARY})
-        else()
-            # Last resort: rely on default search paths (Linux with /usr/lib).
-            target_link_libraries(${EXTENSION_NAME}          fbclient)
-            target_link_libraries(${LOADABLE_EXTENSION_NAME} fbclient)
-        endif()
-    endif()
+# Runtime dynamic-loader dependency (dlopen / dlsym). LoadLibrary on
+# Windows is satisfied by kernel32 which CMake links by default.
+if(UNIX AND NOT APPLE)
+    target_link_libraries(${EXTENSION_NAME}          dl)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} dl)
 endif()
 
 install(TARGETS ${EXTENSION_NAME}
