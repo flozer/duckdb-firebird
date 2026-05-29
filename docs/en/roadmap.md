@@ -475,6 +475,35 @@ Once the v0.5.5 tag is published, `duckdb/community-extensions`
 PR #1980 must be re-pointed at `repo.ref: v0.5.5` so the
 community build matrix can pick up the runtime-loader path.
 
+### Hotfix v0.5.6 — restore empty `vcpkg.json` manifest
+
+`v0.5.5` removed `vcpkg.json` entirely, but the community CI
+always invokes the build with `-DVCPKG_BUILD=1
+-DVCPKG_MANIFEST_DIR=/duckdb_build_dir/`. The vcpkg toolchain
+needs a manifest file in that directory before CMake configures
+the project, so the missing file moved the failure mode from
+"libfbclient port not found" to "manifest not found". `v0.5.6`
+restores `vcpkg.json` with **empty** dependencies:
+
+```json
+{
+  "name": "duckdb-firebird",
+  "version-string": "0.5.6",
+  "description": "DuckDB extension that scans Firebird databases via runtime-loaded libfbclient",
+  "dependencies": []
+}
+```
+
+The runtime loader, the vendored Firebird headers, the
+`requires_toolchains: vcpkg` removal, and every behavioural rule
+shipped in v0.5.5 stay exactly as published. v0.5.6 is a
+packaging-only follow-up: the toolchain has a manifest to read,
+and the manifest declares no Firebird dependency.
+
+Once the v0.5.6 tag is published, `duckdb/community-extensions`
+PR #1980 should be re-pointed at `repo.ref: v0.5.6` and taken
+out of draft.
+
 ---
 
 ## Platform — separation of concerns
