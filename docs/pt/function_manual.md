@@ -376,6 +376,139 @@ CREATE SCHEMA IF NOT EXISTS fb;
 -- cole/revise o SQL retornado por firebird_attach_sql()
 ```
 
+### `firebird_generate_dbt_sources(catalog_name)`
+
+#### O que faz e como funciona
+
+Gera um arquivo `sources.yml` para dbt a partir de um catalogo
+Firebird ja anexado via `ATTACH ... (TYPE firebird)`. Retorna uma
+unica linha com a coluna `yaml VARCHAR` contendo todo o documento.
+
+```sql
+SELECT yaml FROM firebird_generate_dbt_sources('fb');
+```
+
+Para escrever direto em disco:
+
+```sql
+COPY (SELECT yaml FROM firebird_generate_dbt_sources('fb'))
+  TO 'sources.yml' (FORMAT csv, HEADER false, QUOTE '');
+```
+
+Como funciona internamente:
+
+- Valida que `catalog_name` existe no DuckDB e que e um catalogo
+  Firebird (`GetCatalogType() == "firebird"`). Caso contrario,
+  levanta `BinderException` com mensagem acionavel.
+- Adquire uma conexao do pool ja existente do catalogo via lease
+  RAII (`FirebirdMetadataLease`), sem expor `conn_info`.
+- Faz uma query unica em `RDB$RELATIONS` para enumerar tabelas e
+  views do usuario (`RDB$SYSTEM_FLAG = 0`,
+  `RDB$RELATION_TYPE IN (NULL, 0, 1)`), com sub-query
+  `RDB$INDICES`/`RDB$RELATION_CONSTRAINTS`/`RDB$INDEX_SEGMENTS` para
+  detectar PK simples. PK composta retorna `NULL` (CASE COUNT(*) =
+  1) e nao gera testes enganosos.
+- Para cada tabela, chama `LoadTableSchema` que ja conhece
+  `RDB$RELATION_FIELDS` e o mapeamento `RDB$FIELD_TYPE -> SQL_* ->
+  LogicalType`.
+- Compoe YAML deterministico: tabelas em ordem alfabetica por
+  `RDB$RELATION_NAME`, colunas em ordem por `RDB$FIELD_POSITION`.
+  Strings passam por `YamlQuote` (escape de `\\`, `\"`, `\n`,
+  `\r`, `\t`, controles via `\xNN`); o nome da tabela nunca vira
+  connection string.
+
+#### Para que serve
+
+- Bootstrap rapido de modelagem dbt a partir de uma base legada
+  Firebird: rodar uma vez, salvar `sources.yml`, copiar para o
+  projeto dbt-duckdb.
+- Padronizar nomes de coluna e tipos esperados por
+  `dbt deps`/`dbt run` sem digitar tabela por tabela.
+- Habilitar testes dbt automaticos (`not_null`, `unique`) em
+  chaves primarias detectadas.
+
+#### Saida do YAML
+
+Estrutura entregue:
+
+```yaml
+version: 2
+
+sources:
+  - name: "fb"
+    schema: "main"
+    description: ""
+    tables:
+      - name: "EMPLOYEE"
+        description: ""
+        columns:
+          - name: "EMP_ID"
+            data_type: "INTEGER"
+            description: ""
+            tests:
+              - not_null
+              - unique
+          - name: "EMP_NAME"
+            data_type: "VARCHAR"
+            description: ""
+          # ...
+      - name: "TPK_COMPOSITE"
+        description: ""
+        columns:
+          - name: "A"
+            data_type: "INTEGER"
+            description: ""
+          - name: "B"
+            data_type: "INTEGER"
+            description: ""
+          - name: "LABEL"
+            data_type: "VARCHAR"
+            description: ""
+```
+
+`data_type` segue o `LogicalType::ToString()` do DuckDB
+(`INTEGER`, `DECIMAL(18,2)`, `DATE`, `BOOLEAN`, `VARCHAR`, `BLOB`,
+etc) - bate com o que o usuario ve ao consultar via `ATTACH`.
+
+#### Uso no dia a dia
+
+```sql
+ATTACH 'firebird://...' AS fb (TYPE firebird);
+COPY (SELECT yaml FROM firebird_generate_dbt_sources('fb'))
+  TO 'sources.yml' (FORMAT csv, HEADER false, QUOTE '');
+DETACH fb;
+```
+
+#### Erros
+
+- `catalog_name` ausente / NULL:
+  `Binder Error: firebird_generate_dbt_sources(catalog_name VARCHAR):
+  catalog_name is required (the alias from ATTACH '...' AS <alias>
+  (TYPE firebird)).`
+- Catalogo nao anexado:
+  `Binder Error: firebird_generate_dbt_sources: no attached catalog
+  named '...'. ATTACH first: ATTACH '<path-or-uri>' AS ... (TYPE
+  firebird);`
+- Catalogo anexado mas nao Firebird (ex.: DuckDB nativo):
+  `Binder Error: firebird_generate_dbt_sources: catalog '...' is
+  not a Firebird ATTACH (GetCatalogType() = '...'). Use the alias
+  of an ATTACH created with (TYPE firebird).`
+
+#### Limitacoes atuais
+
+- Descricoes (`description: ""`): `RDB$DESCRIPTION` (BLOB SUB_TYPE
+  1) de tabelas e colunas nao e lido nesta versao - sempre vazio.
+  Captura via stream BLOB fica para uma fase futura.
+- Sem named params (`source_name`, `target_schema`,
+  `include_views`). O `name` do source bate com o `catalog_name`
+  passado; `schema` e sempre `"main"`; views entram no YAML como
+  tabelas (sem `tests`, ja que nao tem PK).
+- PK composta nao gera bloco `tests`. Decisao deliberada: marcar
+  qualquer coluna individual com `unique` seria semanticamente
+  errado para uma PK multi-segmento. Se o usuario precisar do
+  teste, deve adicionar manualmente um `tests:` customizado no
+  arquivo gerado ou usar `dbt-utils.unique_combination_of_columns`.
+
 ## Nivel 4 - Observabilidade
 
 ### `firebird_last_query()`

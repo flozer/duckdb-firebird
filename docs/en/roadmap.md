@@ -504,6 +504,73 @@ Once the v0.5.6 tag is published, `duckdb/community-extensions`
 PR #1980 should be re-pointed at `repo.ref: v0.5.6` and taken
 out of draft.
 
+### 16. dbt sources generator — **IMPLEMENTED**
+
+`firebird_generate_dbt_sources(catalog_name VARCHAR)` walks an
+attached Firebird catalog's `RDB$RELATIONS` / `RDB$RELATION_FIELDS`
+and emits a deterministic dbt `sources.yml` as a single VARCHAR
+row.
+
+Surface:
+
+- Argument is the alias of an existing `ATTACH ... (TYPE
+  firebird)`; the direct `firebird_scan(...)` path is out of scope
+  by design.
+- Output is one row, one column `yaml VARCHAR`. Pipe through
+  `COPY (SELECT yaml FROM ...) TO 'sources.yml'` to write to disk.
+- The function name, schema (always `"main"`), and connection
+  alias appear in the YAML; the Firebird connection string and
+  credentials never do.
+
+Behaviour:
+
+- Catalog validation raises `BinderException` with the function
+  name when `catalog_name` is NULL, names a non-attached catalog,
+  or names an attached catalog whose `GetCatalogType()` is not
+  `"firebird"`.
+- Metadata is read once per call through a `FirebirdMetadataLease`
+  RAII helper friended on `FirebirdCatalog`, so the catalog's
+  pool is reused without exposing `conn_info_`.
+- Tables are sorted by `RDB$RELATION_NAME`; columns by
+  `RDB$FIELD_POSITION`. Views (`RDB$RELATION_TYPE = 1`) appear as
+  tables with no `tests:` block.
+- `data_type` is the DuckDB `LogicalType::ToString()` mapping of
+  the column - the same string a user sees when querying through
+  `ATTACH`.
+- Single-column primary keys emit `tests: [not_null, unique]`.
+  Composite primary keys deliberately emit no `tests:` block (a
+  `CASE WHEN COUNT(*) = 1` gate on the index segments returns
+  NULL); marking any single member of a composite key as `unique`
+  would be semantically wrong. Users who need multi-column
+  uniqueness should add `dbt-utils.unique_combination_of_columns`
+  by hand.
+- All identifier and free-text strings emitted into the YAML
+  pass through a `YamlQuote` helper (escape of `\\`, `\"`, `\n`,
+  `\r`, `\t`, controls via `\xNN`); regression tests assert that
+  the connection-string sentinel literals `SYSDBA`, `masterkey`,
+  `firebird://`, `.fdb`, `password` never appear in the output.
+
+**Acceptance**: `test/sql/firebird_dbt_sources.test` covers the
+21 contracts above (argument validation, YAML header, source +
+schema, table ordering, column ordering, `data_type` for INTEGER /
+DECIMAL(18,2) / DATE / BOOLEAN, exactly three `- not_null`
+markers, composite-PK block carries no tests, view block carries
+no tests, no-leak sentinel). A `TPK_COMPOSITE` table is added to
+both `scripts/setup_test_firebird.sh` and
+`scripts/smoke_fixture.sql`, and `test/sql/firebird_metadata.test`
+is updated in lockstep (4 → 5 tables, 16 → 19 columns) so the
+existing fixture-count assertions stay green. Public manual entry:
+`docs/pt/function_manual.md`, Nível 3 - Banco anexado.
+
+Out of scope for this milestone (tracked for later):
+
+- Named parameters (`source_name`, `target_schema`,
+  `include_views`).
+- `RDB$DESCRIPTION` BLOB capture for table and column comments
+  (currently emitted as `""`).
+- Composite-PK `tests:` block - deliberately empty for the
+  reason above.
+
 ---
 
 ## Platform — separation of concerns
