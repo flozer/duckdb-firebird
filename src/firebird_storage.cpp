@@ -322,10 +322,11 @@ private:
 class FirebirdCatalog final : public Catalog {
 public:
     FirebirdCatalog(AttachedDatabase &db, FirebirdConnectionInfo conn_info,
-                    NoneEncoding none_encoding)
+                    NoneEncoding none_encoding,
+                    FirebirdConnectionPoolConfig pool_config = {})
         : Catalog(db),
           conn_info_(std::move(conn_info)),
-          pool_(std::make_shared<FirebirdConnectionPool>(conn_info_)),
+          pool_(std::make_shared<FirebirdConnectionPool>(conn_info_, pool_config)),
           none_encoding_(none_encoding) {}
 
     string GetCatalogType() override { return "firebird"; }
@@ -499,16 +500,59 @@ static FirebirdConnectionInfo BuildConnectionInfo(const std::string &path,
     return conn;
 }
 
+// Read a single SET firebird_pool_* option from the current
+// ClientContext. Missing or NULL -> use the supplied default. This
+// keeps the StorageExtension safe to load even if a future host
+// loader skipped the AddExtensionOption registrations.
+static int64_t ReadPoolInt64Setting(ClientContext &ctx,
+                                     const std::string &key,
+                                     int64_t default_value) {
+    Value v;
+    if (!ctx.TryGetCurrentSetting(key, v)) return default_value;
+    if (v.IsNull()) return default_value;
+    return v.GetValue<int64_t>();
+}
+
+static bool ReadPoolBoolSetting(ClientContext &ctx,
+                                 const std::string &key,
+                                 bool default_value) {
+    Value v;
+    if (!ctx.TryGetCurrentSetting(key, v)) return default_value;
+    if (v.IsNull()) return default_value;
+    return v.GetValue<bool>();
+}
+
+static FirebirdConnectionPoolConfig BuildPoolConfig(ClientContext &ctx) {
+    FirebirdConnectionPoolConfig cfg;
+    cfg.enabled         = ReadPoolBoolSetting(ctx,  "firebird_pool_enabled",         cfg.enabled);
+    cfg.max_size        = ReadPoolInt64Setting(ctx, "firebird_pool_max_size",        cfg.max_size);
+    cfg.idle_timeout_ms = ReadPoolInt64Setting(ctx, "firebird_pool_idle_timeout_ms", cfg.idle_timeout_ms);
+
+    if (cfg.max_size < 0) {
+        throw BinderException(
+            "firebird_pool_max_size must be >= 0 (0 = unlimited), got %lld",
+            static_cast<long long>(cfg.max_size));
+    }
+    if (cfg.idle_timeout_ms < 0) {
+        throw BinderException(
+            "firebird_pool_idle_timeout_ms must be >= 0 (0 = no expiry), got %lld",
+            static_cast<long long>(cfg.idle_timeout_ms));
+    }
+    return cfg;
+}
+
 static unique_ptr<Catalog>
 FirebirdAttach(optional_ptr<StorageExtensionInfo> /*info*/,
-               ClientContext & /*context*/,
+               ClientContext &context,
                AttachedDatabase &db,
                const string & /*name*/,
                AttachInfo &attach_info,
                AttachOptions & /*options*/) {
     NoneEncoding none_encoding;
     auto conn = BuildConnectionInfo(attach_info.path, attach_info, none_encoding);
-    return make_uniq<FirebirdCatalog>(db, std::move(conn), none_encoding);
+    auto pool_config = BuildPoolConfig(context);
+    return make_uniq<FirebirdCatalog>(db, std::move(conn), none_encoding,
+                                       pool_config);
 }
 
 static unique_ptr<TransactionManager>

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -165,31 +167,84 @@ private:
                               const std::string &sql_for_error);
 };
 
+// Tunable knobs for the connection pool. All defaults reproduce the
+// pre-Phase-2 behaviour (unlimited LIFO cache, no expiry, enabled).
+//
+// max_size limits the idle queue, not the number of active leases - a
+// caller can still hand out as many connections as it wants; the cap
+// only kicks in on Release(), where surplus connections are dropped
+// instead of being parked.
+//
+// idle_timeout_ms limits how long a released connection may sit in the
+// idle queue. The clock starts at Release(), not at connection creation.
+struct FirebirdConnectionPoolConfig {
+    bool    enabled         = true;
+    int64_t max_size        = 0;   // 0 = unlimited
+    int64_t idle_timeout_ms = 0;   // 0 = no expiry
+};
+
+// Result of FirebirdConnectionPool::AcquireWithInfo(). Carries the
+// connection plus whether it came from the idle queue (true) or was
+// freshly constructed (false). The legacy Acquire() wrapper drops the
+// flag for callers that don't care.
+struct FirebirdConnectionLease {
+    std::unique_ptr<FirebirdConnection> conn;
+    bool reused = false;
+};
+
 // Cache of idle FirebirdConnection objects. Cheap to skip when there's
 // only one query per ATTACH (each LocalState would open + tear down a
 // fresh connection anyway), but saves the ~10-100 ms isc_attach_database
 // cost on interactive sessions that hit the same database many times.
 class FirebirdConnectionPool {
 public:
-    explicit FirebirdConnectionPool(FirebirdConnectionInfo info)
-        : info_(std::move(info)) {}
+    explicit FirebirdConnectionPool(FirebirdConnectionInfo info,
+                                    FirebirdConnectionPoolConfig config = {})
+        : info_(std::move(info)), config_(config) {}
 
     // Acquire returns either a pooled idle connection (LIFO — warmest
-    // first) or a newly constructed one. Never blocks.
+    // first) or a newly constructed one. Never blocks. Preserved for
+    // legacy callers that don't need the reused flag.
     std::unique_ptr<FirebirdConnection> Acquire();
+
+    // Acquire variant that exposes whether the returned connection was
+    // pulled from the idle queue. Phase 2 wires this into the
+    // observability surface (`connection_id`, `connection_reused`).
+    FirebirdConnectionLease AcquireWithInfo();
 
     // Return a connection to the pool. The connection's read-only
     // transaction may still be open — it'll be re-used as-is by the
-    // next acquirer.
+    // next acquirer. When the pool is disabled, or the idle queue is
+    // already at max_size, the connection is destroyed instead of
+    // parked.
     void Release(std::unique_ptr<FirebirdConnection> conn);
 
     // Pool size hint (mostly for testing / introspection).
     size_t IdleCount();
 
+    // Lifetime counters. Useful for tests and for the future
+    // pool-introspection surface. Process-relative; no decay.
+    int64_t TotalCreated()   const { return total_created_.load(std::memory_order_relaxed); }
+    int64_t TotalReused()    const { return total_reused_.load(std::memory_order_relaxed); }
+    int64_t TotalDiscarded() const { return total_discarded_.load(std::memory_order_relaxed); }
+
+    // Current config snapshot (immutable after construction in Chunk A;
+    // settings-driven mutation lands in Chunk B).
+    const FirebirdConnectionPoolConfig &Config() const { return config_; }
+
 private:
-    FirebirdConnectionInfo info_;
-    std::mutex lock_;
-    std::vector<std::unique_ptr<FirebirdConnection>> idle_;
+    struct IdleEntry {
+        std::unique_ptr<FirebirdConnection> conn;
+        std::chrono::steady_clock::time_point released_at;
+    };
+
+    FirebirdConnectionInfo       info_;
+    FirebirdConnectionPoolConfig config_;
+    std::mutex                   lock_;
+    std::vector<IdleEntry>       idle_;
+    std::atomic<int64_t>         total_created_{0};
+    std::atomic<int64_t>         total_reused_{0};
+    std::atomic<int64_t>         total_discarded_{0};
 };
 
 // Owns one isc_db_handle + a long-running read-only transaction.
@@ -204,6 +259,11 @@ public:
     isc_db_handle &db() { return db_; }
     isc_tr_handle &tr() { return tr_; }
     const FirebirdConnectionInfo &info() const { return info_; }
+
+    // Process-wide monotonic id used for observability. It is not a
+    // Firebird attachment id and is only meant to correlate
+    // extension-side pool reuse.
+    int64_t Id() const { return id_; }
 
     // Convenience: prepare+execute a SELECT and return an open cursor.
     std::unique_ptr<FirebirdStatement> OpenCursor(const std::string &sql);
@@ -220,6 +280,7 @@ private:
     FirebirdConnectionInfo info_;
     isc_db_handle db_ = 0;
     isc_tr_handle tr_ = 0;
+    int64_t id_ = 0;
 
     void Attach();
     void StartReadOnlyTransaction();
