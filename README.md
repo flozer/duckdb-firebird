@@ -13,8 +13,9 @@
   </p>
   <p>
     <a href="docs/en/usage_guide.md">Usage guide</a> |
-    <a href="docs/pt/function_manual.md">Function manual</a> |
-    <a href="docs/en/roadmap.md">Roadmap</a> |
+    <a href="docs/en/function_manual.md">Function manual</a> |
+    <a href="docs/en/roadmap.md">Roadmap</a>
+    (<a href="docs/pt/roadmap.md">PT</a>) |
     <a href="CONTRIBUTING.md">Contributing</a> |
     <a href="CODE_OF_CONDUCT.md">Code of conduct</a> |
     <a href="SECURITY.md">Security</a>
@@ -125,7 +126,8 @@ For a longer, analyst-oriented walkthrough, including materialized tables,
 incremental refresh, Parquet partitioning, MinIO, and Power BI/GizmoSQL usage,
 see [docs/en/usage_guide.md](docs/en/usage_guide.md). For a public how-to of
 each SQL function and option, see
-[docs/pt/function_manual.md](docs/pt/function_manual.md).
+[docs/en/function_manual.md](docs/en/function_manual.md)
+(PT: [docs/pt/function_manual.md](docs/pt/function_manual.md)).
 
 ## Connection Strings
 
@@ -309,14 +311,19 @@ See [docs/en/guide_linux.md](docs/en/guide_linux.md) and
 Docs are split by language under `docs/en/` (English, primary) and
 `docs/pt/` (Portuguese translations).
 
+- [docs/DOCS_PARITY.md](docs/DOCS_PARITY.md) - PT/EN documentation parity map.
 - [docs/en/usage_guide.md](docs/en/usage_guide.md) - analyst guide: live scans,
   `ATTACH`, views, materialization, incremental refresh, Parquet, MinIO,
   dbt/GizmoSQL/Power BI patterns, and troubleshooting.
   (PT: [docs/pt/usage_guide.md](docs/pt/usage_guide.md))
+- [docs/en/function_manual.md](docs/en/function_manual.md) - public function and
+  setting reference.
+  (PT: [docs/pt/function_manual.md](docs/pt/function_manual.md))
 - [docs/en/guide_windows.md](docs/en/guide_windows.md) - Windows build and smoke
   tests.
 - [docs/en/guide_linux.md](docs/en/guide_linux.md) - Linux build and smoke tests.
 - [docs/en/roadmap.md](docs/en/roadmap.md) - performance roadmap and deferred work.
+  (PT: [docs/pt/roadmap.md](docs/pt/roadmap.md))
 - [docs/en/test_report.md](docs/en/test_report.md) - release verification notes.
 - [docs/en/architecture.md](docs/en/architecture.md) - implementation architecture.
 
