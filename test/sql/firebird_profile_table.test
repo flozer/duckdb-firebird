@@ -1,0 +1,205 @@
+# name: test/sql/firebird_profile_table.test
+# description: Phase 4 firebird_profile_table - argument/qualified-name
+#              validation, object type, PK detection, index listing,
+#              watermark / filter heuristics, full-scan risk, partition
+#              recommendation, warnings, no-leak.
+# group: [firebird]
+#
+# Requires the EMPLOYEE / FILE_STORAGE / TPK_COMPOSITE / V_ACTIVE_EMP
+# fixtures from scripts/setup_test_firebird.sh.
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+require-env ISC_PASSWORD
+
+# ---------------------------------------------------------------------------
+#  Argument + qualified-name validation. Errors must mention the function
+#  name so the caller doesn't have to guess what they're looking at.
+# ---------------------------------------------------------------------------
+
+statement error
+SELECT * FROM firebird_profile_table(NULL);
+----
+firebird_profile_table(qualified_name VARCHAR): qualified_name is required
+
+statement error
+SELECT * FROM firebird_profile_table('fb.main.EMPLOYEE.EXTRA');
+----
+firebird_profile_table(qualified_name VARCHAR): expected
+
+statement error
+SELECT * FROM firebird_profile_table('fb.dbo.EMPLOYEE');
+----
+firebird_profile_table: schema 'dbo' is not exposed
+
+statement error
+SELECT * FROM firebird_profile_table('nope_does_not_exist_xyz.main.EMPLOYEE');
+----
+firebird_generate_dbt_sources: no attached catalog named 'nope_does_not_exist_xyz'
+
+statement error
+SELECT * FROM firebird_profile_table('memory.main.EMPLOYEE');
+----
+catalog 'memory' is not a Firebird ATTACH
+
+# ---------------------------------------------------------------------------
+#  Happy-path: ATTACH the fixture and snapshot each profile into a local
+#  DuckDB table so every assertion below can scan the same row.
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird);
+
+statement ok
+CREATE OR REPLACE TABLE t_prof_emp AS
+SELECT * FROM firebird_profile_table('fb.main.EMPLOYEE');
+
+# Exactly one row.
+
+query I
+SELECT COUNT(*) FROM t_prof_emp;
+----
+1
+
+# Object type + PK detection for a single-column INTEGER PK table.
+
+query TTT
+SELECT object_type, has_primary_key, primary_key_columns
+FROM t_prof_emp;
+----
+TABLE	true	[EMP_ID]
+
+# The PK index shows up in the index list, flagged PK and UNIQUE.
+
+query T
+SELECT list_aggr(indexes, 'string_agg', '|') LIKE '%EMP_ID%PK%'
+FROM t_prof_emp;
+----
+true
+
+# Expression / computed index (EMP_UPPER_NAME_IDX COMPUTED BY (UPPER(EMP_NAME)))
+# carries no RDB$INDEX_SEGMENTS rows. It must render as "(expression)", never
+# with empty parentheses, and must not leak the expression BLR/text.
+
+query T
+SELECT list_aggr(indexes, 'string_agg', '|') LIKE '%EMP_UPPER_NAME_IDX (expression)%'
+FROM t_prof_emp;
+----
+true
+
+query T
+SELECT list_aggr(indexes, 'string_agg', '|') NOT LIKE '%()%'
+FROM t_prof_emp;
+----
+true
+
+# Watermark candidates: INTEGER + DATE columns qualify (EMP_ID, HIRE_DATE).
+# DECIMAL / VARCHAR / BOOLEAN / BLOB do not.
+
+query T
+SELECT list_contains(watermark_candidates, 'EMP_ID')
+   AND list_contains(watermark_candidates, 'HIRE_DATE')
+   AND NOT list_contains(watermark_candidates, 'SALARY')
+   AND NOT list_contains(watermark_candidates, 'EMP_NAME')
+FROM t_prof_emp;
+----
+true
+
+# Filter candidates: EMP_ID is indexed (PK) and numeric -> good filter.
+
+query T
+SELECT list_contains(filter_candidates, 'EMP_ID')
+FROM t_prof_emp;
+----
+true
+
+# Risk + recommended partitions: tiny table (PK span < 10000) -> LOW, serial.
+
+query TI
+SELECT full_scan_risk, recommended_partitions
+FROM t_prof_emp;
+----
+LOW	1
+
+# The qualified-name short form (catalog.table) resolves to the same table.
+
+query T
+SELECT (SELECT object_type FROM firebird_profile_table('fb.EMPLOYEE'))
+     = (SELECT object_type FROM t_prof_emp);
+----
+true
+
+# ---------------------------------------------------------------------------
+#  Composite PK: has_primary_key is true, but the parallel lever needs a
+#  single-column numeric PK, so partitions=1, risk HIGH, with a warning.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE OR REPLACE TABLE t_prof_comp AS
+SELECT * FROM firebird_profile_table('fb.main.TPK_COMPOSITE');
+
+query TTI
+SELECT has_primary_key, full_scan_risk, recommended_partitions
+FROM t_prof_comp;
+----
+true	HIGH	1
+
+query T
+SELECT list_aggr(warnings, 'string_agg', '|') LIKE '%Primary key is composite%'
+FROM t_prof_comp;
+----
+true
+
+# ---------------------------------------------------------------------------
+#  View: object_type VIEW, no PK, no indexes, HIGH risk, serial, with the
+#  heavy-view materialization pointer.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE OR REPLACE TABLE t_prof_view AS
+SELECT * FROM firebird_profile_table('fb.main.V_ACTIVE_EMP');
+
+query TTTI
+SELECT object_type, has_primary_key, full_scan_risk, recommended_partitions
+FROM t_prof_view;
+----
+VIEW	false	HIGH	1
+
+query T
+SELECT len(indexes) = 0 AND len(primary_key_columns) = 0
+FROM t_prof_view;
+----
+true
+
+query T
+SELECT list_aggr(warnings, 'string_agg', '|') LIKE '%VIEW%materializing%'
+FROM t_prof_view;
+----
+true
+
+# ---------------------------------------------------------------------------
+#  No-leak: no profile field may contain the database path, username,
+#  password, or a URI form of the connection string.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT list_aggr(list_concat(
+        [table_name, object_type, full_scan_risk],
+        list_concat(indexes, list_concat(warnings,
+            list_concat(watermark_candidates, filter_candidates)))
+    ), 'string_agg', '|') AS blob
+    FROM t_prof_emp
+)
+WHERE blob LIKE '%SYSDBA%'
+   OR blob LIKE '%masterkey%'
+   OR blob LIKE '%firebird://%'
+   OR blob LIKE '%.fdb%'
+   OR blob LIKE '%password%';
+----
+0
+
+statement ok
+DETACH fb;

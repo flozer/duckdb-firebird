@@ -647,6 +647,174 @@ For an MVP commercial release:
 
 ---
 
+## Milestone v0.6 — Firebird Native Diagnostics
+
+Strategic decision: the next phase is **not** `firebird_materialize()`.
+Materialization leaves the critical path and moves to **v1.x** as an
+optional DX helper, if real users still need a wrapper around the
+DuckDB-native path. DuckDB already owns materialization, local tables,
+Parquet export, and lakehouse handoff well.
+
+**Materialization is DuckDB's strength. Firebird-native diagnostics is
+this extension's differentiator.**
+
+Delivery order for v0.6:
+
+1. `firebird_profile_table()`
+2. Heavy-view diagnostics
+3. Pushdown report / explainability
+4. `firebird_pool_stats()`
+5. DECFLOAT fallback
+6. Conservative aggregate pushdown
+7. Adaptive parallel scan recommendations
+
+### `firebird_profile_table()` analyzer
+
+Status: first factual version implemented on a development branch and
+tested locally; not yet released. See `docs/en/function_manual.md` for the
+delivered behavior and current limitations.
+
+Shape:
+
+```sql
+SELECT *
+FROM firebird_profile_table('fb.main.TABELA');
+```
+
+The analyzer returns (delivered in the first version unless noted):
+
+- Object type: `TABLE` / `VIEW`. (delivered)
+- Whether a primary key exists. (delivered)
+- Primary-key columns. (delivered)
+- Existing indexes. (delivered)
+- Candidate watermark columns. (delivered, by type)
+- Good filter columns. (delivered, indexed + cheap-type)
+- Row estimate, when cheap and safe. (deferred)
+- Full-scan risk. (delivered)
+- Recommended `partitions=N`. (delivered, advisory, from PK range)
+- Required-filter recommendations. (deferred; surfaced as warnings)
+
+Acceptance is diagnostic quality, not query execution speed. The
+function should help users decide whether to scan live, filter harder,
+partition, or materialize through DuckDB/dbt/Parquet.
+
+### Heavy-view diagnostics
+
+Detect and explain:
+
+- View without a primary key.
+- View with joins.
+- View with aggregation.
+- View without a selective filter.
+- Cases where DuckDB/dbt/Parquet materialization is the safer workflow.
+
+The recommendation path is explicit: heavy Firebird views should often
+be materialized by DuckDB, dbt, or Parquet pipelines instead of hidden
+behind an extension-specific materialization wrapper.
+
+### Pushdown report / explainability
+
+Expose what the connector sent to Firebird and what DuckDB still had to
+apply locally. This should build on the existing remote-query telemetry
+instead of creating a disconnected diagnostics surface.
+
+The report should make these decisions visible:
+
+- projected columns
+- pushed filters
+- pushed paging / explicit row limits
+- serial vs. parallel scan
+- partition count
+- predicates or operators not pushed
+- why an operator stayed local when the reason is known
+
+Candidate user surface can be decided during design: a function, an
+observability view, or structured fields in the existing telemetry path.
+The first version should be factual, compact, and testable. It should
+not be a cost-based optimizer, advisor, or planner replacement.
+
+### `firebird_pool_stats()`
+
+Expose pool state after the analyzer lands so the numbers have context:
+
+- configured maximum size
+- current open connections
+- idle connections
+- in-use connections
+- reuse count
+- discard count
+- last error, if tracked safely
+
+This closes the Phase 2 observability debt without making pool metrics
+the lead feature of v0.6.
+
+### DECFLOAT fallback
+
+Resolve the remaining Firebird 4+ gap with a conservative fallback.
+Preferred default remains lossless text unless tests prove a better
+mapping can preserve value and user expectations. Numeric fast paths
+must be opt-in when precision loss is possible.
+
+### Conservative aggregate pushdown
+
+Aggregate pushdown comes after the analyzer and starts deliberately
+small.
+
+Initially allowed:
+
+- `COUNT(*)`
+- `MIN` / `MAX`
+- controlled `SUM`
+- simple `GROUP BY`
+
+Out of scope:
+
+- joins
+- complex `HAVING`
+- calculated expressions
+- `BLOB` / `TEXT`
+- problematic charset `NONE`
+- heavy views
+- uncertain overflow
+
+The analyzer should gate this work: push aggregation only when the
+Firebird object is simple enough and the result semantics are boring.
+
+### Adaptive parallel scan recommendations
+
+Do not start with fully automatic tuning. Automatic parallelism can
+surprise production Firebird systems, especially when server-side
+parallelism is already configured.
+
+First version should be diagnostic/recommendation-only:
+
+- use catalog facts and cheap row estimates when available
+- recommend `partitions=N`
+- warn when parallel scan is risky
+- account for primary keys, indexes, heavy views, and explicit paging
+- document interaction with Firebird 5 `ParallelWorkers`
+
+Only consider automatic adaptation after the recommendation path is
+observable, benchmarked, and boring across Firebird 3/4/5.
+
+### v1.x materialization helper
+
+`firebird_materialize()` is deferred to v1.x, optional, and DX-only. It
+must not replace the recommended DuckDB-native patterns:
+
+```sql
+CREATE OR REPLACE TABLE local_table AS
+SELECT * FROM fb.main.REMOTE_TABLE;
+
+COPY local_table TO 'lake/path'
+  (FORMAT parquet, COMPRESSION zstd);
+```
+
+If added later, it should be a thin convenience wrapper around these
+patterns, not a new storage strategy.
+
+---
+
 ## Release-testing checklist (run before every push to main)
 
 Live, against an anonymized legacy ERP fixture and the EMPLOYEE / FB4_TYPES
