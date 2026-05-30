@@ -564,6 +564,25 @@ por monotonicidade comprovada; `recommended_partitions` deriva da faixa
 `MIN`/`MAX` da PK, nao de contagem de linhas, e e apenas recomendacao. A
 coluna `warnings` carrega essas ressalvas inline.
 
+Para `object_type = VIEW`, a funcao tambem faz uma inspecao rasa e
+conservadora da definicao da view (`RDB$VIEW_SOURCE`) e emite `warnings`
+quando detecta:
+
+- um `JOIN` na definicao;
+- agregacao (`GROUP BY` ou `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`/`LIST`);
+- ausencia de `WHERE` na definicao.
+
+A deteccao e busca de tokens, nao um parser SQL, e o texto da view nunca
+e retornado - apenas os flags de forma alimentam os warnings. Literais de
+string (incluindo aspas duplas escapadas do SQL) e comentarios sao
+apagados antes da busca, entao texto com cara de keyword dentro de um
+literal ou comentario nao gera falso-positivo. O espacamento e colapsado
+antes, entao keywords quebradas por quebra de linha ou tab no texto da
+view (ex.: `GROUP` e `BY` em linhas separadas) ainda sao detectadas. Quando a
+definicao nao pode ser lida, emite o warning `view definition not
+inspected`. Esses avisos apontam para materializar views pesadas via
+DuckDB/dbt/Parquet em vez de varrer repetidamente.
+
 #### Para que serve
 
 - Decidir, antes de um scan, se vale consultar ao vivo, filtrar melhor,
@@ -594,8 +613,11 @@ FROM firebird_profile_table('fb.main.TABENTRADASAIDA');
   paralelizar em producao.
 - Watermark e candidato por tipo, nao por monotonicidade comprovada.
 - Views nao tem PK, indices nem alavanca de particao: risco sempre `HIGH`,
-  serial, com aviso de materializacao. Diagnostico completo de views
-  pesadas fica para o proximo item da Fase 4.
+  serial, com aviso de materializacao. A inspecao de view e rasa (busca de
+  tokens em `RDB$VIEW_SOURCE`): detecta `JOIN`, agregacao e ausencia de
+  `WHERE`, mas nao analisa plano nem profundidade de subconsultas. Join por
+  virgula (sem a palavra `JOIN`) nao e detectado. Quando a fonte nao pode
+  ser lida, emite `view definition not inspected`.
 - Nome qualificado nao suporta identificadores com aspas/pontos embutidos
   nesta versao.
 

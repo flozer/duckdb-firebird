@@ -80,12 +80,65 @@ INSERT INTO FILE_STORAGE VALUES (2, 'empty.dat',    0, NULL);
 INSERT INTO FILE_STORAGE VALUES (3, 'document.bin', 5, CAST(_ASCII'hello'  AS BLOB SUB_TYPE 0));
 COMMIT;
 
+-- Expression / computed index — has NO RDB$INDEX_SEGMENTS rows, so
+-- firebird_profile_table() must render it as "(expression)" rather than
+-- with empty parentheses. Guards the heavy-view / index-formatting path.
+CREATE INDEX EMP_UPPER_NAME_IDX ON EMPLOYEE COMPUTED BY (UPPER(EMP_NAME));
+COMMIT;
+
 -- View fixture — confirms catalog surfaces RDB$RELATION_TYPE=1 alongside
 -- regular tables, and that the binder/scanner can scan a view exactly
 -- like a base table.
 CREATE OR ALTER VIEW V_ACTIVE_EMP (EMP_ID, EMP_NAME, DEPT_NO) AS
     SELECT EMP_ID, EMP_NAME, DEPT_NO
       FROM EMPLOYEE WHERE ACTIVE = TRUE;
+COMMIT;
+
+-- Heavy-view fixtures (Phase 4 #2) — exercise firebird_profile_table()'s
+-- conservative view-shape diagnostics.
+--   V_ALL_EMP        : no WHERE, no join, no aggregate  -> "no WHERE" warning
+--   V_DEPT_HEADCOUNT : self-JOIN + GROUP BY + COUNT/SUM -> join + aggregation
+--                      + no-WHERE warnings
+-- The self-join avoids adding a second base table, keeping the relation
+-- list (and dbt-sources ordering) stable.
+CREATE OR ALTER VIEW V_ALL_EMP (EMP_ID, EMP_NAME) AS
+    SELECT EMP_ID, EMP_NAME FROM EMPLOYEE;
+COMMIT;
+
+CREATE OR ALTER VIEW V_DEPT_HEADCOUNT (DEPT_NO, HEADCOUNT, TOTAL_SALARY) AS
+    SELECT e.DEPT_NO, COUNT(*), SUM(e.SALARY)
+      FROM EMPLOYEE e
+      JOIN EMPLOYEE m ON m.DEPT_NO = e.DEPT_NO
+     GROUP BY e.DEPT_NO;
+COMMIT;
+
+-- Literal-noise view — the SELECT carries keyword-shaped text INSIDE a
+-- string literal, including an SQL-escaped doubled quote (''). The
+-- heavy-view token scan must blank the literal (handling the '') and so
+-- must NOT flag JOIN/aggregation, and must NOT treat the literal WHERE as
+-- a real filter. There is no real WHERE, so the no-WHERE warning is
+-- expected. Guards AnalyzeViewSource() against escaped-quote leakage.
+CREATE OR ALTER VIEW V_LITERAL_NOISE (TXT) AS
+    SELECT 'fake JOIN, GROUP BY and WHERE inside O''Brien literal'
+      FROM EMPLOYEE;
+COMMIT;
+
+-- Whitespace-split keyword view — the stored RDB$VIEW_SOURCE keeps the
+-- author's formatting, so keywords land split across newlines/tabs
+-- (GROUP<newline>BY, an INNER<newline>JOIN, WHERE after a tab). The token
+-- scan must collapse whitespace before matching, otherwise it misses the
+-- join / aggregation / filter shape. This view has a real WHERE, a real
+-- JOIN, and a real GROUP BY, all formatted multi-line.
+CREATE OR ALTER VIEW V_MULTILINE_KW (DEPT_NO, N) AS
+    SELECT e.DEPT_NO,
+           COUNT(*)
+      FROM EMPLOYEE e
+      INNER
+      JOIN EMPLOYEE m
+        ON m.DEPT_NO = e.DEPT_NO
+     WHERE e.ACTIVE = TRUE
+     GROUP
+        BY e.DEPT_NO;
 COMMIT;
 
 -- Composite-PK fixture — guards firebird_generate_dbt_sources() against

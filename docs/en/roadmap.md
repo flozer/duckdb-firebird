@@ -700,17 +700,29 @@ partition, or materialize through DuckDB/dbt/Parquet.
 
 ### Heavy-view diagnostics
 
-Detect and explain:
+Status: first factual version implemented on a development branch and
+tested locally (folded into `firebird_profile_table()` via the `warnings`
+column); not yet released. See `docs/en/function_manual.md`.
 
-- View without a primary key.
-- View with joins.
-- View with aggregation.
-- View without a selective filter.
+Detect and explain (delivered unless noted):
+
+- View without a primary key. (delivered)
+- View with joins. (delivered, token detection of `JOIN`)
+- View with aggregation. (delivered, `GROUP BY` / aggregate functions)
+- View without a selective filter. (delivered, no `WHERE` in definition)
 - Cases where DuckDB/dbt/Parquet materialization is the safer workflow.
+  (delivered, surfaced as warnings)
 
 The recommendation path is explicit: heavy Firebird views should often
 be materialized by DuckDB, dbt, or Parquet pipelines instead of hidden
 behind an extension-specific materialization wrapper.
+
+Delivered as conservative token-level inspection of `RDB$VIEW_SOURCE`, not
+a SQL parser or plan analyzer. The view source text is never returned;
+comma-joins are not detected; unreadable definitions emit an explicit
+`view definition not inspected` warning. No new function or schema change —
+the existing 10-column `firebird_profile_table()` shape and its `warnings`
+column carry the diagnostics.
 
 ### Pushdown report / explainability
 

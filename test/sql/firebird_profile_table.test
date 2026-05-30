@@ -179,6 +179,107 @@ FROM t_prof_view;
 ----
 true
 
+# V_ACTIVE_EMP has a WHERE filter and no join/aggregation. Heavy-view
+# inspection must NOT emit join / aggregation / no-WHERE warnings for it.
+
+query T
+SELECT list_aggr(warnings, 'string_agg', '|') NOT LIKE '%JOIN%'
+   AND list_aggr(warnings, 'string_agg', '|') NOT LIKE '%aggregation%'
+   AND list_aggr(warnings, 'string_agg', '|') NOT LIKE '%no WHERE filter%'
+FROM t_prof_view;
+----
+true
+
+# ---------------------------------------------------------------------------
+#  Heavy-view diagnostics (Phase 4 #2). Conservative, factual flags derived
+#  from the stored view SELECT text — never the text itself.
+#
+#  V_ALL_EMP    : SELECT ... FROM EMPLOYEE  (no WHERE, no join, no aggregate)
+#  V_DEPT_HEADCOUNT : self-JOIN + GROUP BY + COUNT/SUM, no WHERE
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE OR REPLACE TABLE t_prof_vall AS
+SELECT * FROM firebird_profile_table('fb.main.V_ALL_EMP');
+
+# No-WHERE view: emits the no-filter warning, but NOT join/aggregation.
+
+query T
+SELECT list_aggr(warnings, 'string_agg', '|') LIKE '%no WHERE filter%'
+   AND list_aggr(warnings, 'string_agg', '|') NOT LIKE '%JOIN%'
+   AND list_aggr(warnings, 'string_agg', '|') NOT LIKE '%aggregation%'
+FROM t_prof_vall;
+----
+true
+
+statement ok
+CREATE OR REPLACE TABLE t_prof_vhc AS
+SELECT * FROM firebird_profile_table('fb.main.V_DEPT_HEADCOUNT');
+
+# Heavy view: JOIN + aggregation + no-WHERE all flagged.
+
+query T
+SELECT list_aggr(warnings, 'string_agg', '|') LIKE '%contains a JOIN%'
+   AND list_aggr(warnings, 'string_agg', '|') LIKE '%contains aggregation%'
+   AND list_aggr(warnings, 'string_agg', '|') LIKE '%no WHERE filter%'
+FROM t_prof_vhc;
+----
+true
+
+# Still a VIEW with the base materialization pointer + HIGH risk.
+
+query TT
+SELECT object_type, full_scan_risk FROM t_prof_vhc;
+----
+VIEW	HIGH
+
+# The raw view SELECT text must never leak into warnings (no column-list /
+# FROM / table names from the definition).
+
+query T
+SELECT list_aggr(warnings, 'string_agg', '|') NOT LIKE '%TOTAL_SALARY%'
+   AND list_aggr(warnings, 'string_agg', '|') NOT LIKE '%FROM EMPLOYEE%'
+FROM t_prof_vhc;
+----
+true
+
+# Literal-noise view: keyword-shaped text (JOIN / GROUP BY / WHERE) lives
+# inside a single string literal that also contains an SQL-escaped doubled
+# quote (O''Brien). The token scan must blank the literal (correctly
+# consuming the '') and therefore must NOT flag JOIN or aggregation, and
+# must NOT treat the literal WHERE as a real filter. The view has no real
+# WHERE, so the no-WHERE warning IS expected.
+
+statement ok
+CREATE OR REPLACE TABLE t_prof_lit AS
+SELECT * FROM firebird_profile_table('fb.main.V_LITERAL_NOISE');
+
+query T
+SELECT list_aggr(warnings, 'string_agg', '|') NOT LIKE '%contains a JOIN%'
+   AND list_aggr(warnings, 'string_agg', '|') NOT LIKE '%contains aggregation%'
+   AND list_aggr(warnings, 'string_agg', '|') LIKE '%no WHERE filter%'
+FROM t_prof_lit;
+----
+true
+
+# Whitespace-split keywords: V_MULTILINE_KW has a real JOIN, GROUP BY and
+# WHERE, but formatted across newlines/tabs (INNER\nJOIN, GROUP\n  BY,
+# WHERE after indentation). The scan must collapse whitespace and still
+# detect join + aggregation. It HAS a real WHERE, so the no-WHERE warning
+# must NOT fire.
+
+statement ok
+CREATE OR REPLACE TABLE t_prof_ml AS
+SELECT * FROM firebird_profile_table('fb.main.V_MULTILINE_KW');
+
+query T
+SELECT list_aggr(warnings, 'string_agg', '|') LIKE '%contains a JOIN%'
+   AND list_aggr(warnings, 'string_agg', '|') LIKE '%contains aggregation%'
+   AND list_aggr(warnings, 'string_agg', '|') NOT LIKE '%no WHERE filter%'
+FROM t_prof_ml;
+----
+true
+
 # ---------------------------------------------------------------------------
 #  No-leak: no profile field may contain the database path, username,
 #  password, or a URI form of the connection string.
