@@ -509,7 +509,95 @@ DETACH fb;
   teste, deve adicionar manualmente um `tests:` customizado no
   arquivo gerado ou usar `dbt-utils.unique_combination_of_columns`.
 
-## Nivel 4 - Observabilidade
+## Nivel 4 - Diagnostico e observabilidade
+
+### `firebird_profile_table(qualified_name)`
+
+#### O que faz e como funciona
+
+Retorna uma unica linha com diagnostico factual de uma relacao Firebird
+acessivel por um catalogo Firebird ja anexado via `ATTACH ... (TYPE
+firebird)`. O argumento e um nome qualificado no formato
+`catalog.schema.table`; a parte de schema so e aceita como `main` (o
+caminho ATTACH expoe exatamente um schema) e pode ser omitida.
+
+```sql
+ATTACH 'C:/dados/empresa.fdb' AS fb
+(TYPE firebird, user 'SYSDBA', password 'masterkey');
+
+SELECT *
+FROM firebird_profile_table('fb.main.CLIENTES');
+-- forma curta equivalente:
+SELECT *
+FROM firebird_profile_table('fb.CLIENTES');
+```
+
+Colunas de saida:
+
+- `table_name`
+- `object_type`: `TABLE` ou `VIEW`.
+- `has_primary_key`: booleano.
+- `primary_key_columns`: lista de colunas da PK.
+- `indexes`: lista de descricoes `NOME (COL, ...) [UNIQUE] [PK]`.
+- `watermark_candidates`: colunas cujo tipo as torna candidatas plausiveis
+  a watermark (familia inteira e date/timestamp).
+- `filter_candidates`: colunas indexadas cujo tipo recebe pushdown barato.
+- `full_scan_risk`: `LOW`, `MEDIUM` ou `HIGH`.
+- `recommended_partitions`: valor `partitions=N` apenas como recomendacao.
+- `warnings`: lista de ressalvas explicitas.
+
+Como funciona internamente:
+
+- Valida que `catalog_name` existe e e um catalogo Firebird; senao,
+  levanta `BinderException` acionavel (mesma checagem usada por
+  `firebird_generate_dbt_sources`).
+- Adquire conexao do pool do catalogo via lease RAII
+  (`FirebirdMetadataLease`), sem expor `conn_info`.
+- Le apenas tabelas de sistema do Firebird (`RDB$RELATIONS`,
+  `RDB$RELATION_FIELDS`/`RDB$FIELDS`, `RDB$INDICES`,
+  `RDB$INDEX_SEGMENTS`, `RDB$RELATION_CONSTRAINTS`) mais um probe
+  best-effort de `MIN`/`MAX` da PK. Nunca le linhas de negocio.
+
+Este e um diagnostico factual, nao um advisor de custo. As heuristicas
+sao simples e explicitas: candidato a watermark e julgado pelo tipo, nao
+por monotonicidade comprovada; `recommended_partitions` deriva da faixa
+`MIN`/`MAX` da PK, nao de contagem de linhas, e e apenas recomendacao. A
+coluna `warnings` carrega essas ressalvas inline.
+
+#### Para que serve
+
+- Decidir, antes de um scan, se vale consultar ao vivo, filtrar melhor,
+  particionar ou materializar via DuckDB/dbt/Parquet.
+- Descobrir rapidamente PK, indices, e boas colunas para filtro/watermark.
+- Entender o risco de full scan sem precisar ler dados de negocio.
+
+#### Uso no dia a dia
+
+Perfilar uma tabela:
+
+```sql
+SELECT object_type, has_primary_key, recommended_partitions, full_scan_risk
+FROM firebird_profile_table('fb.main.CLIENTES');
+```
+
+Ver candidatas a watermark e ressalvas:
+
+```sql
+SELECT watermark_candidates, warnings
+FROM firebird_profile_table('fb.main.TABENTRADASAIDA');
+```
+
+#### Limitacoes atuais
+
+- Sem estimativa de linhas: `recommended_partitions` usa a faixa
+  `MIN`/`MAX` da PK, nao contagem real. Validar contra o servidor antes de
+  paralelizar em producao.
+- Watermark e candidato por tipo, nao por monotonicidade comprovada.
+- Views nao tem PK, indices nem alavanca de particao: risco sempre `HIGH`,
+  serial, com aviso de materializacao. Diagnostico completo de views
+  pesadas fica para o proximo item da Fase 4.
+- Nome qualificado nao suporta identificadores com aspas/pontos embutidos
+  nesta versao.
 
 ### `firebird_last_query()`
 
