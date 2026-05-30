@@ -148,6 +148,25 @@ monotonicity; `recommended_partitions` is derived from the primary-key
 column carries those caveats inline. Use it to decide whether to scan live,
 filter harder, partition, or materialize through DuckDB/dbt/Parquet.
 
+For `object_type = VIEW`, the function additionally performs a shallow,
+conservative inspection of the stored view definition
+(`RDB$VIEW_SOURCE`) and emits `warnings` when it detects:
+
+- a `JOIN` in the definition,
+- aggregation (`GROUP BY` or `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`/`LIST`),
+- no `WHERE` filter in the definition.
+
+The detection is token-level pattern matching, not a SQL parser, and the
+view source text itself is never returned — only the shape flags drive the
+warnings. String literals (including SQL-escaped doubled quotes) and SQL
+comments are blanked before matching, so keyword-shaped text inside a
+literal or comment does not produce false positives. Whitespace is
+collapsed first, so keywords split across newlines or tabs in the stored
+view text (e.g. `GROUP` and `BY` on separate lines) are still detected. When the definition cannot be read, a `view definition not
+inspected` warning is emitted instead. These warnings point toward
+materializing heavy views through DuckDB/dbt/Parquet rather than scanning
+them repeatedly.
+
 The diagnostic reads only the Firebird system tables (`RDB$*`) plus a
 best-effort primary-key `MIN`/`MAX` probe; it never reads business rows and
 never returns the connection string or credentials.

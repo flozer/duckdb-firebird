@@ -159,6 +159,169 @@ static bool LookupObjectType(FirebirdConnection &conn,
     return true;
 }
 
+// Heavy-view analysis result. All best-effort: when the view source can't
+// be read safely, `inspected` stays false and the caller emits an explicit
+// "definition not inspected" warning instead of guessing.
+struct ViewAnalysis {
+    bool inspected = false;
+    bool has_join = false;
+    bool has_group_by = false;
+    bool has_aggregate = false;
+    bool has_where = false;
+};
+
+// Reads RDB$RELATIONS.RDB$VIEW_SOURCE (BLOB SUB_TYPE 1, the original view
+// SELECT text) and runs cheap, conservative pattern detection over it. We
+// never expose the source text itself — only boolean shape flags drive the
+// warnings. Detection is intentionally shallow (token search on an
+// upper-cased copy with string/comment noise stripped), NOT a SQL parser:
+// the goal is a factual "this view joins / aggregates / has no filter"
+// signal, not plan-level analysis.
+//
+// Any failure (no source blob, read error, empty text) returns
+// inspected=false so the caller can say so explicitly rather than imply a
+// clean simple view.
+static ViewAnalysis AnalyzeViewSource(FirebirdConnection &conn,
+                                      const std::string &upper_table) {
+    ViewAnalysis va;
+    std::string src;
+    try {
+        auto cur = conn.OpenCursor(
+            "SELECT RDB$VIEW_SOURCE FROM RDB$RELATIONS "
+            " WHERE RDB$RELATION_NAME = " + SqlLiteral(upper_table));
+        if (!cur->Fetch() || cur->IsNull(0)) {
+            return va; // inspected = false
+        }
+        src = cur->ReadBlob(0);
+    } catch (...) {
+        return va; // inspected = false
+    }
+    if (src.empty()) {
+        return va;
+    }
+
+    // Normalize: upper-case, and blank out anything that could carry
+    // keyword-shaped noise — single-quoted string literals, line comments
+    // (-- ...), and block comments (/* ... */) — so a literal like
+    // 'fake JOIN and WHERE' or a commented-out clause can't trip the token
+    // search. We don't need a real tokenizer for this — replacing those
+    // bytes with spaces is enough to keep keyword matching honest.
+    //
+    // SQL escapes a single quote inside a literal by doubling it ('') —
+    // that pair is NOT a close-then-reopen, it's one embedded quote. We
+    // must consume both characters while staying in-string, otherwise a
+    // literal like 'O''Brien JOIN' would be seen as closing after "O",
+    // exposing "Brien JOIN" to the scanner. Same care for the comment
+    // forms (only honored outside a string literal).
+    std::string norm;
+    norm.reserve(src.size());
+    enum { CODE, STR, LINE_COMMENT, BLOCK_COMMENT } state = CODE;
+    for (size_t i = 0; i < src.size(); ++i) {
+        char c = src[i];
+        char n = (i + 1 < src.size()) ? src[i + 1] : '\0';
+        switch (state) {
+        case CODE:
+            if (c == '\'') {
+                state = STR;
+                norm.push_back(' ');
+            } else if (c == '-' && n == '-') {
+                state = LINE_COMMENT;
+                norm.push_back(' ');
+                norm.push_back(' ');
+                ++i; // consume second '-'
+            } else if (c == '/' && n == '*') {
+                state = BLOCK_COMMENT;
+                norm.push_back(' ');
+                norm.push_back(' ');
+                ++i; // consume '*'
+            } else {
+                norm.push_back(static_cast<char>(std::toupper(
+                    static_cast<unsigned char>(c))));
+            }
+            break;
+        case STR:
+            if (c == '\'' && n == '\'') {
+                // Escaped quote: stay in string, blank both bytes.
+                norm.push_back(' ');
+                norm.push_back(' ');
+                ++i; // consume the second quote
+            } else if (c == '\'') {
+                state = CODE; // real closing quote
+                norm.push_back(' ');
+            } else {
+                norm.push_back(' '); // string body — blanked
+            }
+            break;
+        case LINE_COMMENT:
+            if (c == '\n') {
+                state = CODE;
+                norm.push_back('\n');
+            } else {
+                norm.push_back(' ');
+            }
+            break;
+        case BLOCK_COMMENT:
+            if (c == '*' && n == '/') {
+                state = CODE;
+                norm.push_back(' ');
+                norm.push_back(' ');
+                ++i; // consume '/'
+            } else {
+                norm.push_back(' ');
+            }
+            break;
+        }
+    }
+
+    // Collapse every run of whitespace (space, tab, newline, CR, form feed)
+    // into a single space. Stored RDB$VIEW_SOURCE keeps the author's
+    // original formatting, so keywords can be split by newlines/tabs
+    // ("GROUP\nBY", "WHERE\t", "INNER\n  JOIN"). Without this, the
+    // single-space token search below would miss them. After collapsing,
+    // every keyword boundary is exactly one space.
+    std::string flat;
+    flat.reserve(norm.size());
+    bool prev_ws = false;
+    for (char c : norm) {
+        const bool ws = (c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+                         c == '\f' || c == '\v');
+        if (ws) {
+            if (!prev_ws) {
+                flat.push_back(' ');
+            }
+            prev_ws = true;
+        } else {
+            flat.push_back(c);
+            prev_ws = false;
+        }
+    }
+
+    // Pad with spaces so word-boundary checks at the ends are uniform.
+    std::string hay = " " + flat + " ";
+
+    auto contains = [&](const std::string &needle) {
+        return hay.find(needle) != std::string::npos;
+    };
+
+    va.inspected = true;
+    // JOIN in any spelling (INNER/LEFT/RIGHT/FULL/CROSS JOIN all contain
+    // "JOIN"; a comma-join is not detected here — conservative, we only
+    // flag the explicit keyword).
+    va.has_join = contains(" JOIN ");
+    va.has_group_by = contains(" GROUP BY ");
+    va.has_where = contains(" WHERE ");
+    // Common aggregate calls. The "(" guards against matching a column
+    // named e.g. SUMMARY or MAXVALUE. Both "FUNC(" and "FUNC (" spellings
+    // are checked since whitespace between the name and "(" is legal SQL.
+    va.has_aggregate = contains("COUNT(") || contains("SUM(") ||
+                       contains("AVG(") || contains("MIN(") ||
+                       contains("MAX(") || contains("LIST(") ||
+                       contains("COUNT (") || contains("SUM (") ||
+                       contains("AVG (") || contains("MIN (") ||
+                       contains("MAX (") || contains("LIST (");
+    return va;
+}
+
 // Reads every index on the relation, with its segment columns, uniqueness,
 // and whether it backs the PRIMARY KEY constraint. Best-effort: a failed
 // metadata query leaves the list empty rather than aborting the profile.
@@ -382,6 +545,38 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
             "Object is a VIEW: no primary key, indexes, or partition lever. "
             "A scan reads the full view definition. Consider materializing "
             "through DuckDB/dbt/Parquet for repeated analytics.");
+
+        // Heavy-view diagnostics (Phase 4 #2). Shallow, conservative
+        // inspection of the stored view SELECT text — never the text
+        // itself, only shape flags. When the source can't be read we say
+        // so explicitly rather than imply a simple view.
+        ViewAnalysis va = AnalyzeViewSource(conn, upper);
+        if (!va.inspected) {
+            p.warnings.push_back(
+                "View definition not inspected (RDB$VIEW_SOURCE unavailable "
+                "or unreadable): join/aggregation/filter shape is unknown. "
+                "Treat as potentially heavy.");
+        } else {
+            if (va.has_join) {
+                p.warnings.push_back(
+                    "View contains a JOIN: a scan may materialize a join "
+                    "server-side on every read. Prefer materializing through "
+                    "DuckDB/dbt/Parquet for repeated analytics.");
+            }
+            if (va.has_group_by || va.has_aggregate) {
+                p.warnings.push_back(
+                    "View contains aggregation (GROUP BY or aggregate "
+                    "functions): each scan recomputes the aggregate "
+                    "server-side. Materialize the result if queried "
+                    "repeatedly.");
+            }
+            if (!va.has_where) {
+                p.warnings.push_back(
+                    "View has no WHERE filter in its definition: a scan reads "
+                    "the full underlying data set. Push a selective filter or "
+                    "materialize.");
+            }
+        }
     } else if (pk) {
         // Numeric single-column PK with a real range — the partition
         // heuristic is the same shape the scanner's auto path uses: cap at

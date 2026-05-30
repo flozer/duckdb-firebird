@@ -8,10 +8,12 @@
 # surface will fail here.
 #
 # Requires the EMPLOYEE / FILE_STORAGE / TQUOTES / V_ACTIVE_EMP /
-# TPK_COMPOSITE fixtures already loaded into `${FIREBIRD_TEST_DB}`
-# (the same set the existing firebird_attach.test relies on, plus
-# TQUOTES from the bind-params suite and TPK_COMPOSITE from the
-# dbt-sources suite).
+# V_ALL_EMP / V_DEPT_HEADCOUNT / V_LITERAL_NOISE / TPK_COMPOSITE fixtures
+# already loaded into `${FIREBIRD_TEST_DB}` (the same set the existing
+# firebird_attach.test relies on, plus TQUOTES from the bind-params
+# suite, TPK_COMPOSITE from the dbt-sources suite, and the heavy-view
+# fixtures V_ALL_EMP / V_DEPT_HEADCOUNT / V_LITERAL_NOISE /
+# V_MULTILINE_KW from the profile-table suite).
 
 require firebird
 
@@ -36,6 +38,10 @@ FILE_STORAGE
 TPK_COMPOSITE
 TQUOTES
 V_ACTIVE_EMP
+V_ALL_EMP
+V_DEPT_HEADCOUNT
+V_LITERAL_NOISE
+V_MULTILINE_KW
 
 # --- DESCRIBE fb.main.EMPLOYEE -------------------------------------
 #
@@ -82,6 +88,10 @@ fb	main	FILE_STORAGE	BASE TABLE
 fb	main	TPK_COMPOSITE	BASE TABLE
 fb	main	TQUOTES	BASE TABLE
 fb	main	V_ACTIVE_EMP	BASE TABLE
+fb	main	V_ALL_EMP	BASE TABLE
+fb	main	V_DEPT_HEADCOUNT	BASE TABLE
+fb	main	V_LITERAL_NOISE	BASE TABLE
+fb	main	V_MULTILINE_KW	BASE TABLE
 
 # --- information_schema.columns ------------------------------------
 
@@ -111,7 +121,7 @@ query I
 SELECT COUNT(*) FROM information_schema.columns
  WHERE table_catalog = 'fb';
 ----
-19
+27
 
 # --- Case-insensitive table lookup --------------------------------
 #

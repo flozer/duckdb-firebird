@@ -119,17 +119,29 @@ particionar ou materializar via DuckDB/dbt/Parquet.
 
 ### Diagnostico de views pesadas
 
-Detectar e explicar:
+Status: primeira versao factual implementada em branch de desenvolvimento
+e testada localmente (incorporada ao `firebird_profile_table()` via coluna
+`warnings`); ainda nao publicada. Ver `docs/pt/function_manual.md`.
 
-- view sem primary key
-- view com joins
-- view com agregacao
-- view sem filtro seletivo
+Detectar e explicar (entregue salvo nota em contrario):
+
+- view sem primary key (entregue)
+- view com joins (entregue, deteccao de token `JOIN`)
+- view com agregacao (entregue, `GROUP BY` / funcoes de agregacao)
+- view sem filtro seletivo (entregue, ausencia de `WHERE` na definicao)
 - casos em que materializar por DuckDB/dbt/Parquet e o fluxo mais seguro
+  (entregue, exposto como warnings)
 
 O caminho recomendado deve ser explicito: views Firebird pesadas muitas
 vezes devem ser materializadas por pipelines DuckDB, dbt ou Parquet, nao
 por um wrapper especifico da extensao.
+
+Entregue como inspecao conservadora de tokens em `RDB$VIEW_SOURCE`, nao um
+parser SQL nem analise de plano. O texto da view nunca e retornado;
+join por virgula nao e detectado; definicoes ilegiveis emitem
+`view definition not inspected`. Sem nova funcao ou mudanca de schema - a
+forma de 10 colunas do `firebird_profile_table()` e sua coluna `warnings`
+carregam o diagnostico.
 
 ### Pushdown report / explicabilidade
 
