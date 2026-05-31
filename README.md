@@ -7,7 +7,7 @@
   </p>
   <p>
     <a href="LICENSE"><img alt="license MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
-    <a href="https://github.com/flozer/duckdb-firebird/releases/tag/v0.5.7"><img alt="release v0.5.7" src="https://img.shields.io/badge/release-v0.5.7-blue.svg"></a>
+    <a href="https://github.com/flozer/duckdb-firebird/releases/tag/v0.6.0"><img alt="release v0.6.0" src="https://img.shields.io/badge/release-v0.6.0-blue.svg"></a>
     <a href="https://github.com/flozer/duckdb-firebird/actions/workflows/build-linux-fb-matrix.yml"><img alt="linux matrix" src="https://github.com/flozer/duckdb-firebird/actions/workflows/build-linux-fb-matrix.yml/badge.svg"></a>
     <a href="https://github.com/duckdb/community-extensions/pull/1980"><img alt="community PR" src="https://img.shields.io/badge/DuckDB%20community-PR%20open-yellow.svg"></a>
   </p>
@@ -217,7 +217,7 @@ DuckDB behavior.
 
 ## Current Status
 
-Release: **v0.5.7**.
+Release: **v0.6.0**.
 
 | Area | Status |
 |---|---|
@@ -236,19 +236,18 @@ Release: **v0.5.7**.
 | LRU prepared statement cache | Deferred benchmark item |
 | Scanner-native Arrow `RecordBatch` output | v1.x candidate |
 
-### v0.6 Firebird-native diagnostics (development branch, not yet released)
+### v0.6 Firebird-native diagnostics
 
-These land on a development branch, tested locally; they are **not** in a
-published release yet. See `docs/en/roadmap.md`.
+Released in **v0.6.0**. See `docs/en/roadmap.md`.
 
 | Area | Status |
 |---|---|
-| `firebird_profile_table('fb.main.T')` factual table/view diagnostics | Implemented locally |
-| Heavy-view shape detection (JOIN / aggregation / no-filter warnings) | Implemented locally |
-| Pushdown explainability in `firebird_last_query` / `firebird_query_log` (`limit_pushed`, `offset_pushed`, `not_pushed_reasons`) | Implemented locally |
-| `firebird_pool_stats('fb')` connection-pool introspection | Implemented locally |
-| `DECFLOAT(16/34)` lossless fallback (VARCHAR via server-side `CAST`) | Implemented locally |
-| Adaptive parallel scan recommendations (refined `recommended_partitions` + caveats in `firebird_profile_table`) | Implemented locally |
+| `firebird_profile_table('fb.main.T')` factual table/view diagnostics | Released in v0.6.0 |
+| Heavy-view shape detection (JOIN / aggregation / no-filter warnings) | Released in v0.6.0 |
+| Pushdown explainability in `firebird_last_query` / `firebird_query_log` (`limit_pushed`, `offset_pushed`, `not_pushed_reasons`) | Released in v0.6.0 |
+| `firebird_pool_stats('fb')` connection-pool introspection | Released in v0.6.0 |
+| `DECFLOAT(16/34)` lossless fallback (VARCHAR via server-side `CAST`) | Released in v0.6.0 |
+| Adaptive parallel scan recommendations (refined `recommended_partitions` + caveats in `firebird_profile_table`) | Released in v0.6.0 |
 
 `firebird_pool_stats('fb')` reports one attached catalog's pool state
 (config + idle queue + lifetime counters) by explicit alias. It does not
@@ -388,7 +387,7 @@ community-extensions/      DuckDB community descriptor copy
 
 The DuckDB community-extension submission is tracked at
 [duckdb/community-extensions#1980](https://github.com/duckdb/community-extensions/pull/1980).
-The descriptor currently points to `repo.ref: v0.5.6` (runtime-loaded
+The descriptor currently points to `repo.ref: v0.6.0` (runtime-loaded
 Firebird client; no `libfbclient` build dependency).
 
 After it is accepted, users should be able to install with:
