@@ -221,7 +221,32 @@ nova relacao forca - e um passo futuro deliberado.
 
 ### Pushdown conservador de agregacoes
 
-Pushdown de agregacoes vem depois do analyzer e comeca pequeno.
+Status: **adiado** (investigado na branch de desenvolvimento v0.6, nao
+implementado). Decisao registrada para que o mesmo caminho nao seja
+reaberto as cegas.
+
+Achado da investigacao (DuckDB v1.5.3): nao existe hook de
+aggregate-pushdown exposto a extensao no `TableFunction`. O caminho limpo
+para um atalho de `COUNT(*)` e `get_partition_stats` - o optimizer
+(`StatisticsPropagator::TryExecuteAggregates`) ja dobra `COUNT(*)` sem
+`GROUP BY` em constante quando o scan retorna um `PartitionStatistics` com
+contagem exata. O bloqueio: `GetPartitionStatsInput` expoe somente
+`{table_function, bind_data}` e **nao** da ao callback acesso a
+`table_filters`. O optimizer aplica o filtro *depois* de chamar o callback.
+Entao dentro de `get_partition_stats` nao da para distinguir um `COUNT(*)`
+puro de um `COUNT(*) ... WHERE ...`. Implementar assim mesmo rodaria um
+`SELECT COUNT(*)` remoto numa consulta filtrada, so para o optimizer dar
+bail no filtro e cair em scan normal - um round-trip extra invisivel e
+telemetria enganosa numa consulta filtrada. Nao aceitamos esse custo
+surpresa em Firebird de producao.
+
+Adiado ate o DuckDB expor os table filters ao callback de partition-stats,
+ou aparecer outro hook limpo, ou decidirmos explicitamente aceitar o
+tradeoff do round-trip na consulta filtrada. `bind_operator` /
+`bind_replace` nao servem aqui: rodam antes do bind regular e nao enxergam
+o `LogicalAggregate` acima do scan.
+
+Quando desbloqueado, a primeira versao continua pequena.
 
 Permitido inicialmente:
 
