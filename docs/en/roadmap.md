@@ -804,8 +804,31 @@ future step.
 
 ### Conservative aggregate pushdown
 
-Aggregate pushdown comes after the analyzer and starts deliberately
-small.
+Status: **deferred** (investigated on the v0.6 development branch, not
+implemented). Decision recorded so the same path is not reopened blindly.
+
+Investigation finding (DuckDB v1.5.3): there is no extension-facing
+aggregate-pushdown hook on `TableFunction`. The clean path for a
+`COUNT(*)` shortcut is `get_partition_stats` — the optimizer
+(`StatisticsPropagator::TryExecuteAggregates`) already folds `COUNT(*)`
+with no `GROUP BY` into a constant when the scan returns a
+`PartitionStatistics` with an exact count. The blocker: `GetPartitionStatsInput`
+exposes only `{table_function, bind_data}` and does **not** give the
+callback access to `table_filters`. The optimizer applies the filter
+*after* calling the callback. So inside `get_partition_stats` we cannot
+tell a bare `COUNT(*)` from a `COUNT(*) ... WHERE ...`. Implementing it
+anyway would run a remote `SELECT COUNT(*)` for a filtered query, only for
+the optimizer to bail on the filter and fall back to a normal scan — an
+invisible extra round-trip and misleading telemetry on a filtered query.
+We do not accept that surprise cost on production Firebird.
+
+Deferred until DuckDB exposes table filters to the partition-stats
+callback, or another clean hook appears, or we explicitly accept the
+filtered-query round-trip tradeoff. `bind_operator` / `bind_replace` are
+not viable here: they run before the regular bind and cannot see the
+`LogicalAggregate` above the scan.
+
+When eventually unblocked, the first version stays deliberately small.
 
 Initially allowed:
 
