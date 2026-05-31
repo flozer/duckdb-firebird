@@ -8,7 +8,9 @@ on:
   push:
     branches:
       - "claude/duckdb-firebird-plugin-*"
+      - "dev/*"
       - main
+  pull_request:
   workflow_dispatch:
     inputs:
       firebird_sdk_url:
