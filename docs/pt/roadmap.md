@@ -271,20 +271,39 @@ previsivel.
 
 ### Recomendacoes de adaptive parallel scan
 
+Status: primeira versao implementada em branch de desenvolvimento e testada
+localmente; ainda nao publicada. Ver `docs/pt/function_manual.md`.
+
+Apenas diagnostico/recomendacao - **nao** autotuning. O `firebird_scan`
+permanece inalterado: nada e paralelizado automaticamente e nenhum ganho de
+performance e prometido. O trabalho refina o `recommended_partitions` e os
+`warnings` do `firebird_profile_table()` ja existente (schema de 10 colunas
+inalterado):
+
+- recomendar `partitions=N` apenas pela largura da faixa `MIN`/`MAX` da PK
+  numerica de coluna unica (sem contagem de linhas, sem `COUNT(*)`, sem full
+  scan), com teto 8 (entregue)
+- recomendar `partitions=1` mesmo para PK numerica quando a faixa e pequena,
+  com nota explicita (entregue)
+- recomendar `partitions=1` com warning para views, sem-PK, PK composta e PK
+  nao-numerica (entregue)
+- emitir caveat de paralelismo server-side quando `partitions > 1` for
+  sugerido, apontando para `ParallelWorkers` do Firebird 5 - um caveat
+  generico, ja que a config de paralelismo do servidor nao e consultada
+  (entregue)
+
 Nao comecar com tuning totalmente automatico. Paralelismo automatico pode
 surpreender sistemas Firebird de producao, especialmente quando o servidor
-ja tem paralelismo configurado.
+ja tem paralelismo configurado. Adaptacao automatica fica fora de escopo ate
+o caminho de recomendacao ser observavel, benchmarkado e previsivel em
+Firebird 3/4/5.
 
-A primeira versao deve ser apenas diagnostico/recomendacao:
-
-- usar fatos de catalogo e estimativas baratas quando disponiveis
-- recomendar `partitions=N`
-- alertar quando scan paralelo for arriscado
-- considerar primary keys, indices, views pesadas e paginacao explicita
-- documentar interacao com `ParallelWorkers` do Firebird 5
-
-So considerar adaptacao automatica depois que o caminho de recomendacao
-for observavel, benchmarkado e previsivel em Firebird 3/4/5.
+Limitacao: o ramo `recommended_partitions > 1` nao e exercido por fixture de
+CI - uma tabela de PK numerica com faixa larga forcaria uma nova relacao na
+fixture principal e cascataria atualizacoes nos testes de `metadata` /
+`dbt-sources`. A heuristica de span e deterministica e coberta por codigo;
+os caminhos `= 1` e os warnings sao cobertos por
+`firebird_profile_table.test`.
 
 ### Helper de materializacao v1.x
 
