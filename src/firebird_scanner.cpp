@@ -686,6 +686,21 @@ static bool OpenNextPartitionCursor(ClientContext &ctx,
         for (auto idx : query.residual_filter_indices) {
             rec.residual_filters.push_back("filter[" + std::to_string(idx) + "]");
         }
+        // Pushdown explainability (Phase 4 #3): coarse reason per residual
+        // filter (parallel to residual_filters), plus the ROWS clause
+        // paging that was actually pushed to Firebird.
+        rec.not_pushed_reasons = query.residual_filter_reasons;
+        // Complex filters (LIKE / NOT IN) gated off by CHARACTER SET NONE
+        // never reach the Build() residual set — they were lifted out at
+        // pushdown-complex time and re-applied by DuckDB. Surface them too,
+        // each with a matching residual_filters placeholder so the two
+        // lists stay equal length and the gate is visible.
+        for (const auto &reason : bind.gated_complex_reasons) {
+            rec.residual_filters.push_back("complex_filter[none_gated]");
+            rec.not_pushed_reasons.push_back(reason);
+        }
+        rec.limit_pushed  = bind.limit_override;
+        rec.offset_pushed = bind.offset_override;
         rec.partitions    = static_cast<int32_t>(gstate.partitions.size());
         rec.parallel_scan = rec.partitions > 1;
         rec.captured_at   = Timestamp::GetCurrentTimestamp();
@@ -1315,7 +1330,16 @@ static void FirebirdScanPushdownComplexFilter(
             if (TryExtractLikePrefix(**it, projected_col, pattern)) {
                 idx_t src;
                 if (!resolve_src_col(projected_col, src)) { ++it; continue; }
-                if (is_none_text_gated(src))             { ++it; continue; }
+                if (is_none_text_gated(src)) {
+                    // NONE-text gating: the LIKE can't be pushed because a
+                    // UTF-8 pattern won't match raw CP1252/Latin-1 bytes
+                    // server-side. DuckDB still applies it post-transcode;
+                    // record the reason so the pushdown report isn't blind
+                    // to the gate. See Phase 4 #3.
+                    bind.gated_complex_reasons.push_back("NONE_CHARSET");
+                    ++it;
+                    continue;
+                }
                 FirebirdBindData::ExtraPredicate ep;
                 ep.sql = QuoteIdent(bind.column_names[src]) +
                          " LIKE " + SqlLiteral(pattern) +
@@ -1333,7 +1357,11 @@ static void FirebirdScanPushdownComplexFilter(
             if (TryExtractNotIn(**it, projected_col, values)) {
                 idx_t src;
                 if (!resolve_src_col(projected_col, src)) { ++it; continue; }
-                if (is_none_text_gated(src))             { ++it; continue; }
+                if (is_none_text_gated(src)) {
+                    bind.gated_complex_reasons.push_back("NONE_CHARSET");
+                    ++it;
+                    continue;
+                }
                 FirebirdBindData::ExtraPredicate ep;
                 std::string sql = QuoteIdent(bind.column_names[src]) + " NOT IN (";
                 for (size_t i = 0; i < values.size(); ++i) {

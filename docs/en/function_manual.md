@@ -180,10 +180,20 @@ Useful fields include:
 
 - remote SQL
 - pushed filters/projection details where available
+- residual (not-pushed) filters and a coarse reason for each
+  (`not_pushed_reasons`)
+- paging actually pushed to Firebird (`limit_pushed` / `offset_pushed`,
+  `NULL` when none)
 - elapsed time
 - rows read
 - parallel scan details
 - connection reuse details
+
+The schema is 18 columns (shared with `firebird_query_log()`). The
+pushdown-explainability columns (`limit_pushed`, `offset_pushed`,
+`not_pushed_reasons`) make it explicit what reached Firebird and why a
+filter stayed local. See `docs/en/observability.md` for the full column
+reference and the reason vocabulary.
 
 ### `firebird_query_log()`
 

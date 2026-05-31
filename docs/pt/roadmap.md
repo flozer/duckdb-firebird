@@ -145,24 +145,34 @@ carregam o diagnostico.
 
 ### Pushdown report / explicabilidade
 
+Status: primeira versao factual implementada em branch de desenvolvimento
+e testada localmente; ainda nao publicada. Entregue EXPANDINDO a telemetria
+existente (`firebird_last_query()` / `firebird_query_log()`), sem funcao
+nova - o schema cresceu de 15 para 18 colunas. Ver
+`docs/pt/function_manual.md`.
+
 Expor o que o conector enviou ao Firebird e o que o DuckDB ainda precisou
-aplicar localmente. Deve aproveitar a telemetria de query remota existente
-em vez de criar uma superficie diagnostica desconectada.
+aplicar localmente. Construido sobre a telemetria de query remota existente
+em vez de uma superficie diagnostica desconectada.
 
-O relatorio deve tornar visivel:
+O relatorio torna visivel (entregue salvo nota em contrario):
 
-- colunas projetadas
-- filtros empurrados
-- paginacao / limites explicitos empurrados
-- scan serial vs. paralelo
-- numero de particoes
-- predicados ou operadores nao empurrados
-- motivo conhecido para manter operador local
+- colunas projetadas (ja na telemetria)
+- filtros empurrados (ja na telemetria)
+- paginacao / limites explicitos empurrados (entregue - `limit_pushed` /
+  `offset_pushed`, `NULL` quando nenhum)
+- scan serial vs. paralelo (ja na telemetria)
+- numero de particoes (ja na telemetria)
+- predicados ou operadores nao empurrados (ja na telemetria -
+  `residual_filters`)
+- motivo conhecido para manter operador local (entregue -
+  `not_pushed_reasons`, coarse: `NONE_CHARSET` / `UNSUPPORTED_OP` /
+  `ROWID_OR_INVALID_COLUMN` / `UNSUPPORTED_PROJECTION_MAPPING`)
 
-A superficie de usuario sera decidida durante o design: funcao, view de
-observabilidade ou campos estruturados na telemetria existente. A primeira
-versao deve ser factual, compacta e testavel. Nao deve virar otimizador de
-custo, advisor ou substituto do planner.
+Entregue como campos estruturados na telemetria existente, factual,
+compacto e testavel - nao otimizador de custo, advisor ou substituto do
+planner. As razoes sao tags coarse capturadas nos pontos de decisao de
+pushdown ja existentes; `TranslateFilter` nao foi refatorado amplamente.
 
 ### `firebird_pool_stats()`
 

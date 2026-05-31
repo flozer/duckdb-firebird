@@ -726,24 +726,34 @@ column carry the diagnostics.
 
 ### Pushdown report / explainability
 
+Status: first factual version implemented on a development branch and
+tested locally; not yet released. Delivered by EXPANDING the existing
+`firebird_last_query()` / `firebird_query_log()` telemetry (no new
+function) — schema grew from 15 to 18 columns. See
+`docs/en/observability.md`.
+
 Expose what the connector sent to Firebird and what DuckDB still had to
-apply locally. This should build on the existing remote-query telemetry
-instead of creating a disconnected diagnostics surface.
+apply locally. Built on the existing remote-query telemetry instead of a
+disconnected diagnostics surface.
 
-The report should make these decisions visible:
+The report makes these decisions visible (delivered unless noted):
 
-- projected columns
-- pushed filters
-- pushed paging / explicit row limits
-- serial vs. parallel scan
-- partition count
-- predicates or operators not pushed
-- why an operator stayed local when the reason is known
+- projected columns (already in telemetry)
+- pushed filters (already in telemetry)
+- pushed paging / explicit row limits (delivered — `limit_pushed` /
+  `offset_pushed`, `NULL` when no paging pushed)
+- serial vs. parallel scan (already in telemetry)
+- partition count (already in telemetry)
+- predicates or operators not pushed (already in telemetry —
+  `residual_filters`)
+- why an operator stayed local (delivered — `not_pushed_reasons`, coarse:
+  `NONE_CHARSET` / `UNSUPPORTED_OP` / `ROWID_OR_INVALID_COLUMN` /
+  `UNSUPPORTED_PROJECTION_MAPPING`)
 
-Candidate user surface can be decided during design: a function, an
-observability view, or structured fields in the existing telemetry path.
-The first version should be factual, compact, and testable. It should
-not be a cost-based optimizer, advisor, or planner replacement.
+Delivered as structured fields in the existing telemetry path, kept
+factual, compact, and testable — not a cost-based optimizer, advisor, or
+planner replacement. Reasons are coarse tags captured at the existing
+pushdown-decision points; `TranslateFilter` was not broadly refactored.
 
 ### `firebird_pool_stats()`
 

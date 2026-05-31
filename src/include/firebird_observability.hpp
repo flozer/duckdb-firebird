@@ -32,6 +32,16 @@ struct FirebirdQueryTelemetry {
     bool connection_reused = false;
     bool parallel_scan = false;
     int32_t partitions = 1;
+    // Pushdown explainability (Phase 4 #3). limit_pushed / offset_pushed
+    // mirror the ROWS clause actually emitted to Firebird; invalid
+    // (optional_idx default) means no paging was pushed and the column
+    // surfaces as SQL NULL. not_pushed_reasons carries one coarse reason
+    // per residual filter (NONE_CHARSET / UNSUPPORTED_OP /
+    // ROWID_OR_INVALID_COLUMN / UNSUPPORTED_PROJECTION_MAPPING), parallel
+    // to residual_filters.
+    optional_idx limit_pushed;
+    optional_idx offset_pushed;
+    std::vector<std::string> not_pushed_reasons;
     timestamp_t captured_at = timestamp_t(0);
     // Empty string when the scan ran cleanly; set to the exception text
     // when OpenCursor or Fetch raised. The "last query attempted" slot

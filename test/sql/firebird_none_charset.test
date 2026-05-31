@@ -196,3 +196,42 @@ SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding=
  WHERE LABEL = 'pure ascii';
 ----
 1	pure ascii
+
+# --- Pushdown explainability (Phase 4 #3): NONE_CHARSET reason --------
+# A NOT IN over a CHARACTER SET NONE text column under win1252 transcoding
+# is a complex filter the scanner would otherwise lift into a Firebird
+# predicate. NONE gating blocks it (a UTF-8 literal can't be compared
+# against raw CP1252 bytes server-side), so it stays in DuckDB. This is the
+# deterministic case proving not_pushed_reasons captures a REAL reason:
+# the complex filter is recorded residual AND tagged NONE_CHARSET, and no
+# Firebird predicate fragment is pushed for it.
+#
+# (A prefix LIKE 'S%' is NOT used here: DuckDB rewrites it into a
+# range comparison upstream, so it never reaches the complex-filter path.
+# NOT IN is the stable trigger.)
+
+require-env ISC_PASSWORD
+
+statement ok
+SELECT ID FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='win1252')
+ WHERE LABEL NOT IN ('foo', 'bar');
+
+query T
+SELECT array_length(residual_filters) > 0
+   AND array_length(not_pushed_reasons) = array_length(residual_filters)
+   AND list_contains(not_pushed_reasons, 'NONE_CHARSET')
+  FROM firebird_last_query();
+----
+true
+
+# The gated complex filter must NOT have produced a pushed Firebird
+# fragment (no NOT IN reached the server). Count pushed fragments that
+# mention NOT IN — must be zero, and robust to an empty pushed_filters
+# list (unnest of empty yields no rows).
+
+query I
+SELECT COUNT(*)
+  FROM (SELECT unnest(pushed_filters) AS p FROM firebird_last_query())
+ WHERE p LIKE '%NOT IN%';
+----
+0

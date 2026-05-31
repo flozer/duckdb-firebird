@@ -17,14 +17,22 @@ require-env FIREBIRD_TEST_DB
 require-env ISC_PASSWORD
 
 # ---------------------------------------------------------------------------
-#  Schema sanity: firebird_last_query() always exposes 15 columns, even
-#  with nothing captured yet.
+#  Schema sanity: firebird_last_query() always exposes 18 columns, even
+#  with nothing captured yet. (15 base + Phase 4 #3 pushdown explainability:
+#  limit_pushed, offset_pushed, not_pushed_reasons.)
 # ---------------------------------------------------------------------------
 
 query I
 SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM firebird_last_query());
 ----
-15
+18
+
+# firebird_query_log() shares the exact same schema (18 columns).
+
+query I
+SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM firebird_query_log());
+----
+18
 
 # Before any firebird_scan call on THIS context, the slot is empty.
 
@@ -92,6 +100,21 @@ query I
 SELECT array_length(residual_filters) FROM firebird_last_query();
 ----
 0
+
+# Pushdown explainability (Phase 4 #3). This scan pushed its filter cleanly
+# and used no paging, so: not_pushed_reasons is empty, and limit_pushed /
+# offset_pushed are SQL NULL (not 0 — a real limit of 0 would be distinct).
+
+query I
+SELECT array_length(not_pushed_reasons) FROM firebird_last_query();
+----
+0
+
+query T
+SELECT limit_pushed IS NULL AND offset_pushed IS NULL
+  FROM firebird_last_query();
+----
+true
 
 # ---------------------------------------------------------------------------
 #  Chunk C metrics: rows_read, firebird_time_us, total_time_us,
@@ -182,6 +205,72 @@ SELECT partitions >= 1 AND remote_sql LIKE 'SELECT %FROM "EMPLOYEE"%'
   FROM firebird_last_query();
 ----
 1
+
+# ---------------------------------------------------------------------------
+#  Pushdown explainability (Phase 4 #3): paging visibility. A row_limit
+#  pushes Firebird's ROWS clause; limit_pushed must reflect it and the
+#  remote SQL must carry ROWS. row_offset stays NULL when only a limit is
+#  given.
+# ---------------------------------------------------------------------------
+
+statement ok
+SELECT EMP_ID
+  FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE', row_limit = 2);
+
+query T
+SELECT limit_pushed = 2 AND offset_pushed IS NULL
+   AND remote_sql LIKE '% ROWS 2%'
+  FROM firebird_last_query();
+----
+true
+
+# limit + offset: both surface, and the ROWS m TO n form is emitted.
+
+statement ok
+SELECT EMP_ID
+  FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE',
+                     row_limit = 2, row_offset = 1);
+
+query T
+SELECT limit_pushed = 2 AND offset_pushed = 1
+   AND remote_sql LIKE '% ROWS 2 TO 3%'
+  FROM firebird_last_query();
+----
+true
+
+# ---------------------------------------------------------------------------
+#  Pushdown explainability: not_pushed_reasons. A filter on a computed
+#  expression DuckDB can't translate to a Firebird predicate stays residual
+#  and is tagged UNSUPPORTED_OP. (EMP_ID % 2 = 0 — modulo is not a
+#  TableFilter the builder pushes.)
+# ---------------------------------------------------------------------------
+
+statement ok
+SELECT EMP_ID
+  FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE EMP_ID % 2 = 0;
+
+# The residual filter (if any was registered) carries a coarse reason, and
+# every reason must be one of the documented coarse tags. When DuckDB
+# applies the modulo above the scan without registering a TableFilter, the
+# list is simply empty — either way the count of reasons OUTSIDE the
+# documented set must be zero.
+
+query I
+SELECT COUNT(*)
+  FROM (SELECT unnest(not_pushed_reasons) AS r FROM firebird_last_query())
+ WHERE r NOT IN ('NONE_CHARSET','UNSUPPORTED_OP','ROWID_OR_INVALID_COLUMN',
+                 'UNSUPPORTED_PROJECTION_MAPPING');
+----
+0
+
+# not_pushed_reasons is always the same length as residual_filters.
+
+query T
+SELECT array_length(not_pushed_reasons) = array_length(residual_filters)
+  FROM firebird_last_query();
+----
+true
 
 # ---------------------------------------------------------------------------
 #  Chunk E: firebird_query_log() ring buffer.
