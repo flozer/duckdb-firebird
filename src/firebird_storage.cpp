@@ -320,6 +320,14 @@ private:
 //  FirebirdCatalog
 // ---------------------------------------------------------------------------
 
+// Forward declaration at namespace scope so the friend declaration inside
+// FirebirdCatalog can name it as a return type. GCC requires the type to be
+// visible here (MSVC was lenient and accepted a friend-only declaration,
+// which masked this until the Linux/community build).
+struct FirebirdPoolStatsRow;
+FirebirdPoolStatsRow ReadFirebirdPoolStats(ClientContext &context,
+                                           const string &catalog_name);
+
 class FirebirdCatalog final : public Catalog {
 public:
     FirebirdCatalog(AttachedDatabase &db, FirebirdConnectionInfo conn_info,
@@ -339,7 +347,8 @@ public:
 
     // firebird_pool_stats('alias') reads this catalog's pool counters
     // without leasing a connection. Implementation just below the class.
-    friend struct FirebirdPoolStatsRow;
+    // (FirebirdPoolStatsRow / ReadFirebirdPoolStats are forward-declared at
+    // namespace scope above so this friend names them portably under GCC.)
     friend FirebirdPoolStatsRow ReadFirebirdPoolStats(
         ClientContext &context, const string &catalog_name);
 
