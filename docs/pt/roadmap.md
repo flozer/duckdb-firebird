@@ -176,19 +176,29 @@ pushdown ja existentes; `TranslateFilter` nao foi refatorado amplamente.
 
 ### `firebird_pool_stats()`
 
-Expor estado do pool depois do analyzer, para que os numeros tenham
-contexto:
+Status: primeira versao factual implementada em branch de desenvolvimento
+e testada localmente; ainda nao publicada. Ver `docs/pt/function_manual.md`.
 
-- tamanho maximo configurado
-- conexoes abertas
-- conexoes ociosas
-- conexoes em uso
-- contador de reuso
-- contador de descarte
-- ultimo erro, se for seguro rastrear
+Forma: `firebird_pool_stats('fb')` - alias explicito do ATTACH, uma linha
+por chamada. NAO enumera catalogos (sem forma sem-argumento), le apenas
+contadores que o pool ja rastreia, e nunca faz lease de conexao.
 
-Fecha a divida de observabilidade da Fase 2 sem transformar metricas de
-pool na feature principal da v0.6.
+Expor estado do pool para dar contexto (entregue salvo nota em contrario):
+
+- tamanho maximo idle configurado (entregue - `max_idle_size`)
+- timeout idle configurado (entregue - `idle_timeout_ms`)
+- flag de pool habilitado (entregue - `pool_enabled`)
+- conexoes ociosas (entregue - `idle_connections`)
+- criadas / reusadas / descartadas ao longo da vida (entregue -
+  `total_created` / `total_reused` / `total_discarded`)
+- conexoes em uso / ativas (adiado - exige contador de lease novo no pool;
+  reportado antes de implementar conforme escopo)
+- ultimo erro, se for seguro rastrear (adiado - sem historico de erro de
+  pool ainda)
+
+Fecha a maior parte da divida de observabilidade da Fase 2 sem transformar
+metricas de pool na feature principal da v0.6, e sem instrumentacao nova de
+pool: a primeira versao expoe so o que o pool ja conta.
 
 ### DECFLOAT fallback
 

@@ -267,6 +267,24 @@ RESET firebird_query_log_size;
 
 ---
 
+## Pool introspection — `firebird_pool_stats(catalog_name)`
+
+A companion diagnostic to the query telemetry above. Where
+`firebird_last_query()` / `firebird_query_log()` explain a single scan,
+`firebird_pool_stats('alias')` reports the connection-pool state of one
+attached Firebird catalog: `pool_enabled`, configured `max_idle_size` /
+`idle_timeout_ms`, current `idle_connections`, and lifetime
+`total_created` / `total_reused` / `total_discarded`.
+
+It takes an explicit ATTACH alias (it does not enumerate catalogs), reads
+only counters the pool already tracks, and does not lease a connection, so
+it never perturbs the pool it reports on. Full column reference lives in
+`docs/en/function_manual.md`. The `connection_id` / `connection_reused`
+fields on the per-query telemetry pair with these counters to show pool
+reuse in action.
+
+---
+
 ## Limitations
 
 - **Connection metadata** — `connection_id` / `connection_reused`

@@ -757,18 +757,28 @@ pushdown-decision points; `TranslateFilter` was not broadly refactored.
 
 ### `firebird_pool_stats()`
 
-Expose pool state after the analyzer lands so the numbers have context:
+Status: first factual version implemented on a development branch and
+tested locally; not yet released. See `docs/en/function_manual.md`.
 
-- configured maximum size
-- current open connections
-- idle connections
-- in-use connections
-- reuse count
-- discard count
-- last error, if tracked safely
+Shape: `firebird_pool_stats('fb')` — explicit ATTACH alias, one row per
+call. It does NOT enumerate catalogs (no no-argument form), reads only
+counters the pool already tracks, and never leases a connection.
 
-This closes the Phase 2 observability debt without making pool metrics
-the lead feature of v0.6.
+Expose pool state so the numbers have context (delivered unless noted):
+
+- configured maximum idle size (delivered — `max_idle_size`)
+- configured idle timeout (delivered — `idle_timeout_ms`)
+- pool enabled flag (delivered — `pool_enabled`)
+- idle connections (delivered — `idle_connections`)
+- lifetime created / reused / discarded (delivered — `total_created` /
+  `total_reused` / `total_discarded`)
+- in-use / active connections (deferred — needs a new lease counter on the
+  pool; reported before implementing per scope)
+- last error, if tracked safely (deferred — no pool-level error history yet)
+
+This closes most of the Phase 2 observability debt without making pool
+metrics the lead feature of v0.6, and without new pool instrumentation:
+the first version surfaces only what the pool already counts.
 
 ### DECFLOAT fallback
 

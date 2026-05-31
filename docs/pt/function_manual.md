@@ -816,6 +816,66 @@ FROM firebird_query_log()
 WHERE array_to_string(binds, ',') LIKE '%<text:redacted>%';
 ```
 
+### `firebird_pool_stats(catalog_name)`
+
+#### O que faz e como funciona
+
+Retorna uma unica linha com o estado factual do pool de conexoes de um
+catalogo Firebird anexado. O argumento e o **alias explicito do ATTACH** -
+a funcao nao enumera catalogos.
+
+```sql
+ATTACH 'C:/dados/empresa.fdb' AS fb
+(TYPE firebird, user 'SYSDBA', password 'masterkey');
+
+SELECT IDCLIENTE FROM fb.main.CLIENTES WHERE IDCLIENTE = 1;
+
+SELECT * FROM firebird_pool_stats('fb');
+```
+
+Colunas de saida (8):
+
+- `catalog_name`: o alias passado.
+- `pool_enabled`: se o pool do ATTACH esta habilitado.
+- `max_idle_size`: limite configurado da fila idle (`firebird_pool_max_size`);
+  `0` = sem limite.
+- `idle_timeout_ms`: expiracao idle configurada
+  (`firebird_pool_idle_timeout_ms`); `0` = sem expiracao.
+- `idle_connections`: conexoes paradas na fila idle agora.
+- `total_created`: conexoes fisicas criadas ao longo da vida.
+- `total_reused`: conexoes servidas da fila idle ao longo da vida.
+- `total_discarded`: conexoes destruidas (pool desligado, ou limite/expiracao
+  da fila idle atingidos).
+
+Le apenas contadores e config que o pool ja rastreia, e **nao** faz lease de
+conexao - chamar nunca perturba o pool que reporta. Os valores configurados
+refletem as settings lidas no momento do `ATTACH`; um `SET` posterior nao
+reconfigura um pool existente (refaca o `ATTACH` para aplicar).
+
+#### Para que serve
+
+- Confirmar que o pool esta de fato reusando conexoes.
+- Dimensionar `firebird_pool_max_size`.
+- Verificar que um catalogo com `firebird_pool_enabled = false` nunca
+  estaciona conexoes idle.
+
+#### Uso no dia a dia
+
+```sql
+SELECT pool_enabled, idle_connections, total_created, total_reused
+FROM firebird_pool_stats('fb');
+```
+
+#### Limitacoes atuais
+
+- **Por catalogo, so alias**: passa-se um alias do ATTACH; nao ha forma sem
+  argumento que liste todos os catalogos anexados.
+- **Sem contagem de ativas/in-use**: o pool rastreia a fila idle e
+  contadores de vida, nao quantas conexoes estao emprestadas no momento.
+  Contagem de conexoes ativas e trabalho futuro possivel.
+- **Sem campo de ultimo erro**: historico de erro de pool nao e exposto
+  nesta versao.
+
 ## Nivel 5 - Opcoes de sessao
 
 ### `SET firebird_query_log_size = N`
@@ -909,7 +969,7 @@ Padrao:
 SET firebird_pool_max_size = 0;
 ```
 
-Lido no `ATTACH`. Mudanca posterior nao retuna pool existente.
+Lido no `ATTACH`. Mudanca posterior nao reconfigura pool existente.
 
 #### Para que serve
 
@@ -936,7 +996,7 @@ Padrao:
 SET firebird_pool_idle_timeout_ms = 0;
 ```
 
-Lido no `ATTACH`. Mudanca posterior nao retuna pool existente.
+Lido no `ATTACH`. Mudanca posterior nao reconfigura pool existente.
 
 #### Para que serve
 

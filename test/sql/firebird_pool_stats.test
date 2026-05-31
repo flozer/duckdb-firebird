@@ -1,0 +1,152 @@
+# name: test/sql/firebird_pool_stats.test
+# description: Phase 4 #4 firebird_pool_stats() - factual pool introspection
+#              for one attached Firebird catalog. Argument validation, schema,
+#              config snapshot, and coherent counter movement after ATTACH use.
+# group: [firebird]
+#
+# Requires the EMPLOYEE fixture from scripts/setup_test_firebird.sh and:
+#   FIREBIRD_TEST_DB   absolute path / connstring to the .fdb
+#   ISC_PASSWORD       SYSDBA password
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+require-env ISC_PASSWORD
+
+# ---------------------------------------------------------------------------
+#  Argument validation. Errors must name the function so the caller knows
+#  what they are looking at.
+# ---------------------------------------------------------------------------
+
+statement error
+SELECT * FROM firebird_pool_stats(NULL);
+----
+firebird_pool_stats(catalog_name VARCHAR): catalog_name is required
+
+statement error
+SELECT * FROM firebird_pool_stats('nope_does_not_exist_xyz');
+----
+no attached catalog named 'nope_does_not_exist_xyz'
+
+statement error
+SELECT * FROM firebird_pool_stats('memory');
+----
+is not a Firebird ATTACH
+
+# ---------------------------------------------------------------------------
+#  Schema: 8 columns, one row per call.
+# ---------------------------------------------------------------------------
+
+statement ok
+SET firebird_pool_enabled = true;
+
+statement ok
+SET firebird_pool_max_size = 4;
+
+statement ok
+SET firebird_pool_idle_timeout_ms = 60000;
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fbps (TYPE firebird);
+
+query I
+SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM firebird_pool_stats('fbps'));
+----
+8
+
+query I
+SELECT COUNT(*) FROM firebird_pool_stats('fbps');
+----
+1
+
+# Config snapshot reflects the settings read at ATTACH time.
+
+query TIII
+SELECT pool_enabled, max_idle_size, idle_timeout_ms,
+       (total_created >= 0)::INTEGER
+  FROM firebird_pool_stats('fbps');
+----
+true	4	60000	1
+
+# catalog_name echoes the alias.
+
+query T
+SELECT catalog_name FROM firebird_pool_stats('fbps');
+----
+fbps
+
+# ---------------------------------------------------------------------------
+#  Counters move coherently. Catalog initialization (schema discovery) plus
+#  the first user query create + release at least one connection, so
+#  total_created is >= 1 and idle_connections is within [0, max_idle_size].
+# ---------------------------------------------------------------------------
+
+statement ok
+SELECT EMP_ID FROM fbps.main.EMPLOYEE WHERE EMP_ID = 1;
+
+statement ok
+SELECT EMP_ID FROM fbps.main.EMPLOYEE WHERE EMP_ID = 2;
+
+query T
+SELECT total_created >= 1
+   AND total_reused  >= 0
+   AND total_discarded >= 0
+   AND idle_connections >= 0
+   AND idle_connections <= max_idle_size
+  FROM firebird_pool_stats('fbps');
+----
+true
+
+# Reuse must have happened at least once: the second query against the same
+# attached catalog reuses a pooled connection (pool enabled, max_size 4).
+
+query T
+SELECT total_reused >= 1 FROM firebird_pool_stats('fbps');
+----
+true
+
+# total_created never less than total_reused is not guaranteed in general,
+# but created must cover every distinct physical connection; reused can
+# never exceed the number of release/acquire cycles. Sanity: all counters
+# are non-negative and created >= idle_connections.
+
+query T
+SELECT total_created >= idle_connections FROM firebird_pool_stats('fbps');
+----
+true
+
+# ---------------------------------------------------------------------------
+#  Pool disabled: a separate ATTACH with pooling off reports pool_enabled
+#  false and never parks idle connections (idle_connections stays 0).
+# ---------------------------------------------------------------------------
+
+statement ok
+SET firebird_pool_enabled = false;
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fbps_off (TYPE firebird);
+
+statement ok
+SELECT EMP_ID FROM fbps_off.main.EMPLOYEE WHERE EMP_ID = 1;
+
+query TI
+SELECT pool_enabled, idle_connections FROM firebird_pool_stats('fbps_off');
+----
+false	0
+
+# No leak: the connection string / credentials never appear in the output.
+
+query I
+SELECT COUNT(*) FROM firebird_pool_stats('fbps')
+ WHERE catalog_name LIKE '%SYSDBA%'
+    OR catalog_name LIKE '%masterkey%'
+    OR catalog_name LIKE '%.fdb%';
+----
+0
+
+statement ok
+DETACH fbps;
+
+statement ok
+DETACH fbps_off;
