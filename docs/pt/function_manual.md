@@ -1005,6 +1005,44 @@ Lido no `ATTACH`. Mudanca posterior nao reconfigura pool existente.
 - Liberar handles em sessoes longas que ficam ociosas entre rajadas de
   consultas.
 
+## Notas de mapeamento de tipos
+
+### `DECFLOAT(16)` / `DECFLOAT(34)`
+
+`DECFLOAT(16)` e `DECFLOAT(34)` do Firebird 4+ sao IEEE 754
+Decimal64 / Decimal128. O DuckDB nao tem tipo decimal-floating-point
+nativo, e o caminho de cliente legado usado pela extensao nao tem decoder
+de decimal-float.
+
+Essas colunas sao expostas como **VARCHAR**, produzidas por um
+`CAST(col AS VARCHAR(64))` server-side na query gerada. O Firebird
+converte o valor para texto de forma lossless, entao a coluna chega como
+texto exato:
+
+- decimais comuns e formas com expoente fazem round-trip exato
+  (ex.: `123.45`, `1.234567890123456789012345678901234E+200`);
+- `NaN`, `Infinity`, `-Infinity` chegam como essas strings literais;
+- um `NULL` real continua `NULL` (cast de NULL e NULL).
+
+Isso **substitui o comportamento anterior**, em que a coluna era tipada
+`DOUBLE` mas sempre retornava `NULL` - um schema enganoso. `VARCHAR`
+lossless e honesto e consultavel. Nao ha decoder local
+Decimal64/Decimal128 nem fallback `DOUBLE`; um caminho numerico lossy
+seria um opt-in futuro.
+
+O pushdown fica consistente com o schema `VARCHAR`: filtros empurrados
+(comparacoes simples, `IN` / `NOT IN`) comparam contra a mesma expressao
+`CAST(col AS VARCHAR(64))`, entao a semantica textual bate - ex.:
+`WHERE D16 = '123.450'` nao casa com um `123.45` armazenado
+(numericamente igual, textualmente diferente).
+
+Limitacao: a fixture de teste DECFLOAT e dedicada
+(`scripts/fixture_decfloat.sql`, referenciada por `FIREBIRD_DECFLOAT_DB`) e
+**ainda nao esta na fixture principal de CI** - o teste pula quando a
+variavel nao esta definida. Promove-la para `setup_test_firebird.sh` com a
+atualizacao coordenada dos testes de `metadata` / `dbt-sources` esta
+registrado como trabalho futuro.
+
 ## Premissa de documentacao
 
 Toda mudanca publica precisa manter o manual atualizado:

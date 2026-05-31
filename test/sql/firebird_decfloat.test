@@ -1,0 +1,215 @@
+# name: test/sql/firebird_decfloat.test
+# description: Phase 4 #5 - Firebird 4+ DECFLOAT(16/34) fallback. The scanner
+#              projects DECFLOAT columns as CAST(... AS VARCHAR(64))
+#              server-side so they surface as lossless VARCHAR instead of the
+#              old silent NULL. Covers 0, ordinary decimal, exponent form,
+#              NaN, +/-Infinity, and a real NULL.
+# group: [firebird]
+#
+# Requires the DECVALS fixture from scripts/fixture_decfloat.sql loaded into
+# a Firebird 4/5 database referenced by FIREBIRD_DECFLOAT_DB. The test skips
+# when that env var is unset. The main CI fixture does not yet carry
+# DECFLOAT (debt: promote DECVALS into setup_test_firebird.sh with a
+# coordinated metadata/dbt test update in a future step).
+
+require firebird
+
+require-env FIREBIRD_DECFLOAT_DB
+
+# ---------------------------------------------------------------------------
+#  Schema: DECFLOAT(16) and DECFLOAT(34) both surface as VARCHAR.
+# ---------------------------------------------------------------------------
+
+query TT
+SELECT (typeof(D16)), (typeof(D34))
+  FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS')
+ WHERE ID = 1;
+----
+VARCHAR	VARCHAR
+
+# ---------------------------------------------------------------------------
+#  No silent NULL for a non-null value: every non-NULL row must produce a
+#  non-NULL string for both columns. Rows 1..6 and 8 are non-null.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT COUNT(*)
+  FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS')
+ WHERE ID <> 7
+   AND (D16 IS NULL OR D34 IS NULL);
+----
+0
+
+# Real NULL is preserved (row 7), not turned into a string.
+
+query TT
+SELECT D16, D34
+  FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS')
+ WHERE ID = 7;
+----
+NULL	NULL
+
+# ---------------------------------------------------------------------------
+#  Lossless values. The strings are exactly what Firebird emits for the
+#  CAST — stable across FB4/FB5.
+# ---------------------------------------------------------------------------
+
+query TT
+SELECT D16, D34
+  FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS')
+ WHERE ID = 1;
+----
+0	0
+
+query TT
+SELECT D16, D34
+  FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS')
+ WHERE ID = 2;
+----
+123.45	123.45
+
+# Exponent form — the longest representation. DECFLOAT(34) here is ~40
+# characters, well inside VARCHAR(64).
+
+query TT
+SELECT D16, D34
+  FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS')
+ WHERE ID = 3;
+----
+1.2345678901234E+20	1.234567890123456789012345678901234E+200
+
+# Special values: NaN, +Infinity, -Infinity round-trip as text.
+
+query TT
+SELECT D16, D34
+  FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS')
+ WHERE ID = 4;
+----
+NaN	NaN
+
+query TT
+SELECT D16, D34
+  FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS')
+ WHERE ID = 5;
+----
+Infinity	Infinity
+
+query TT
+SELECT D16, D34
+  FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS')
+ WHERE ID = 6;
+----
+-Infinity	-Infinity
+
+query TT
+SELECT D16, D34
+  FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS')
+ WHERE ID = 8;
+----
+-0.0001	-9999999999999999.9
+
+# ---------------------------------------------------------------------------
+#  Filter semantics. DECFLOAT is VARCHAR to DuckDB, so a pushed filter must
+#  compare against the SAME CAST(... AS VARCHAR(64)) expression — otherwise
+#  Firebird would compare numerically and a pushed (not re-checked) filter
+#  could return wrong rows. Text equality: '123.45' matches, '123.450' does
+#  not (trailing zero is a different string even though numerically equal).
+# ---------------------------------------------------------------------------
+
+query I
+SELECT ID FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS')
+ WHERE D16 = '123.45';
+----
+2
+
+# Numerically equal but textually different — must return zero rows. This is
+# the case that would silently return row 2 if the filter were pushed as a
+# raw numeric DECFLOAT comparison.
+
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS')
+ WHERE D16 = '123.450';
+----
+0
+
+# ---------------------------------------------------------------------------
+#  The remote SQL must carry the server-side CAST, in BOTH the projection
+#  and the pushed WHERE predicate — never a bare DECFLOAT comparison.
+#  (Needs the same ClientContext as the scan above.)
+# ---------------------------------------------------------------------------
+
+require-env ISC_PASSWORD
+
+statement ok
+SELECT D16 FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS') WHERE ID = 2;
+
+query T
+SELECT remote_sql LIKE '%CAST(%"D16"% AS VARCHAR(64))%'
+  FROM firebird_last_query();
+----
+true
+
+# A filter on the DECFLOAT column pushes the casted predicate, not a bare
+# "D16" = ?.
+
+statement ok
+SELECT ID FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS') WHERE D16 = '123.45';
+
+query T
+SELECT remote_sql LIKE '%WHERE %CAST(%"D16"% AS VARCHAR(64)) = ?%'
+  FROM firebird_last_query();
+----
+true
+
+# ---------------------------------------------------------------------------
+#  Complex-filter path (NOT IN) must also compare against the casted
+#  expression, not the raw DECFLOAT column. NOT IN is the stable trigger for
+#  the complex-filter path; a prefix LIKE is rewritten by DuckDB into a
+#  range comparison upstream and usually does not reach this path, so we
+#  assert the NOT IN case here.
+#
+#  NOT IN ('123.45') excludes the one row whose casted text equals '123.45'
+#  (ID 2) plus the NULL row (SQL three-valued NOT IN), leaving 6 of the 7
+#  non-null rows. A numerically-equal-but-textually-different literal like
+#  '123.450' excludes none of them (still 7), proving text semantics.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS')
+ WHERE D16 NOT IN ('123.45');
+----
+6
+
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS')
+ WHERE D16 NOT IN ('123.450');
+----
+7
+
+# The pushed NOT IN must use CAST("D16" AS VARCHAR(64)), never a bare
+# "D16" NOT IN.
+
+statement ok
+SELECT ID FROM firebird_scan('${FIREBIRD_DECFLOAT_DB}', 'DECVALS')
+ WHERE D16 NOT IN ('123.45');
+
+query T
+SELECT remote_sql LIKE '%CAST(%"D16"% AS VARCHAR(64)) NOT IN%'
+  FROM firebird_last_query();
+----
+true
+
+# ---------------------------------------------------------------------------
+#  ATTACH path resolves DECFLOAT through the same projection.
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH '${FIREBIRD_DECFLOAT_DB}' AS dfb (TYPE firebird);
+
+query TT
+SELECT (typeof(D34)), D34 FROM dfb.main.DECVALS WHERE ID = 3;
+----
+VARCHAR	1.234567890123456789012345678901234E+200
+
+statement ok
+DETACH dfb;
