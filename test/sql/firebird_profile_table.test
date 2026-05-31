@@ -123,6 +123,19 @@ FROM t_prof_emp;
 ----
 LOW	1
 
+# Adaptive parallel recommendation (Phase 4 #7). A small numeric-PK range
+# recommends serial with an explicit "range is small" note, and must NOT
+# emit the advisory/partition-count or server-side-parallelism caveats
+# (those only apply when partitions > 1 is recommended).
+
+query T
+SELECT list_aggr(warnings, 'string_agg', '|') LIKE '%range is small%'
+   AND list_aggr(warnings, 'string_agg', '|') NOT LIKE '%advisory%'
+   AND list_aggr(warnings, 'string_agg', '|') NOT LIKE '%server-side parallelism%'
+FROM t_prof_emp;
+----
+true
+
 # The qualified-name short form (catalog.table) resolves to the same table.
 
 query T

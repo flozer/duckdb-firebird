@@ -578,10 +578,13 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
             }
         }
     } else if (pk) {
-        // Numeric single-column PK with a real range — the partition
-        // heuristic is the same shape the scanner's auto path uses: cap at
-        // a small, predictable number so we never recommend runaway
-        // parallelism against an OLTP server.
+        // Single-column numeric PK with a usable MIN/MAX range — the only
+        // safe parallelism lever the scanner supports. The recommendation
+        // is advisory and conservative: it scales partition count by the PK
+        // *range width* (not row count, which we deliberately do not probe —
+        // no COUNT(*) / full scan in the analyzer) and caps at a small
+        // ceiling so we never suggest runaway parallelism against an OLTP
+        // server. Ceiling stays at 8 (matches the scanner's own auto path).
         const int64_t span = pk->max_value - pk->min_value;
         int32_t parts = 1;
         if (span >= 1000000) {
@@ -595,9 +598,32 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
         p.full_scan_risk = (parts > 1) ? "MEDIUM" : "LOW";
         if (parts > 1) {
             p.warnings.push_back(
-                "Recommended partitions is advisory and derived from the PK "
-                "MIN/MAX range, not row count. Validate against the live "
-                "server before scanning a production database in parallel.");
+                "Recommended partitions=" + std::to_string(parts) +
+                " is advisory and derived from the PK MIN/MAX range width, "
+                "not the row count. The PK range may be sparse (gaps, "
+                "deletes), so partitions can be uneven. Validate against the "
+                "live server before scanning a production database in "
+                "parallel.");
+            // Server-side parallelism caveat: Firebird 5 can parallelize a
+            // single query server-side, and combining that with client-side
+            // PK-range partitions can oversubscribe the server. We have no
+            // cheap, reliable probe for the server's ParallelWorkers setting
+            // from the catalog, so this is surfaced as a generic caveat
+            // rather than a detected condition.
+            p.warnings.push_back(
+                "If Firebird server-side parallelism is already "
+                "enabled/configured (e.g. Firebird 5 ParallelWorkers), prefer "
+                "starting with partitions=1 or benchmark before combining "
+                "server-side and client-side parallelism.");
+        } else {
+            // PK is numeric with a real but narrow range (span < 10000):
+            // ProbePrimaryKey accepted it, but partitioning would not pay
+            // off. Be explicit so the caller does not wonder why a numeric
+            // PK still recommends serial.
+            p.warnings.push_back(
+                "Primary key range is small (PK MIN/MAX span < 10000): "
+                "serial scan recommended; partitioning would add overhead "
+                "without meaningful parallelism.");
         }
     } else {
         // No view, but also no usable parallel lever: composite /

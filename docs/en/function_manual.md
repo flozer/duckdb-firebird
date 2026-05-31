@@ -148,6 +148,35 @@ monotonicity; `recommended_partitions` is derived from the primary-key
 column carries those caveats inline. Use it to decide whether to scan live,
 filter harder, partition, or materialize through DuckDB/dbt/Parquet.
 
+### `recommended_partitions` — how it is computed
+
+`recommended_partitions` is an **advisory** number. It does **not** change
+how `firebird_scan` runs; nothing is parallelized automatically and there is
+no promise of a performance gain. It only tells you what `partitions=N` you
+*could* try.
+
+It is derived only from the single-column numeric primary key's `MIN`/`MAX`
+range width (no row count, no `COUNT(*)`, no full scan):
+
+- **No single-column numeric PK** (view, no PK, composite PK, non-numeric
+  PK): `recommended_partitions = 1`, with a `warnings` entry explaining why
+  the PK-range parallel lever is unavailable.
+- **Numeric PK but a small range** (`MIN`/`MAX` span < 10000): still
+  `recommended_partitions = 1`, with a note that partitioning would add
+  overhead without meaningful parallelism. A numeric PK does **not**
+  automatically mean parallel is recommended.
+- **Numeric PK with a wide range**: a conservative `partitions=N` between 2
+  and 8 (scaled by range width, capped at 8). The `warnings` make clear this
+  is advisory, derived from range width (so it can be uneven if the PK is
+  sparse), and must be validated against the live server.
+
+When `partitions > 1` is recommended, `warnings` also carries a
+**server-side parallelism caveat**: if Firebird server-side parallelism is
+already enabled/configured (e.g. Firebird 5 `ParallelWorkers`), prefer
+starting with `partitions=1` or benchmark before combining server-side and
+client-side parallelism. The extension does not probe the server's parallel
+setting, so this is a generic caveat, not a detected condition.
+
 For `object_type = VIEW`, the function additionally performs a shallow,
 conservative inspection of the stored view definition
 (`RDB$VIEW_SOURCE`) and emits `warnings` when it detects:

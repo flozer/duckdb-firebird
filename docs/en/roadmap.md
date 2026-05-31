@@ -852,20 +852,36 @@ Firebird object is simple enough and the result semantics are boring.
 
 ### Adaptive parallel scan recommendations
 
+Status: first version implemented on a development branch and tested
+locally; not yet released. See `docs/en/function_manual.md`.
+
+Diagnostic / recommendation-only — **not** autotuning. `firebird_scan` is
+unchanged: nothing is parallelized automatically, and no performance gain is
+promised. The work refines the existing `firebird_profile_table()`
+`recommended_partitions` and `warnings` (10-column schema unchanged):
+
+- recommend `partitions=N` from the single-column numeric PK `MIN`/`MAX`
+  range width only (no row count, no `COUNT(*)`, no full scan), capped at 8
+  (delivered)
+- recommend `partitions=1` even for a numeric PK when the range is small,
+  with an explicit note (delivered)
+- recommend `partitions=1` with a warning for views, no-PK, composite, and
+  non-numeric PK (delivered)
+- emit a server-side parallelism caveat when `partitions > 1` is suggested,
+  pointing at Firebird 5 `ParallelWorkers` — a generic caveat, since the
+  server's parallel setting is not probed (delivered)
+
 Do not start with fully automatic tuning. Automatic parallelism can
 surprise production Firebird systems, especially when server-side
-parallelism is already configured.
+parallelism is already configured. Automatic adaptation stays out of scope
+until the recommendation path is observable, benchmarked, and boring across
+Firebird 3/4/5.
 
-First version should be diagnostic/recommendation-only:
-
-- use catalog facts and cheap row estimates when available
-- recommend `partitions=N`
-- warn when parallel scan is risky
-- account for primary keys, indexes, heavy views, and explicit paging
-- document interaction with Firebird 5 `ParallelWorkers`
-
-Only consider automatic adaptation after the recommendation path is
-observable, benchmarked, and boring across Firebird 3/4/5.
+Limitation: the `recommended_partitions > 1` branch is not exercised by a
+CI fixture — a wide-range numeric-PK table would force a new relation into
+the main fixture and cascade `metadata` / `dbt-sources` test updates. The
+span heuristic is deterministic and covered by code; the `= 1` paths and
+the warnings are covered by `firebird_profile_table.test`.
 
 ### v1.x materialization helper
 

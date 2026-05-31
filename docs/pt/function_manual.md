@@ -564,6 +564,37 @@ por monotonicidade comprovada; `recommended_partitions` deriva da faixa
 `MIN`/`MAX` da PK, nao de contagem de linhas, e e apenas recomendacao. A
 coluna `warnings` carrega essas ressalvas inline.
 
+#### `recommended_partitions` - como e calculado
+
+`recommended_partitions` e um numero **consultivo (advisory)**. Ele **nao**
+muda como o `firebird_scan` roda; nada e paralelizado automaticamente e nao
+ha promessa de ganho de performance. Ele so diz qual `partitions=N` voce
+*poderia* tentar.
+
+Deriva apenas da largura da faixa `MIN`/`MAX` da PK numerica de coluna
+unica (sem contagem de linhas, sem `COUNT(*)`, sem full scan):
+
+- **Sem PK numerica de coluna unica** (view, sem PK, PK composta, PK
+  nao-numerica): `recommended_partitions = 1`, com entrada em `warnings`
+  explicando por que a alavanca de particionamento por faixa de PK nao esta
+  disponivel.
+- **PK numerica mas faixa pequena** (span `MIN`/`MAX` < 10000): ainda
+  `recommended_partitions = 1`, com nota de que particionar adicionaria
+  overhead sem paralelismo significativo. Uma PK numerica **nao** significa
+  automaticamente que paralelo e recomendado.
+- **PK numerica com faixa larga**: um `partitions=N` conservador entre 2 e 8
+  (escalado pela largura da faixa, teto 8). Os `warnings` deixam claro que e
+  consultivo, deriva da largura da faixa (entao pode ser desigual se a PK
+  for esparsa) e deve ser validado contra o servidor ao vivo.
+
+Quando `partitions > 1` e recomendado, `warnings` tambem carrega um
+**caveat de paralelismo server-side**: se o paralelismo server-side do
+Firebird ja estiver habilitado/configurado (ex.: `ParallelWorkers` do
+Firebird 5), prefira comecar com `partitions=1` ou faca benchmark antes de
+combinar paralelismo server-side e client-side. A extensao nao consulta a
+configuracao de paralelismo do servidor, entao isso e um caveat generico,
+nao uma condicao detectada.
+
 Para `object_type = VIEW`, a funcao tambem faz uma inspecao rasa e
 conservadora da definicao da view (`RDB$VIEW_SOURCE`) e emite `warnings`
 quando detecta:

@@ -248,6 +248,7 @@ published release yet. See `docs/en/roadmap.md`.
 | Pushdown explainability in `firebird_last_query` / `firebird_query_log` (`limit_pushed`, `offset_pushed`, `not_pushed_reasons`) | Implemented locally |
 | `firebird_pool_stats('fb')` connection-pool introspection | Implemented locally |
 | `DECFLOAT(16/34)` lossless fallback (VARCHAR via server-side `CAST`) | Implemented locally |
+| Adaptive parallel scan recommendations (refined `recommended_partitions` + caveats in `firebird_profile_table`) | Implemented locally |
 
 `firebird_pool_stats('fb')` reports one attached catalog's pool state
 (config + idle queue + lifetime counters) by explicit alias. It does not
@@ -259,6 +260,13 @@ surface as lossless VARCHAR via a server-side `CAST(... AS VARCHAR(64))`,
 replacing the old behavior where the column was typed DOUBLE but always
 fetched NULL. No local decimal-float decoder, no DOUBLE default. The
 DECFLOAT test fixture is dedicated and not yet in the main CI fixture.
+
+Adaptive parallel scan recommendations refine `firebird_profile_table`'s
+`recommended_partitions` and warnings only — `firebird_scan` is unchanged,
+nothing is parallelized automatically, and no performance gain is promised.
+A numeric PK with a small range still recommends `partitions=1`, and a
+server-side parallelism caveat (Firebird 5 `ParallelWorkers`) is surfaced
+when `partitions > 1` is suggested.
 
 Arrow note: the scanner produces DuckDB `Vector` / `DataChunk` columns. When a
 Flight SQL client consumes query results through DuckDB or GizmoSQL, DuckDB
