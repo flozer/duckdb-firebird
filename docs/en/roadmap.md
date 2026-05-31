@@ -15,8 +15,11 @@ out so each item can be closed independently.
 
 The XSQLDA codes for `SQL_INT128 / SQL_TIMESTAMP_TZ / SQL_TIME_TZ /
 SQL_DEC16 / SQL_DEC34` are wired in `firebird_types.cpp` and verified
-live against Firebird 4+ servers. The remaining FB4+ gap is DECFLOAT
-NULL-on-fetch (tracked below; needs the Firebird OO API).
+live against Firebird 4+ servers. The historical FB4+ gap was DECFLOAT
+NULL-on-fetch; the v0.6 development branch now fixes it with a lossless
+VARCHAR fallback via server-side `CAST(... AS VARCHAR(64))` (dev/unreleased,
+tracked below — no OO API needed for this fallback). A native
+decimal-float decoder or a lossy numeric fast path remains future work.
 
 ---
 
@@ -782,10 +785,22 @@ the first version surfaces only what the pool already counts.
 
 ### DECFLOAT fallback
 
+Status: first version implemented on a development branch and tested
+locally; not yet released. See `docs/en/function_manual.md`.
+
 Resolve the remaining Firebird 4+ gap with a conservative fallback.
-Preferred default remains lossless text unless tests prove a better
-mapping can preserve value and user expectations. Numeric fast paths
-must be opt-in when precision loss is possible.
+Delivered as lossless text: `DECFLOAT(16)` / `DECFLOAT(34)` are projected
+server-side as `CAST(col AS VARCHAR(64))` and surfaced as VARCHAR, ending
+the previous silent-NULL behavior (the column was typed DOUBLE but always
+fetched NULL). No local Decimal64/Decimal128 decoder, no DOUBLE default.
+A lossy numeric fast path (opt-in) remains possible future work when
+precision loss is acceptable.
+
+Debt: the DECFLOAT test fixture is dedicated (`scripts/fixture_decfloat.sql`
+via `FIREBIRD_DECFLOAT_DB`) and skips in CI. Promoting it into the main
+`setup_test_firebird.sh` fixture — with the coordinated `metadata` /
+`dbt-sources` test updates that a new relation forces — is a deliberate
+future step.
 
 ### Conservative aggregate pushdown
 

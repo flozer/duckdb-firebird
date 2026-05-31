@@ -176,10 +176,15 @@ LogicalType FirebirdToDuckDBType(const FirebirdColumnDesc &col) {
     case SQL_DOUBLE:   return LogicalType::DOUBLE;
     case SQL_DEC16:
     case SQL_DEC34:
-        // IEEE decimal-floating-point (Firebird 4 DECFLOAT). DuckDB has
-        // no native equivalent; degrading to DOUBLE keeps the data
-        // queryable at the cost of some precision on the long tail.
-        return LogicalType::DOUBLE;
+        // IEEE decimal-floating-point (Firebird 4 DECFLOAT(16/34),
+        // Decimal64/Decimal128). DuckDB has no native equivalent and the
+        // legacy isc_/XSQLDA path has no decimal-float decoder, so the
+        // scanner projects these columns as CAST(... AS VARCHAR(64))
+        // server-side (see FirebirdQueryBuilder::Build). Surface them as
+        // VARCHAR: lossless and honest, instead of the previous DOUBLE
+        // schema that silently fetched NULL. A lossy numeric fast path
+        // would be a future opt-in.
+        return LogicalType::VARCHAR;
     case SQL_TIMESTAMP:       return LogicalType::TIMESTAMP;
     case SQL_TIMESTAMP_TZ:
     case SQL_TIMESTAMP_TZ_EX: return LogicalType::TIMESTAMP_TZ;
@@ -337,8 +342,14 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
     }
     case SQL_DEC16:
     case SQL_DEC34:
-        // IEEE Decimal64 / Decimal128 — no native DuckDB equivalent yet.
-        // Surface NULL rather than producing a misleading approximation.
+        // Unreachable on the normal scan path: the query builder projects
+        // DECFLOAT columns as CAST(... AS VARCHAR(64)), so they arrive here
+        // as SQL_VARYING and are handled by the text path above. This
+        // branch remains only as a defensive guard if a DECFLOAT column
+        // ever reaches fetch uncast (e.g. a future code path that bypasses
+        // the builder); we surface NULL rather than mis-decode the raw
+        // Decimal64/Decimal128 bytes. The builder change makes the common
+        // case lossless VARCHAR instead of this silent NULL.
         FlatVector::SetNull(target, target_offset, true);
         break;
     case SQL_BLOB: {

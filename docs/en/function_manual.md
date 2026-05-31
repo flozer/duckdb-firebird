@@ -267,6 +267,40 @@ Controls the maximum number of idle connections kept by the pool.
 
 Controls how long idle pooled connections may remain reusable.
 
+## Type mapping notes
+
+### `DECFLOAT(16)` / `DECFLOAT(34)`
+
+Firebird 4+ `DECFLOAT(16)` and `DECFLOAT(34)` are IEEE 754 Decimal64 /
+Decimal128. DuckDB has no native decimal-floating-point type, and the
+legacy client path the extension uses has no decimal-float decoder.
+
+These columns are surfaced as **VARCHAR**, produced by a server-side
+`CAST(col AS VARCHAR(64))` in the generated query. Firebird stringifies the
+value losslessly, so the column reads as exact text:
+
+- ordinary decimals and exponent forms round-trip exactly
+  (e.g. `123.45`, `1.234567890123456789012345678901234E+200`);
+- `NaN`, `Infinity`, `-Infinity` come through as those literal strings;
+- a real `NULL` stays `NULL` (the cast of NULL is NULL).
+
+This **replaces the previous behavior**, where the column was typed
+`DOUBLE` but always fetched `NULL` — a misleading schema. Lossless `VARCHAR`
+is honest and queryable. There is no local Decimal64/Decimal128 decoder and
+no `DOUBLE` fallback; a lossy numeric fast path would be a future opt-in.
+
+Pushdown stays consistent with the `VARCHAR` schema: pushed filters (simple
+comparisons, `IN` / `NOT IN`) compare against the same
+`CAST(col AS VARCHAR(64))` expression, so text semantics match — e.g.
+`WHERE D16 = '123.450'` does not match a stored `123.45` (numerically
+equal, textually different).
+
+Limitation: the DECFLOAT test fixture is dedicated
+(`scripts/fixture_decfloat.sql`, referenced by `FIREBIRD_DECFLOAT_DB`) and
+is **not yet in the main CI fixture** — the test skips when that variable is
+unset. Promoting it into `setup_test_firebird.sh` with the coordinated
+`metadata` / `dbt-sources` test updates is tracked as future work.
+
 ## Documentation premise
 
 When public behavior changes:

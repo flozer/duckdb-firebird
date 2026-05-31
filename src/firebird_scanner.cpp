@@ -1321,6 +1321,27 @@ static void FirebirdScanPushdownComplexFilter(
                (desc.sqltype == SQL_BLOB && desc.sqlsubtype == 1);
     };
 
+    // Helper: DECFLOAT(16/34) is exposed to DuckDB as VARCHAR and projected
+    // as CAST(col AS VARCHAR(64)). A pushed complex filter must compare
+    // against the SAME expression — otherwise Firebird would compare
+    // numerically while DuckDB believes the column is text. Since lifted
+    // complex predicates are NOT re-checked by DuckDB, the column reference
+    // here must mirror the projection's cast.
+    auto is_decfloat = [&](idx_t src_col_idx) -> bool {
+        if (src_col_idx >= bind.column_descs.size()) return false;
+        const auto &desc = bind.column_descs[src_col_idx];
+        return desc.sqltype == SQL_DEC16 || desc.sqltype == SQL_DEC34;
+    };
+    // Column SQL expression for a complex-filter predicate: the casted form
+    // for DECFLOAT, the plain quoted identifier otherwise.
+    auto col_expr = [&](idx_t src_col_idx) -> std::string {
+        if (is_decfloat(src_col_idx)) {
+            return "CAST(" + QuoteIdent(bind.column_names[src_col_idx]) +
+                   " AS VARCHAR(64))";
+        }
+        return QuoteIdent(bind.column_names[src_col_idx]);
+    };
+
     auto it = filters.begin();
     while (it != filters.end()) {
         // --- LIKE 'prefix%' ----------------------------------------------
@@ -1341,7 +1362,7 @@ static void FirebirdScanPushdownComplexFilter(
                     continue;
                 }
                 FirebirdBindData::ExtraPredicate ep;
-                ep.sql = QuoteIdent(bind.column_names[src]) +
+                ep.sql = col_expr(src) +
                          " LIKE " + SqlLiteral(pattern) +
                          " ESCAPE '\\'";
                 bind.extra_predicates.push_back(std::move(ep));
@@ -1363,7 +1384,7 @@ static void FirebirdScanPushdownComplexFilter(
                     continue;
                 }
                 FirebirdBindData::ExtraPredicate ep;
-                std::string sql = QuoteIdent(bind.column_names[src]) + " NOT IN (";
+                std::string sql = col_expr(src) + " NOT IN (";
                 for (size_t i = 0; i < values.size(); ++i) {
                     if (i) sql += ", ";
                     sql += "?";
@@ -1383,6 +1404,10 @@ static void FirebirdScanPushdownComplexFilter(
             if (TryExtractNotBoolColumn(**it, projected_col)) {
                 idx_t src;
                 if (!resolve_src_col(projected_col, src)) { ++it; continue; }
+                // Defensive: a DECFLOAT column is VARCHAR to DuckDB and never
+                // boolean, so this matcher should not fire for it — but never
+                // emit `NOT <decfloat>` server-side; leave it to DuckDB.
+                if (is_decfloat(src)) { ++it; continue; }
                 FirebirdBindData::ExtraPredicate ep;
                 ep.sql = "NOT " + QuoteIdent(bind.column_names[src]);
                 bind.extra_predicates.push_back(std::move(ep));

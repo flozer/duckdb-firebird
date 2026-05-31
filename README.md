@@ -247,11 +247,18 @@ published release yet. See `docs/en/roadmap.md`.
 | Heavy-view shape detection (JOIN / aggregation / no-filter warnings) | Implemented locally |
 | Pushdown explainability in `firebird_last_query` / `firebird_query_log` (`limit_pushed`, `offset_pushed`, `not_pushed_reasons`) | Implemented locally |
 | `firebird_pool_stats('fb')` connection-pool introspection | Implemented locally |
+| `DECFLOAT(16/34)` lossless fallback (VARCHAR via server-side `CAST`) | Implemented locally |
 
 `firebird_pool_stats('fb')` reports one attached catalog's pool state
 (config + idle queue + lifetime counters) by explicit alias. It does not
 enumerate catalogs, reads only counters the pool already tracks, and never
 leases a connection.
+
+`DECFLOAT(16)` / `DECFLOAT(34)` (Firebird 4+ IEEE Decimal64/Decimal128) now
+surface as lossless VARCHAR via a server-side `CAST(... AS VARCHAR(64))`,
+replacing the old behavior where the column was typed DOUBLE but always
+fetched NULL. No local decimal-float decoder, no DOUBLE default. The
+DECFLOAT test fixture is dedicated and not yet in the main CI fixture.
 
 Arrow note: the scanner produces DuckDB `Vector` / `DataChunk` columns. When a
 Flight SQL client consumes query results through DuckDB or GizmoSQL, DuckDB

@@ -13,6 +13,13 @@
 
 namespace duckdb {
 
+// True for Firebird 4 DECFLOAT(16/34) base SQL types (IEEE Decimal64 /
+// Decimal128). Used to decide that the projection must cast the column to
+// VARCHAR server-side — see the projection loop in Build().
+static inline bool IsDecfloatType(int16_t sqltype) {
+    return sqltype == SQL_DEC16 || sqltype == SQL_DEC34;
+}
+
 // --- value formatting --------------------------------------------------------
 //
 // We only emit SQL for filters we are *confident* Firebird will accept. The
@@ -266,6 +273,20 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
             auto cid = column_ids[i];
             if (cid == COLUMN_IDENTIFIER_ROW_ID) {
                 sql << "CAST(NULL AS BIGINT)";
+            } else if (column_descs && cid < column_descs->size() &&
+                       IsDecfloatType((*column_descs)[cid].sqltype)) {
+                // Firebird 4 DECFLOAT(16/34) is IEEE Decimal64/Decimal128
+                // with no native DuckDB type. The legacy isc_/XSQLDA path
+                // we use has no decimal-float decoder, so rather than
+                // emit a silent NULL we let Firebird stringify it
+                // server-side — a lossless, stable representation
+                // (validated: 0, decimals, exponent form, NaN, +/-Inf;
+                // longest observed 40 chars for DECFLOAT(34), VARCHAR(64)
+                // is comfortable headroom). The column is surfaced as
+                // VARCHAR (see FirebirdToDuckDBType), and a real NULL
+                // casts to NULL so NULLs are preserved.
+                sql << "CAST(" << QuoteIdent(all_column_names[cid])
+                    << " AS VARCHAR(64))";
             } else {
                 sql << QuoteIdent(all_column_names[cid]);
             }
@@ -304,13 +325,30 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
                 r.residual_filter_reasons.push_back("NONE_CHARSET");
                 continue;
             }
+            // DECFLOAT is exposed to DuckDB as VARCHAR and projected as
+            // CAST(col AS VARCHAR(64)). A pushed filter must compare against
+            // the SAME expression, or Firebird would compare numerically
+            // (DECFLOAT) while DuckDB believes the column is text — e.g.
+            // `D16 = '123.450'` should be FALSE under text semantics but a
+            // raw `"D16" = ?` bind would let Firebird accept the numerically
+            // equal 123.45. Pushed filters are not necessarily re-checked by
+            // DuckDB, so the bind expression must mirror the projection.
+            std::string filter_col_expr;
+            if (column_descs && source_col < column_descs->size() &&
+                IsDecfloatType((*column_descs)[source_col].sqltype)) {
+                filter_col_expr = "CAST(" +
+                                  QuoteIdent(all_column_names[source_col]) +
+                                  " AS VARCHAR(64))";
+            } else {
+                filter_col_expr = QuoteIdent(all_column_names[source_col]);
+            }
             std::string frag;
             // Snapshot the params accumulator: if the filter can't be
             // fully parametrised the partial bindings have to roll back
             // so we don't ship a mismatched (params.size() != '?' count)
             // statement to the server.
             const size_t saved_params = r.params.size();
-            if (TranslateFilter(QuoteIdent(all_column_names[source_col]), filter,
+            if (TranslateFilter(filter_col_expr, filter,
                                 frag, r.params)) {
                 conds.push_back("(" + frag + ")");
                 r.pushed_filter_sql.push_back(frag);

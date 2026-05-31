@@ -202,10 +202,22 @@ pool: a primeira versao expoe so o que o pool ja conta.
 
 ### DECFLOAT fallback
 
-Resolver a lacuna restante de Firebird 4+ com fallback conservador. O
-default preferido continua lossless text, a menos que testes provem um
-mapeamento melhor que preserve valor e expectativa do usuario. Caminhos
-numericos rapidos devem ser opt-in quando houver risco de perda de precisao.
+Status: primeira versao implementada em branch de desenvolvimento e testada
+localmente; ainda nao publicada. Ver `docs/pt/function_manual.md`.
+
+Resolver a lacuna restante de Firebird 4+ com fallback conservador.
+Entregue como lossless text: `DECFLOAT(16)` / `DECFLOAT(34)` sao projetados
+server-side como `CAST(col AS VARCHAR(64))` e expostos como VARCHAR,
+encerrando o comportamento anterior de NULL silencioso (a coluna era tipada
+DOUBLE mas sempre retornava NULL). Sem decoder local Decimal64/Decimal128,
+sem default DOUBLE. Um caminho numerico lossy (opt-in) continua sendo
+trabalho futuro possivel quando a perda de precisao for aceitavel.
+
+Divida: a fixture de teste DECFLOAT e dedicada
+(`scripts/fixture_decfloat.sql` via `FIREBIRD_DECFLOAT_DB`) e pula no CI.
+Promove-la para a fixture principal `setup_test_firebird.sh` - com a
+atualizacao coordenada dos testes de `metadata` / `dbt-sources` que uma
+nova relacao forca - e um passo futuro deliberado.
 
 ### Pushdown conservador de agregacoes
 
