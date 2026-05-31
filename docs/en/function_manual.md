@@ -202,6 +202,53 @@ Returns the in-memory query log for the current DuckDB session.
 The log is bounded by `firebird_query_log_size` and is intended for
 debugging, diagnostics, and support.
 
+### `firebird_pool_stats(catalog_name)`
+
+Returns one row of factual connection-pool state for a single attached
+Firebird catalog. The argument is the **explicit ATTACH alias** — the
+function does not enumerate catalogs.
+
+```sql
+ATTACH 'database=C:/data/erp.fdb user=SYSDBA password=masterkey'
+  AS fb (TYPE firebird);
+
+SELECT EMP_ID FROM fb.main.EMPLOYEE WHERE EMP_ID = 1;
+
+SELECT * FROM firebird_pool_stats('fb');
+```
+
+Output columns (8):
+
+| Column | Type | Notes |
+|---|---|---|
+| `catalog_name` | VARCHAR | The alias passed in |
+| `pool_enabled` | BOOLEAN | Whether the ATTACH pool is enabled |
+| `max_idle_size` | BIGINT | Configured idle-queue cap (`firebird_pool_max_size`); `0` = unlimited |
+| `idle_timeout_ms` | BIGINT | Configured idle expiry (`firebird_pool_idle_timeout_ms`); `0` = no expiry |
+| `idle_connections` | BIGINT | Connections currently parked in the idle queue |
+| `total_created` | BIGINT | Lifetime physical connections created |
+| `total_reused` | BIGINT | Lifetime connections served from the idle queue |
+| `total_discarded` | BIGINT | Lifetime connections destroyed (pool disabled, or idle cap/expiry hit) |
+
+It reads only counters and config the pool already tracks, and it does
+**not** lease a connection — calling it never perturbs the pool it reports
+on. The configured values mirror the pool settings read at `ATTACH` time;
+a later `SET` does not retune an existing pool (re-`ATTACH` to apply).
+
+Use it to confirm pooling is actually reusing connections, to size
+`firebird_pool_max_size`, or to verify a `firebird_pool_enabled = false`
+catalog never parks idle connections.
+
+Current limitations:
+
+- **Per-catalog, alias-only**: you pass one ATTACH alias; there is no
+  no-argument form that lists every attached catalog.
+- **No active/in-use count**: the pool tracks the idle queue and lifetime
+  counters, not how many connections are currently leased out. An
+  active-connection count is possible future work.
+- **No last-error field**: pool-level error history is not surfaced in this
+  version.
+
 ## Level 5 - Session options
 
 ### `SET firebird_query_log_size = N`

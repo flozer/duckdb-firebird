@@ -236,6 +236,23 @@ Release: **v0.5.7**.
 | LRU prepared statement cache | Deferred benchmark item |
 | Scanner-native Arrow `RecordBatch` output | v1.x candidate |
 
+### v0.6 Firebird-native diagnostics (development branch, not yet released)
+
+These land on a development branch, tested locally; they are **not** in a
+published release yet. See `docs/en/roadmap.md`.
+
+| Area | Status |
+|---|---|
+| `firebird_profile_table('fb.main.T')` factual table/view diagnostics | Implemented locally |
+| Heavy-view shape detection (JOIN / aggregation / no-filter warnings) | Implemented locally |
+| Pushdown explainability in `firebird_last_query` / `firebird_query_log` (`limit_pushed`, `offset_pushed`, `not_pushed_reasons`) | Implemented locally |
+| `firebird_pool_stats('fb')` connection-pool introspection | Implemented locally |
+
+`firebird_pool_stats('fb')` reports one attached catalog's pool state
+(config + idle queue + lifetime counters) by explicit alias. It does not
+enumerate catalogs, reads only counters the pool already tracks, and never
+leases a connection.
+
 Arrow note: the scanner produces DuckDB `Vector` / `DataChunk` columns. When a
 Flight SQL client consumes query results through DuckDB or GizmoSQL, DuckDB
 converts the result stream to Arrow at the boundary. Direct scanner-native Arrow

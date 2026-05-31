@@ -337,6 +337,12 @@ public:
     friend FirebirdMetadataLease AcquireFirebirdCatalogLease(
         ClientContext &context, const string &catalog_name);
 
+    // firebird_pool_stats('alias') reads this catalog's pool counters
+    // without leasing a connection. Implementation just below the class.
+    friend struct FirebirdPoolStatsRow;
+    friend FirebirdPoolStatsRow ReadFirebirdPoolStats(
+        ClientContext &context, const string &catalog_name);
+
     string GetCatalogType() override { return "firebird"; }
 
     void Initialize(bool /*load_builtin*/) override {
@@ -583,6 +589,138 @@ FirebirdMetadataLease AcquireFirebirdCatalogLease(ClientContext &context,
     lease.conn          = fb_catalog.pool_->Acquire();
     lease.none_encoding = fb_catalog.none_encoding_;
     return lease;
+}
+
+// ---------------------------------------------------------------------------
+//  firebird_pool_stats('alias') — factual pool introspection (Phase 4 #4)
+// ---------------------------------------------------------------------------
+//
+// Reads the connection-pool counters of one attached Firebird catalog. No
+// new instrumentation: every value is something the pool already tracks
+// (config snapshot + idle-queue size + lifetime counters). It does NOT
+// lease a connection, so calling it never perturbs the pool it reports on.
+//
+// Single explicit alias argument, mirroring firebird_profile_table() and
+// firebird_generate_dbt_sources(). Reuses ValidateFirebirdAttachAlias for
+// the "exists + is Firebird" check and its actionable BinderException.
+
+struct FirebirdPoolStatsRow {
+    std::string catalog_name;
+    bool        pool_enabled = false;
+    int64_t     max_idle_size = 0;
+    int64_t     idle_timeout_ms = 0;
+    int64_t     idle_connections = 0;
+    int64_t     total_created = 0;
+    int64_t     total_reused = 0;
+    int64_t     total_discarded = 0;
+};
+
+FirebirdPoolStatsRow ReadFirebirdPoolStats(ClientContext &context,
+                                           const string &catalog_name) {
+    ValidateFirebirdAttachAlias(context, catalog_name);
+    auto catalog_ptr = Catalog::GetCatalogEntry(context, catalog_name);
+    // Validated above: non-null and GetCatalogType() == "firebird".
+    auto &fb_catalog = catalog_ptr->Cast<FirebirdCatalog>();
+    auto &pool = *fb_catalog.pool_;
+    const auto &cfg = pool.Config();
+
+    FirebirdPoolStatsRow row;
+    row.catalog_name     = catalog_name;
+    row.pool_enabled     = cfg.enabled;
+    row.max_idle_size    = cfg.max_size;
+    row.idle_timeout_ms  = cfg.idle_timeout_ms;
+    row.idle_connections = static_cast<int64_t>(pool.IdleCount());
+    row.total_created    = pool.TotalCreated();
+    row.total_reused     = pool.TotalReused();
+    row.total_discarded  = pool.TotalDiscarded();
+    return row;
+}
+
+namespace {
+
+struct PoolStatsBindData : public TableFunctionData {
+    std::string catalog_name;
+};
+
+struct PoolStatsGlobalState : public GlobalTableFunctionState {
+    bool emitted = false;
+    idx_t MaxThreads() const override { return 1; }
+};
+
+unique_ptr<FunctionData> PoolStatsBind(ClientContext &context,
+                                       TableFunctionBindInput &input,
+                                       vector<LogicalType> &return_types,
+                                       vector<string> &names) {
+    if (input.inputs.empty() || input.inputs[0].IsNull()) {
+        throw BinderException(
+            "firebird_pool_stats(catalog_name VARCHAR): catalog_name is "
+            "required (the alias from ATTACH '...' AS <alias> "
+            "(TYPE firebird)).");
+    }
+    auto bind = make_uniq<PoolStatsBindData>();
+    bind->catalog_name = input.inputs[0].ToString();
+    // Resolve eagerly so a bad alias fails at bind time, not at execute.
+    ValidateFirebirdAttachAlias(context, bind->catalog_name);
+
+    names = {
+        "catalog_name",
+        "pool_enabled",
+        "max_idle_size",
+        "idle_timeout_ms",
+        "idle_connections",
+        "total_created",
+        "total_reused",
+        "total_discarded",
+    };
+    return_types = {
+        LogicalType::VARCHAR,
+        LogicalType::BOOLEAN,
+        LogicalType::BIGINT,
+        LogicalType::BIGINT,
+        LogicalType::BIGINT,
+        LogicalType::BIGINT,
+        LogicalType::BIGINT,
+        LogicalType::BIGINT,
+    };
+    return std::move(bind);
+}
+
+unique_ptr<GlobalTableFunctionState>
+PoolStatsInitGlobal(ClientContext &, TableFunctionInitInput &) {
+    return make_uniq<PoolStatsGlobalState>();
+}
+
+void PoolStatsFunction(ClientContext &context, TableFunctionInput &input,
+                       DataChunk &output) {
+    auto &g = input.global_state->Cast<PoolStatsGlobalState>();
+    if (g.emitted) {
+        output.SetCardinality(0);
+        return;
+    }
+    auto &bind = input.bind_data->Cast<PoolStatsBindData>();
+    FirebirdPoolStatsRow r = ReadFirebirdPoolStats(context, bind.catalog_name);
+
+    output.SetCardinality(1);
+    output.data[0].SetValue(0, Value(r.catalog_name));
+    output.data[1].SetValue(0, Value::BOOLEAN(r.pool_enabled));
+    output.data[2].SetValue(0, Value::BIGINT(r.max_idle_size));
+    output.data[3].SetValue(0, Value::BIGINT(r.idle_timeout_ms));
+    output.data[4].SetValue(0, Value::BIGINT(r.idle_connections));
+    output.data[5].SetValue(0, Value::BIGINT(r.total_created));
+    output.data[6].SetValue(0, Value::BIGINT(r.total_reused));
+    output.data[7].SetValue(0, Value::BIGINT(r.total_discarded));
+    g.emitted = true;
+}
+
+} // namespace
+
+TableFunction GetFirebirdPoolStatsFunction() {
+    TableFunction fn("firebird_pool_stats",
+                     {LogicalType::VARCHAR},
+                     PoolStatsFunction,
+                     PoolStatsBind,
+                     PoolStatsInitGlobal);
+    return fn;
 }
 
 static unique_ptr<TransactionManager>
