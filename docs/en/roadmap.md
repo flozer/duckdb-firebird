@@ -59,26 +59,16 @@ A bug found during this verification has been fixed (`LoadTableSchema`
 was missing the FB4 RDB$FIELD_TYPE codes 24–31 — see test_report.md
 "Firebird 5 live coverage" section).
 
-### 3. DECFLOAT (DEC16 / DEC34) — fix the silent NULL
+### 3. DECFLOAT (DEC16 / DEC34) — silent NULL fixed in v0.6
 
-Today `firebird_types.cpp:197-202` writes NULL for `SQL_DEC16/SQL_DEC34`
-because DuckDB has no native IEEE decimal-floating-point type. Three
-viable options, decide by user value:
+Historical gap: `SQL_DEC16/SQL_DEC34` used to surface as DOUBLE but fetch
+NULL, because DuckDB has no native IEEE decimal-floating-point type and the
+legacy ISC API path does not decode Decimal64/Decimal128 directly.
 
-| Option | Pros | Cons |
-|---|---|---|
-| **VARCHAR with full precision** | lossless, easy `CAST(... AS DECIMAL(38, s))` from SQL | column type is text — users must cast |
-| **DOUBLE with a one-time warning** | usable as a number out of the box | silent precision loss on long-tail values; loud `WARN` only fires once per session |
-| **DECIMAL(38, scale) when scale ≤ 38** | exact for the bulk of real-world DECFLOAT use | falls back to one of the other two when value width exceeds 38 |
-
-Recommended path: **VARCHAR by default + named param
-`decfloat='double'` to opt into the fast/lossy path**. Pre-emptive
-casting (`SELECT CAST(x AS DECIMAL(38, 5)) FROM …`) is what most users
-will end up writing anyway.
-
-**Acceptance**: scan over `t (d16 DECFLOAT(16), d34 DECFLOAT(34))`
-returns the exact decimal string for at least these edge cases:
-`+Inf`, `-Inf`, `NaN`, `0`, `0.0000000000000001`, `1.7976931348623157E+308`.
+v0.6 resolves this with the conservative, lossless path documented below:
+server-side `CAST(col AS VARCHAR(64))`, surfaced as DuckDB VARCHAR. Native
+Decimal64/Decimal128 decoding or an explicit lossy numeric fast path remain
+future work only if real workloads justify them.
 
 ### 4. FB5 compatibility sweep
 
@@ -653,10 +643,11 @@ For an MVP commercial release:
 ## Milestone v0.6 — Firebird Native Diagnostics
 
 Strategic decision: the next phase is **not** `firebird_materialize()`.
-Materialization leaves the critical path and moves to **v1.x** as an
-optional DX helper, if real users still need a wrapper around the
-DuckDB-native path. DuckDB already owns materialization, local tables,
-Parquet export, and lakehouse handoff well.
+Materialization is not part of the core roadmap. DuckDB already owns
+materialization, local tables, Parquet export, and lakehouse handoff well.
+If a thin convenience helper is ever considered, it is an improvement
+suggestion outside the core extension roadmap and must be re-approved by
+the PM/HUMAN against the ACTION_GUIDE.
 
 **Materialization is DuckDB's strength. Firebird-native diagnostics is
 this extension's differentiator.**
@@ -670,6 +661,13 @@ Delivery order for v0.6:
 5. DECFLOAT fallback
 6. Conservative aggregate pushdown
 7. Adaptive parallel scan recommendations
+
+v0.6 release target: close the development branch, validate the full
+diagnostics set with the HUMAN, prepare release notes/tag metadata, and
+update the community-extension submission path for PR #1980. No new
+feature work should enter v0.6 unless it fixes a release-blocking defect in
+the core connector, diagnostics, compatibility, observability, or packaging
+path.
 
 ### `firebird_profile_table()` analyzer
 
@@ -883,72 +881,53 @@ the main fixture and cascade `metadata` / `dbt-sources` test updates. The
 span heuristic is deterministic and covered by code; the `= 1` paths and
 the warnings are covered by `firebird_profile_table.test`.
 
-### v1.x materialization helper
+## v0.6 release closure
 
-`firebird_materialize()` is deferred to v1.x, optional, and DX-only. It
-must not replace the recommended DuckDB-native patterns:
+Current intent: ship v0.6 for real production use as soon as the release
+gate is green. From this point until the v0.6 tag, the roadmap accepts only
+core release work:
 
-```sql
-CREATE OR REPLACE TABLE local_table AS
-SELECT * FROM fb.main.REMOTE_TABLE;
+- release-blocking build, portability, packaging, or CI defects;
+- regressions in Firebird scan, ATTACH, type mapping, pushdown, telemetry,
+  pool behavior, or diagnostics;
+- documentation required for users to run the released extension safely;
+- community-extension metadata required to update PR #1980.
 
-COPY local_table TO 'lake/path'
-  (FORMAT parquet, COMPRESSION zstd);
-```
+Known non-blocking technical debt stays recorded instead of delaying v0.6:
 
-If added later, it should be a thin convenience wrapper around these
-patterns, not a new storage strategy.
+- row estimates and structured required-filter recommendations in
+  `firebird_profile_table()`;
+- active/in-use count and `last_error` in `firebird_pool_stats()`;
+- promoting the DECFLOAT fixture into the main CI fixture;
+- exercising `recommended_partitions > 1` in CI;
+- aggregate pushdown, blocked by DuckDB v1.5.3 API limitations.
 
----
+## Release-testing checklist (run before every push/tag/release)
 
-## Release-testing checklist (run before every push to main)
+Required before v0.6 publication:
 
-Live, against an anonymized legacy ERP fixture and the EMPLOYEE / FB4_TYPES
-fixtures, on both FB4 and FB5 (swap `fbclient.dll` in
-`build\release\` between runs):
+1. HUMAN final acceptance test for the complete v0.6 feature set.
+2. Windows native build and Firebird sqllogictest group green.
+3. Docker/Linux gcc community-path simulation green from a fresh recursive
+   clone of the committed HEAD.
+4. Optional but recommended: Docker smoke test that loads the extension and
+   runs at least one synthetic Firebird query end-to-end.
+5. `git status` clean on the release branch.
+6. PT/EN docs parity checked for every user-visible change.
+7. Changelog / release notes prepared.
+8. Version and tag approved by HUMAN.
+9. `community-extensions/description.yml` updated to the approved tag/ref.
+10. Explicit handling plan for `duckdb/community-extensions#1980`.
 
-```sql
-LOAD firebird;
+Release-test notes:
 
-ATTACH 'C:/legacy/erp.fdb' AS fb
-    (TYPE firebird, user 'SYSDBA', password 'masterkey');
-
--- Smoke: connectivity + row counts.
-SELECT COUNT(*) FROM fb.main.TABPESSOAS;
-SELECT COUNT(*) FROM fb.main.TABENTRADASAIDA;
-
--- NONE-charset round-trip (default win1252).
-SELECT * FROM fb.main.TABPESSOAS WHERE BAIRRO IS NOT NULL LIMIT 20;
-
--- Paging (once #9 lands).
-SELECT * FROM firebird_scan('C:/legacy/erp.fdb', 'TABPESSOAS',
-                            row_limit=100, row_offset=900);
-
--- Materialisation.
-CREATE OR REPLACE TABLE silver.tabpessoas AS
-SELECT * FROM fb.main.TABPESSOAS;
-
--- Parquet export.
-COPY silver.tabpessoas
-  TO 'C:/tmp/lake/tabpessoas.parquet'
-  (FORMAT parquet, COMPRESSION zstd);
-```
-
-Then re-run the full sqllogictest suite against both server majors:
-
-```cmd
-set FIREBIRD_TEST_DB=C:/fbtest/test.fdb
-set FIREBIRD_NONE_DB=C:/fbtest/none.fdb
-set ISC_USER=SYSDBA & set ISC_PASSWORD=masterkey
-
-build\release\test\unittest.exe "%CD%/test/sql/firebird_scan.test"
-build\release\test\unittest.exe "%CD%/test/sql/firebird_attach.test"
-build\release\test\unittest.exe "%CD%/test/sql/firebird_none_charset.test"
-build\release\test\unittest.exe "%CD%/test/sql/firebird_metadata.test"   # once #13 lands
-```
-
-Expected: `All tests passed (124 + 79 + 42 + N assertions)` with no
-regressions vs. the previous tag.
+- The extension must not link `libfbclient` at build time; it must continue
+  to load the client library at runtime.
+- Tests against `C:\Athenas\restaurado.fdb` may read metadata and aggregate
+  counts only. Do not save, export, materialize, log, commit, or push real
+  data from that database.
+- New release artifacts, Docker scratch files, and local simulation files
+  must stay ignored unless they are intentionally part of the public source.
 
 ---
 
@@ -969,11 +948,13 @@ stays out of this and keeps the README's "Arrow note" honest.
 
 `community-extensions/description.yml` already exists. Process:
 
-1. Tag the release on this repo (`v0.5.1` is the current public tag).
+1. Tag the approved v0.6 release on this repo.
 2. Fork `duckdb/community-extensions`.
 3. Copy `description.yml` to `extensions/firebird/description.yml`,
-   set `repo.ref` to the current public tag (`v0.5.1`).
+   set `repo.ref` to the approved v0.6 tag.
 4. Open PR; their CI builds Linux/Windows/macOS binaries from the tag.
+5. If PR #1980 already exists, update it explicitly to the new v0.6
+   description/ref instead of opening a conflicting submission.
 
 **Acceptance**: `INSTALL firebird FROM community; LOAD firebird;`
 works on a vanilla DuckDB CLI on three platforms.
@@ -1002,3 +983,14 @@ then, ship per-DuckDB-minor-version binaries via community-extensions.
 - **Replacement scan** (so `SELECT * FROM 'file.fdb'.EMPLOYEE` Just
   Works) — neat trick but `ATTACH` is the right surface for a
   multi-table source.
+
+Additional non-core suggestions kept outside the roadmap:
+
+- **`firebird_materialize()` as a roadmap item** - DuckDB already owns
+  materialization, local tables, Parquet export, and lakehouse handoff. A
+  future convenience wrapper may be discussed as a separate improvement
+  suggestion, but it is not part of the core extension roadmap.
+- **CDC / ETL / orchestration / governance features** - these belong to
+  dbt, Airflow, Dagster, dlt, Meltano, CDC tools, or data-governance
+  systems. The extension stays focused on safe, observable Firebird access
+  from DuckDB.
