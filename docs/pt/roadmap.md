@@ -56,23 +56,27 @@ Ja esta pronto no roadmap publico:
 - geracao de dbt sources.
 - loader runtime de `libfbclient`.
 
-Ainda aberto:
+Em fechamento para v0.6:
 
-- DECFLOAT fallback.
-- `firebird_pool_stats()`.
-- diagnostics nativos Firebird.
-- pushdown conservador de agregacoes.
-- recomendacoes de paralelismo.
+- diagnostics nativos Firebird implementados localmente.
+- `firebird_pool_stats()` implementado localmente.
+- DECFLOAT fallback implementado localmente.
+- recomendacoes de paralelismo implementadas localmente.
+- pushdown conservador de agregacoes investigado e adiado por limite da API
+  DuckDB v1.5.3.
+- release gate, changelog/tag e atualizacao community extension ainda
+  pendentes.
 
 ## Milestone v0.6 - Firebird Native Diagnostics
 
 Decisao estrategica: a proxima fase **nao** e
 `firebird_materialize()`.
 
-Materializacao sai do caminho critico e vai para **v1.x** como helper
-opcional de DX, caso usuarios reais ainda precisem de um wrapper fino
-em volta do caminho nativo do DuckDB. O DuckDB ja resolve bem
+Materializacao nao faz parte do roadmap core. O DuckDB ja resolve bem
 materializacao, tabelas locais, exportacao Parquet e handoff lakehouse.
+Se um helper fino de conveniencia voltar a ser considerado, ele sera uma
+sugestao de melhoria fora do roadmap core da extensao e precisara de nova
+aprovacao PM/HUMANO conforme o ACTION_GUIDE.
 
 **Materialization is DuckDB's strength. Firebird-native diagnostics is
 this extension's differentiator.**
@@ -86,6 +90,13 @@ Ordem de entrega para v0.6:
 5. DECFLOAT fallback
 6. Pushdown conservador de agregacoes
 7. Recomendacoes de adaptive parallel scan
+
+Alvo de release v0.6: fechar a branch de desenvolvimento, validar o
+conjunto completo de diagnosticos com o HUMANO, preparar release
+notes/metadados de tag e atualizar o caminho da submissao community
+extension para o PR #1980. Nenhuma feature nova deve entrar na v0.6, exceto
+correcao de defeito bloqueante no core do conector, diagnosticos,
+compatibilidade, observabilidade ou empacotamento.
 
 ### Analyzer `firebird_profile_table()`
 
@@ -305,21 +316,69 @@ fixture principal e cascataria atualizacoes nos testes de `metadata` /
 os caminhos `= 1` e os warnings sao cobertos por
 `firebird_profile_table.test`.
 
-### Helper de materializacao v1.x
+## Fechamento da release v0.6
 
-`firebird_materialize()` fica deferido para v1.x, opcional e apenas DX.
-Nao deve substituir os padroes nativos recomendados do DuckDB:
+Intencao atual: publicar a v0.6 para uso real em producao assim que o gate
+de release estiver verde. A partir deste ponto ate a tag v0.6, o roadmap
+aceita apenas trabalho core de fechamento:
 
-```sql
-CREATE OR REPLACE TABLE local_table AS
-SELECT * FROM fb.main.REMOTE_TABLE;
+- defeitos bloqueantes de build, portabilidade, empacotamento ou CI;
+- regressoes em scan Firebird, ATTACH, mapeamento de tipos, pushdown,
+  telemetria, pool ou diagnosticos;
+- documentacao necessaria para usuarios executarem a extensao com seguranca;
+- metadados da community extension necessarios para atualizar o PR #1980.
 
-COPY local_table TO 'lake/path'
-  (FORMAT parquet, COMPRESSION zstd);
-```
+Dividas tecnicas conhecidas e nao bloqueantes ficam registradas em vez de
+atrasar a v0.6:
 
-Se for adicionado depois, deve ser um wrapper fino sobre esses padroes,
-nao uma nova estrategia de storage.
+- estimativa de linhas e recomendacoes estruturadas de filtros obrigatorios
+  no `firebird_profile_table()`;
+- conexoes ativas/em uso e `last_error` no `firebird_pool_stats()`;
+- promover a fixture DECFLOAT para a fixture principal de CI;
+- exercitar `recommended_partitions > 1` no CI;
+- pushdown de agregacoes, bloqueado por limite da API DuckDB v1.5.3.
+
+## Checklist de release (rodar antes de qualquer push/tag/release)
+
+Obrigatorio antes da publicacao v0.6:
+
+1. teste humano final do conjunto completo v0.6;
+2. build Windows nativo e grupo sqllogictest Firebird verdes;
+3. simulacao Docker/Linux gcc do caminho community verde a partir de clone
+   recursivo fresh do HEAD commitado;
+4. opcional, mas recomendado: smoke Docker carregando a extensao e rodando
+   ao menos uma query Firebird sintetica end-to-end;
+5. `git status` limpo na branch de release;
+6. paridade docs PT/EN revisada para toda mudanca visivel ao usuario;
+7. changelog / release notes preparados;
+8. versao e tag aprovadas pelo HUMANO;
+9. `community-extensions/description.yml` atualizado para a tag/ref
+   aprovada;
+10. plano explicito para tratar `duckdb/community-extensions#1980`.
+
+Notas do teste de release:
+
+- a extensao nao deve linkar `libfbclient` em build time; deve continuar
+  carregando a client library em runtime;
+- testes contra `C:\Athenas\restaurado.fdb` podem ler apenas metadata e
+  contagens agregadas. Nao salvar, exportar, materializar, logar, commitar
+  ou enviar dados reais desse banco;
+- artefatos de release, arquivos temporarios de Docker e simulacoes locais
+  devem permanecer ignorados salvo quando forem parte intencional do codigo
+  publico.
+
+## Sugestoes fora do roadmap core
+
+As ideias abaixo podem voltar como sugestoes de melhoria, mas nao entram no
+roadmap enquanto nao provarem que fortalecem o nucleo da extensao:
+
+- `firebird_materialize()` - DuckDB ja resolve materializacao, tabelas
+  locais, exportacao Parquet e handoff lakehouse. Um wrapper de conveniencia
+  futuro precisa de nova aprovacao PM/HUMANO.
+- CDC, ETL, orquestracao e governanca - pertencem a dbt, Airflow, Dagster,
+  dlt, Meltano, ferramentas CDC ou plataformas de governanca. A extensao
+  permanece focada em acesso Firebird seguro, performatico e observavel a
+  partir do DuckDB.
 
 ## Regras para DEV
 
