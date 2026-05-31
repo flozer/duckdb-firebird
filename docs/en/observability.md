@@ -6,7 +6,7 @@ values, pushdown metadata, and per-scan metrics. All state is scoped
 to the current DuckDB `ClientContext` — one session never reads
 another session's queries.
 
-Both functions share the same 15-column schema. The difference is the
+Both functions share the same 18-column schema. The difference is the
 window: `firebird_last_query()` returns at most one row (the most
 recent attempt on this connection); `firebird_query_log()` returns a
 ring buffer, opt-in via setting.
@@ -50,6 +50,39 @@ connection.
 | `partitions` | INTEGER | Partition count for this scan |
 | `captured_at` | TIMESTAMP | Local capture time |
 | `error_message` | VARCHAR | Empty on success; sanitized exception text on failure |
+| `limit_pushed` | BIGINT | The `ROWS` limit actually pushed to Firebird (`row_limit`), or `NULL` when no limit was pushed. `NULL` (not `0`) so a real limit of `0` is never ambiguous. |
+| `offset_pushed` | BIGINT | The `ROWS m TO n` offset actually pushed (`row_offset`), or `NULL` when none. |
+| `not_pushed_reasons` | VARCHAR[] | One coarse reason per `residual_filters` entry, same order/length. One of `NONE_CHARSET`, `UNSUPPORTED_OP`, `ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING`. |
+
+`limit_pushed` / `offset_pushed` / `not_pushed_reasons` are the Phase 4 #3
+pushdown-explainability columns. They make it explicit what paging reached
+Firebird and why a filter stayed local, without adding a new function — the
+schema is now 18 columns, shared by `firebird_last_query()` and
+`firebird_query_log()`.
+
+The reasons are factual and coarse, not a planner trace:
+
+- `NONE_CHARSET` — the column is `CHARACTER SET NONE` text and pushdown is
+  gated off so UTF-8 literals can't be miscompared against raw bytes. This
+  is recorded for lifted complex predicates (`NOT IN`, and `LIKE` when it
+  reaches the complex-filter path) that the scanner would otherwise push;
+  the gated complex filter surfaces as a `complex_filter[none_gated]` entry
+  in `residual_filters`.
+
+  Known limitation: a *simple* comparison (`col = 'x'`, `col > 'x'`) on a
+  `CHARACTER SET NONE` text column is often applied by DuckDB above the scan
+  and never offered to the connector as a pushable filter, so it does not
+  appear in `residual_filters` / `not_pushed_reasons` at all. A prefix
+  `LIKE 'x%'` is likewise rewritten by DuckDB into a range comparison
+  upstream and follows the same invisible path. Today the reliably-captured
+  NONE gate is the complex `NOT IN` (and complex `LIKE`) case. Making the
+  simple-comparison gate observable is future work.
+- `UNSUPPORTED_OP` — the filter shape/operator/constant type is not one the
+  builder translates to a Firebird predicate.
+- `ROWID_OR_INVALID_COLUMN` — the filter targets the virtual rowid or a
+  column outside the resolved schema.
+- `UNSUPPORTED_PROJECTION_MAPPING` — the filter's projected column index
+  could not be mapped back to a source column.
 
 ### Bind redaction
 

@@ -60,6 +60,15 @@ struct FirebirdBindData : public TableFunctionData {
         duckdb::vector<Value> params;
     };
     duckdb::vector<ExtraPredicate> extra_predicates;
+    // Pushdown explainability (Phase 4 #3). Coarse reasons for complex
+    // filters (LIKE / NOT IN) that FirebirdScanPushdownComplexFilter
+    // considered but did NOT push because the target column is
+    // CHARACTER SET NONE under non-strict transcoding. The filter stays in
+    // DuckDB (correctly re-applied above the scan); this list only carries
+    // the telemetry so firebird_last_query() can explain *why* the complex
+    // predicate did not reach Firebird. Surfaced as NONE_CHARSET entries in
+    // not_pushed_reasons, with a matching residual_filters placeholder.
+    duckdb::vector<std::string> gated_complex_reasons;
     // How to handle Firebird text columns whose CHARACTER SET is NONE
     // (server does NOT transliterate, so the bytes arriving in our
     // buffers can be anything). The default is WIN1252 because the

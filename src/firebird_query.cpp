@@ -284,12 +284,15 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
             // Resolve projected column back to the original column name.
             if (projected_col >= column_ids.size()) {
                 r.residual_filter_indices.push_back(filter_idx++);
+                r.residual_filter_reasons.push_back(
+                    "UNSUPPORTED_PROJECTION_MAPPING");
                 continue;
             }
             column_t source_col = column_ids[projected_col];
             if (source_col == COLUMN_IDENTIFIER_ROW_ID ||
                 source_col >= all_column_names.size()) {
                 r.residual_filter_indices.push_back(filter_idx++);
+                r.residual_filter_reasons.push_back("ROWID_OR_INVALID_COLUMN");
                 continue;
             }
             // CHARACTER SET NONE text + caller is transcoding bytes
@@ -298,6 +301,7 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
             if (column_descs && source_col < column_descs->size() &&
                 IsNoneTextColumnGated((*column_descs)[source_col], none_encoding)) {
                 r.residual_filter_indices.push_back(filter_idx++);
+                r.residual_filter_reasons.push_back("NONE_CHARSET");
                 continue;
             }
             std::string frag;
@@ -313,6 +317,7 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
             } else {
                 r.params.resize(saved_params);
                 r.residual_filter_indices.push_back(filter_idx);
+                r.residual_filter_reasons.push_back("UNSUPPORTED_OP");
             }
             ++filter_idx;
         }

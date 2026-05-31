@@ -27,6 +27,12 @@ public:
         // Indices into the original filter set that were *not* pushed down,
         // i.e. DuckDB still has to re-evaluate them.
         std::vector<idx_t> residual_filter_indices;
+        // Coarse, factual reason each residual filter was not pushed,
+        // parallel to residual_filter_indices (same length, same order).
+        // One of: NONE_CHARSET, UNSUPPORTED_OP, ROWID_OR_INVALID_COLUMN,
+        // UNSUPPORTED_PROJECTION_MAPPING. Consumed by the observability
+        // surface; does not affect SQL generation.
+        std::vector<std::string> residual_filter_reasons;
         // Parameter values bound positionally to the `?` placeholders in
         // `sql`. Empty when no filters were parametrised (the no-filter
         // case, or filters whose literal types can't be bound — those go

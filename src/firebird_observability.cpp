@@ -205,7 +205,7 @@ static Value VarcharList(const std::vector<std::string> &xs) {
 
 // Emit one FirebirdQueryTelemetry into the output chunk at index `row`.
 // Shared by firebird_last_query() and firebird_query_log() to keep the
-// 15-column schema in lockstep.
+// 18-column schema in lockstep.
 static void EmitTelemetryRow(DataChunk &output, idx_t row,
                               const FirebirdQueryTelemetry &t) {
     output.data[0].SetValue(row, Value(t.remote_sql));
@@ -223,6 +223,16 @@ static void EmitTelemetryRow(DataChunk &output, idx_t row,
     output.data[12].SetValue(row, Value::INTEGER(t.partitions));
     output.data[13].SetValue(row, Value::TIMESTAMP(t.captured_at));
     output.data[14].SetValue(row, Value(t.error_message));
+    // Phase 4 #3 pushdown explainability. Paging columns surface as SQL
+    // NULL (not 0) when no ROWS clause was pushed, so a real limit of 0 is
+    // never confused with "no limit".
+    output.data[15].SetValue(row, t.limit_pushed.IsValid()
+        ? Value::BIGINT(static_cast<int64_t>(t.limit_pushed.GetIndex()))
+        : Value(LogicalType::BIGINT));
+    output.data[16].SetValue(row, t.offset_pushed.IsValid()
+        ? Value::BIGINT(static_cast<int64_t>(t.offset_pushed.GetIndex()))
+        : Value(LogicalType::BIGINT));
+    output.data[17].SetValue(row, VarcharList(t.not_pushed_reasons));
 }
 
 // Returns the canonical (names, types) the two observability table
@@ -246,6 +256,9 @@ static void TelemetrySchema(vector<string> &names,
         "partitions",
         "captured_at",
         "error_message",
+        "limit_pushed",
+        "offset_pushed",
+        "not_pushed_reasons",
     };
     types = {
         LogicalType::VARCHAR,
@@ -263,6 +276,9 @@ static void TelemetrySchema(vector<string> &names,
         LogicalType::INTEGER,
         LogicalType::TIMESTAMP,
         LogicalType::VARCHAR,
+        LogicalType::BIGINT,
+        LogicalType::BIGINT,
+        LogicalType::LIST(LogicalType::VARCHAR),
     };
 }
 

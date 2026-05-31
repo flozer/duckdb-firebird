@@ -662,6 +662,43 @@ Saida compartilhada com `firebird_query_log()`:
 - `partitions`: numero de particoes.
 - `captured_at`: timestamp de captura.
 - `error_message`: erro sanitizado, vazio quando a query terminou limpa.
+- `limit_pushed`: limite `ROWS` realmente empurrado ao Firebird
+  (`row_limit`), ou `NULL` quando nenhum foi empurrado. `NULL` (nao `0`)
+  para que um limite real de `0` nunca fique ambiguo.
+- `offset_pushed`: offset `ROWS m TO n` empurrado (`row_offset`), ou `NULL`
+  quando nenhum.
+- `not_pushed_reasons`: uma razao coarse por entrada de `residual_filters`,
+  mesma ordem/tamanho. Uma de `NONE_CHARSET`, `UNSUPPORTED_OP`,
+  `ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING`.
+
+As tres ultimas (`limit_pushed` / `offset_pushed` / `not_pushed_reasons`)
+sao as colunas de explicabilidade de pushdown (Fase 4 #3). Deixam explicito
+o que de paginacao chegou ao Firebird e por que um filtro ficou local, sem
+funcao nova - o schema agora tem 18 colunas, compartilhado por
+`firebird_last_query()` e `firebird_query_log()`. As razoes sao factuais e
+coarse, nao um trace de planner:
+
+- `NONE_CHARSET`: a coluna e texto `CHARACTER SET NONE` e o pushdown e
+  bloqueado para que literais UTF-8 nao sejam comparados errado contra os
+  bytes brutos no servidor. Registrado para predicados complexos liftados
+  (`NOT IN`, e `LIKE` quando chega ao caminho de filtro complexo) que o
+  scanner empurraria; o filtro bloqueado aparece como
+  `complex_filter[none_gated]` em `residual_filters`.
+
+  Limitacao conhecida: uma comparacao *simples* (`col = 'x'`, `col > 'x'`)
+  numa coluna texto `CHARACTER SET NONE` em geral e aplicada pelo DuckDB
+  acima do scan e nunca e oferecida ao conector como filtro empurravel,
+  entao nao aparece em `residual_filters` / `not_pushed_reasons`. Um
+  `LIKE 'x%'` de prefixo tambem e reescrito pelo DuckDB em comparacao de
+  range antes e segue o mesmo caminho invisivel. Hoje o caso de gate NONE
+  capturado de forma confiavel e o `NOT IN` complexo (e `LIKE` complexo).
+  Tornar o gate de comparacao simples observavel fica para o futuro.
+- `UNSUPPORTED_OP`: a forma/operador/tipo de constante do filtro nao e algo
+  que o builder traduz para um predicado Firebird.
+- `ROWID_OR_INVALID_COLUMN`: o filtro mira o rowid virtual ou uma coluna
+  fora do schema resolvido.
+- `UNSUPPORTED_PROJECTION_MAPPING`: o indice de coluna projetada do filtro
+  nao pode ser mapeado de volta para uma coluna de origem.
 
 Seguranca:
 
