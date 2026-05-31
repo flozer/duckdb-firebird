@@ -76,8 +76,8 @@ of the extension (DuckDB v1.5.3, MSVC 19.44):
 |---|---|---|---|
 | `INT128` | 26, sub=0 | `HUGEINT` | ✅ `170141183460469231731687303715884105727` round-trip |
 | `DECIMAL(38, s)` | 26, sub=2, scale<0 | `DECIMAL(38, s)` | ✅ `12345678901234567890.12345` round-trip |
-| `DECFLOAT(16)` | 24 | `VARCHAR` (was `DOUBLE`/NULL) | 🔧 dev/unreleased — lossless VARCHAR via server-side `CAST(... AS VARCHAR(64))`; ends prior silent NULL. Tested locally (`firebird_decfloat.test`, dedicated `FIREBIRD_DECFLOAT_DB` fixture, skips in CI). |
-| `DECFLOAT(34)` | 25 | `VARCHAR` (was `DOUBLE`/NULL) | 🔧 dev/unreleased — same as above |
+| `DECFLOAT(16)` | 24 | `VARCHAR` (was `DOUBLE`/NULL) | ✅ v0.6.0 — lossless VARCHAR via server-side `CAST(... AS VARCHAR(64))`; ends prior silent NULL. Tested locally (`firebird_decfloat.test`, dedicated `FIREBIRD_DECFLOAT_DB` fixture, skips in CI). |
+| `DECFLOAT(34)` | 25 | `VARCHAR` (was `DOUBLE`/NULL) | ✅ v0.6.0 — same as above |
 | `TIMESTAMP WITH TIME ZONE` | 29 | `TIMESTAMP WITH TIME ZONE` | ✅ UTC instant preserved (`2026-05-25 17:30:00.123+00`) |
 | `TIME WITH TIME ZONE` | 28 | `TIME WITH TIME ZONE` | ✅ |
 

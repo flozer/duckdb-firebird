@@ -56,16 +56,16 @@ Ja esta pronto no roadmap publico:
 - geracao de dbt sources.
 - loader runtime de `libfbclient`.
 
-Em fechamento para v0.6:
+Publicado na v0.6.0:
 
-- diagnostics nativos Firebird implementados localmente.
-- `firebird_pool_stats()` implementado localmente.
-- DECFLOAT fallback implementado localmente.
-- recomendacoes de paralelismo implementadas localmente.
+- diagnostics nativos Firebird.
+- `firebird_pool_stats()`.
+- DECFLOAT fallback.
+- recomendacoes de paralelismo.
 - pushdown conservador de agregacoes investigado e adiado por limite da API
   DuckDB v1.5.3.
-- release gate, changelog/tag e atualizacao community extension ainda
-  pendentes.
+- release gate e tag concluidos; atualizacao community extension ainda
+  pendente via PR #1980.
 
 ## Milestone v0.6 - Firebird Native Diagnostics
 
@@ -91,17 +91,13 @@ Ordem de entrega para v0.6:
 6. Pushdown conservador de agregacoes
 7. Recomendacoes de adaptive parallel scan
 
-Alvo de release v0.6: fechar a branch de desenvolvimento, validar o
-conjunto completo de diagnosticos com o HUMANO, preparar release
-notes/metadados de tag e atualizar o caminho da submissao community
-extension para o PR #1980. Nenhuma feature nova deve entrar na v0.6, exceto
-correcao de defeito bloqueante no core do conector, diagnosticos,
-compatibilidade, observabilidade ou empacotamento.
+Status de release v0.6.0: publicada. O trabalho restante de release e o
+caminho da submissao community extension para o PR #1980 e alinhamentos de
+documentacao pos-release.
 
 ### Analyzer `firebird_profile_table()`
 
-Status: primeira versao factual implementada em branch de desenvolvimento
-e testada localmente; ainda nao publicada. Ver `docs/pt/function_manual.md`
+Status: lancada na v0.6.0. Ver `docs/pt/function_manual.md`
 para o comportamento entregue e as limitacoes atuais.
 
 Formato:
@@ -130,9 +126,8 @@ particionar ou materializar via DuckDB/dbt/Parquet.
 
 ### Diagnostico de views pesadas
 
-Status: primeira versao factual implementada em branch de desenvolvimento
-e testada localmente (incorporada ao `firebird_profile_table()` via coluna
-`warnings`); ainda nao publicada. Ver `docs/pt/function_manual.md`.
+Status: lancada na v0.6.0 (incorporada ao `firebird_profile_table()` via
+coluna `warnings`). Ver `docs/pt/function_manual.md`.
 
 Detectar e explicar (entregue salvo nota em contrario):
 
@@ -156,8 +151,7 @@ carregam o diagnostico.
 
 ### Pushdown report / explicabilidade
 
-Status: primeira versao factual implementada em branch de desenvolvimento
-e testada localmente; ainda nao publicada. Entregue EXPANDINDO a telemetria
+Status: lancada na v0.6.0. Entregue EXPANDINDO a telemetria
 existente (`firebird_last_query()` / `firebird_query_log()`), sem funcao
 nova - o schema cresceu de 15 para 18 colunas. Ver
 `docs/pt/function_manual.md`.
@@ -187,8 +181,7 @@ pushdown ja existentes; `TranslateFilter` nao foi refatorado amplamente.
 
 ### `firebird_pool_stats()`
 
-Status: primeira versao factual implementada em branch de desenvolvimento
-e testada localmente; ainda nao publicada. Ver `docs/pt/function_manual.md`.
+Status: lancada na v0.6.0. Ver `docs/pt/function_manual.md`.
 
 Forma: `firebird_pool_stats('fb')` - alias explicito do ATTACH, uma linha
 por chamada. NAO enumera catalogos (sem forma sem-argumento), le apenas
@@ -213,8 +206,7 @@ pool: a primeira versao expoe so o que o pool ja conta.
 
 ### DECFLOAT fallback
 
-Status: primeira versao implementada em branch de desenvolvimento e testada
-localmente; ainda nao publicada. Ver `docs/pt/function_manual.md`.
+Status: lancada na v0.6.0. Ver `docs/pt/function_manual.md`.
 
 Resolver a lacuna restante de Firebird 4+ com fallback conservador.
 Entregue como lossless text: `DECFLOAT(16)` / `DECFLOAT(34)` sao projetados
@@ -232,9 +224,8 @@ nova relacao forca - e um passo futuro deliberado.
 
 ### Pushdown conservador de agregacoes
 
-Status: **adiado** (investigado na branch de desenvolvimento v0.6, nao
-implementado). Decisao registrada para que o mesmo caminho nao seja
-reaberto as cegas.
+Status: **adiado** (investigado durante a v0.6.0, nao implementado).
+Decisao registrada para que o mesmo caminho nao seja reaberto as cegas.
 
 Achado da investigacao (DuckDB v1.5.3): nao existe hook de
 aggregate-pushdown exposto a extensao no `TableFunction`. O caminho limpo
@@ -282,8 +273,7 @@ previsivel.
 
 ### Recomendacoes de adaptive parallel scan
 
-Status: primeira versao implementada em branch de desenvolvimento e testada
-localmente; ainda nao publicada. Ver `docs/pt/function_manual.md`.
+Status: lancada na v0.6.0. Ver `docs/pt/function_manual.md`.
 
 Apenas diagnostico/recomendacao - **nao** autotuning. O `firebird_scan`
 permanece inalterado: nada e paralelizado automaticamente e nenhum ganho de
@@ -318,9 +308,11 @@ os caminhos `= 1` e os warnings sao cobertos por
 
 ## Fechamento da release v0.6
 
-Intencao atual: publicar a v0.6 para uso real em producao assim que o gate
-de release estiver verde. A partir deste ponto ate a tag v0.6, o roadmap
-aceita apenas trabalho core de fechamento:
+v0.6.0 esta publicada para uso real em producao. O gate de release foi
+concluido: build Windows, checks GitHub Linux/Windows, matriz FB 3/4/5,
+simulacao Docker local do caminho community e smoke Docker. Depois da v0.6.0,
+o roadmap aceita apenas estabilizacao core e trabalho de submissao community,
+salvo nova abertura explicita de milestone pelo PM/HUMANO:
 
 - defeitos bloqueantes de build, portabilidade, empacotamento ou CI;
 - regressoes em scan Firebird, ATTACH, mapeamento de tipos, pushdown,
@@ -340,7 +332,7 @@ atrasar a v0.6:
 
 ## Checklist de release (rodar antes de qualquer push/tag/release)
 
-Obrigatorio antes da publicacao v0.6:
+Concluido para v0.6.0 e obrigatorio novamente antes de publicacao futura:
 
 1. teste humano final do conjunto completo v0.6;
 2. build Windows nativo e grupo sqllogictest Firebird verdes;

@@ -1,11 +1,12 @@
-# v0.6.0 release plan — pre-tag / post-tag / community split (local-only)
+# v0.6.0 release plan — execution log and community follow-up
 
-Release-candidate planning doc for PM/HUMAN review. Nothing here has been
-pushed/tagged/merged. `duckdb/community-extensions#1980` is untouched.
+Release execution record for PM/HUMAN review. The project release has been
+merged, tagged, and published; `duckdb/community-extensions#1980` remains the
+next explicit follow-up.
 
-Proposed tag: **`v0.6.0`** (current published latest is `v0.5.7`).
+Published tag: **`v0.6.0`**.
 
-## A. Before the tag (must land on the branch first)
+## A. Before the tag (completed)
 
 These describe what the tagged commit will contain. They are code/docs
 already committed on `dev/phase4-profile-table` plus the doc/version edits
@@ -19,32 +20,29 @@ prepared in this RC pass:
 - `community-extensions/description.yml`: `version`/`ref` bumped to
   `0.6.0` / `v0.6.0` **locally** (proposal only — not submitted; see C).
 
-Pre-tag, `README.md` and the roadmap / test_report wording are left as-is.
-They still describe the currently published `v0.5.7` and the v0.6 work as
-"development branch / not yet released", which is the honest pre-tag state.
-Every README badge / "Release:" / "Today (vX)" / "not yet released" flip is
-deferred to section B (post-tag) — doing it before the tag exists would
-claim a release that is not published.
+Pre-tag, `README.md` and the roadmap / test_report wording were left as-is
+so they did not claim a release before the tag existed. Those flips are now
+completed in section B.
 
-Decision needed from PM/HUMAN before tagging:
+Completed:
+
 1. Tag number `v0.6.0` approved.
 2. Human final test of the full v0.6 set signed off.
-3. `#1980` handling (see section C).
+3. PR #16 merged to `main`.
 
-## B. After the tag is published (only once `v0.6.0` exists on GitHub)
+## B. After the tag is published (completed)
 
-- Flip "development branch / not yet released" wording to "released in
-  v0.6.0" across README, roadmap PT/EN, test_report. (Doing this before the
-  tag exists would be a false claim.)
+- Flipped "development branch / not yet released" wording to "released in
+  v0.6.0" across README, roadmap PT/EN, test_report.
 - README badge `v0.5.7` → `v0.6.0` and "Release: **v0.5.7**." →
   "**v0.6.0**" (the badge links to the published release tag, so it only
   becomes valid once `v0.6.0` is published).
-- README Current Status: move the v0.6 dev-diagnostics rows into the main
-  Done table referencing v0.6.0.
+- README Current Status: v0.6 diagnostics rows now reference v0.6.0 instead
+  of local implementation status.
 - Roadmap compatibility matrix "Today (v0.5.7)" → "Today (v0.6.0)".
-- `release-assets.yml` produces the Linux `.tar.gz` + Windows `.zip` on the
-  `v0.6.0` tag push; confirm assets attached to the GitHub Release.
-- Paste `docs/en/release_notes_v0.6.0.md` content into the GitHub Release
+- `release-assets.yml` produced the Linux `.tar.gz` + Windows `.zip` on the
+  `v0.6.0` tag push; assets attached to the GitHub Release.
+- `docs/en/release_notes_v0.6.0.md` content pasted into the GitHub Release
   body.
 
 ## C. community-extensions/description.yml (separate submission step)
@@ -53,25 +51,24 @@ Decision needed from PM/HUMAN before tagging:
 `duckdb/community-extensions` to drive the centralized build. The community
 CI checks out exactly `repo.ref`, so it must point at a **published** tag.
 
-- Prepared in this RC: `version: 0.6.0`, `ref: v0.6.0` (local only).
-- **Do not** open / update PR #1980 until: `v0.6.0` is tagged and pushed,
-  the GitHub CI (build-linux, fb-matrix) is green on the real runners, and
-  PM/HUMAN explicitly authorizes touching #1980.
-- README "Community Catalog" line `repo.ref: v0.5.6` → `v0.6.0` belongs to
-  this step (it documents the descriptor target), but only flip it once the
-  descriptor is actually re-pointed and the tag exists.
+- Prepared in the v0.6.0 release commit: `version: 0.6.0`, `ref: v0.6.0`.
+- Open / update PR #1980 only after the GitHub CI is green on the real
+  runners and PM/HUMAN explicitly authorizes touching #1980.
+- README "Community Catalog" line `repo.ref: v0.5.6` → `v0.6.0` is complete
+  in this repo. Updating `duckdb/community-extensions#1980` remains separate.
 
-## Verification done in this RC pass
+## Verification done
 
 - `git diff --check`: clean.
 - Old-reference sweep (`v0.5.6`, `v0.5.7`, "development branch", "not yet
-  released") performed; see the DEV report for the disposition of each.
-- No build/test re-run required: this pass is docs + version metadata only.
-  The build/test/sim results from the prior passes (Windows green, Docker
-  gcc green, smoke green, 13/13 firebird tests) still hold — no source
-  changed.
+  released") performed and then flipped after tag publication where needed.
+- PR #16 checks green on GitHub: Linux, Windows, and FB 3/4/5 matrix.
+- Release assets workflow green for tag `v0.6.0`.
+- Pre-release local validation: Windows green, Docker gcc green, smoke green,
+  13/13 firebird tests.
 
-## Hard boundary
+## Remaining boundary
 
-No push, PR, merge, tag, or release. `#1980` untouched. All artifacts local
-and for review only.
+`duckdb/community-extensions#1980` must be updated explicitly as a separate
+community submission step. Do not mix post-release documentation cleanup with
+the community PR update without PM/HUMAN authorization.

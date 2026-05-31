@@ -1,8 +1,4 @@
-# duckdb-firebird v0.6.0 — Release notes (RELEASE CANDIDATE, local-only)
-
-**Status: release candidate, not yet published.** Prepared for PM/HUMAN
-review. No push / tag / PR / merge has been done; the
-`duckdb/community-extensions#1980` submission path is untouched.
+# duckdb-firebird v0.6.0 — Release notes
 
 Theme: **Firebird-native diagnostics** (Phase 4). The connector core is
 unchanged; this release adds factual, conservative diagnostic surfaces and
@@ -95,6 +91,11 @@ strength), per the roadmap.
   `firebird_profile_table` against a disposable synthetic fixture inside the
   container.
 
+## Release Assets
+
+- `duckdb-firebird-0.6.0-linux-x64.tar.gz`
+- `duckdb-firebird-0.6.0-windows-x64.zip`
+
 ## Docs
 
 - `function_manual` (PT + EN): new `firebird_profile_table`,
@@ -102,13 +103,7 @@ strength), per the roadmap.
   section, pushdown-explainability columns.
 - `observability.md` (EN): 18-column schema, `not_pushed_reasons` vocabulary,
   pool-introspection cross-reference.
-- `roadmap` (PT + EN): Phase 4 items marked delivered (dev branch), aggregate
+- `roadmap` (PT + EN): Phase 4 items marked released in v0.6.0, aggregate
   pushdown deferred with rationale.
-- `README`: v0.6 dev-diagnostics section.
+- `README`: v0.6 diagnostics section.
 - `test_report.md` (EN): DECFLOAT status flipped from DOUBLE/NULL to VARCHAR.
-
-## Pre-tag vs post-tag vs community
-
-This file and the version bumps below are **release-candidate artifacts for
-review**. See `docs/en/release_v0.6.0_plan.md` for the split of what changes
-before the tag, after the tag, and in the community submission.

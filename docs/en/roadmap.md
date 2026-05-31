@@ -5,7 +5,7 @@ out so each item can be closed independently.
 
 ## Compatibility matrix
 
-| Component | Today (v0.5.7) | Target (v1.0) |
+| Component | Today (v0.6.0) | Target (v1.0) |
 |---|---|---|
 | [DuckDB](https://github.com/duckdb/duckdb) | v1.5.3 (pinned in CI and build scripts) | v1.5.x + Stable C ABI when `StorageExtension` lands in it |
 | Firebird server | 3.0, **4.0**, **5.0** all tested live (CI matrix) | same |
@@ -16,9 +16,9 @@ out so each item can be closed independently.
 The XSQLDA codes for `SQL_INT128 / SQL_TIMESTAMP_TZ / SQL_TIME_TZ /
 SQL_DEC16 / SQL_DEC34` are wired in `firebird_types.cpp` and verified
 live against Firebird 4+ servers. The historical FB4+ gap was DECFLOAT
-NULL-on-fetch; the v0.6 development branch now fixes it with a lossless
-VARCHAR fallback via server-side `CAST(... AS VARCHAR(64))` (dev/unreleased,
-tracked below — no OO API needed for this fallback). A native
+NULL-on-fetch; v0.6.0 fixes it with a lossless VARCHAR fallback via
+server-side `CAST(... AS VARCHAR(64))` (no OO API needed for this
+fallback). A native
 decimal-float decoder or a lossy numeric fast path remains future work.
 
 ---
@@ -662,17 +662,13 @@ Delivery order for v0.6:
 6. Conservative aggregate pushdown
 7. Adaptive parallel scan recommendations
 
-v0.6 release target: close the development branch, validate the full
-diagnostics set with the HUMAN, prepare release notes/tag metadata, and
-update the community-extension submission path for PR #1980. No new
-feature work should enter v0.6 unless it fixes a release-blocking defect in
-the core connector, diagnostics, compatibility, observability, or packaging
-path.
+v0.6.0 release status: published. The remaining release work is the
+community-extension submission path for PR #1980 and any post-release
+documentation alignment.
 
 ### `firebird_profile_table()` analyzer
 
-Status: first factual version implemented on a development branch and
-tested locally; not yet released. See `docs/en/function_manual.md` for the
+Status: released in v0.6.0. See `docs/en/function_manual.md` for the
 delivered behavior and current limitations.
 
 Shape:
@@ -701,9 +697,8 @@ partition, or materialize through DuckDB/dbt/Parquet.
 
 ### Heavy-view diagnostics
 
-Status: first factual version implemented on a development branch and
-tested locally (folded into `firebird_profile_table()` via the `warnings`
-column); not yet released. See `docs/en/function_manual.md`.
+Status: released in v0.6.0 (folded into `firebird_profile_table()` via the
+`warnings` column). See `docs/en/function_manual.md`.
 
 Detect and explain (delivered unless noted):
 
@@ -727,8 +722,7 @@ column carry the diagnostics.
 
 ### Pushdown report / explainability
 
-Status: first factual version implemented on a development branch and
-tested locally; not yet released. Delivered by EXPANDING the existing
+Status: released in v0.6.0. Delivered by EXPANDING the existing
 `firebird_last_query()` / `firebird_query_log()` telemetry (no new
 function) — schema grew from 15 to 18 columns. See
 `docs/en/observability.md`.
@@ -758,8 +752,7 @@ pushdown-decision points; `TranslateFilter` was not broadly refactored.
 
 ### `firebird_pool_stats()`
 
-Status: first factual version implemented on a development branch and
-tested locally; not yet released. See `docs/en/function_manual.md`.
+Status: released in v0.6.0. See `docs/en/function_manual.md`.
 
 Shape: `firebird_pool_stats('fb')` — explicit ATTACH alias, one row per
 call. It does NOT enumerate catalogs (no no-argument form), reads only
@@ -783,8 +776,7 @@ the first version surfaces only what the pool already counts.
 
 ### DECFLOAT fallback
 
-Status: first version implemented on a development branch and tested
-locally; not yet released. See `docs/en/function_manual.md`.
+Status: released in v0.6.0. See `docs/en/function_manual.md`.
 
 Resolve the remaining Firebird 4+ gap with a conservative fallback.
 Delivered as lossless text: `DECFLOAT(16)` / `DECFLOAT(34)` are projected
@@ -802,8 +794,8 @@ future step.
 
 ### Conservative aggregate pushdown
 
-Status: **deferred** (investigated on the v0.6 development branch, not
-implemented). Decision recorded so the same path is not reopened blindly.
+Status: **deferred** (investigated during v0.6.0, not implemented).
+Decision recorded so the same path is not reopened blindly.
 
 Investigation finding (DuckDB v1.5.3): there is no extension-facing
 aggregate-pushdown hook on `TableFunction`. The clean path for a
@@ -850,8 +842,7 @@ Firebird object is simple enough and the result semantics are boring.
 
 ### Adaptive parallel scan recommendations
 
-Status: first version implemented on a development branch and tested
-locally; not yet released. See `docs/en/function_manual.md`.
+Status: released in v0.6.0. See `docs/en/function_manual.md`.
 
 Diagnostic / recommendation-only — **not** autotuning. `firebird_scan` is
 unchanged: nothing is parallelized automatically, and no performance gain is
@@ -883,9 +874,11 @@ the warnings are covered by `firebird_profile_table.test`.
 
 ## v0.6 release closure
 
-Current intent: ship v0.6 for real production use as soon as the release
-gate is green. From this point until the v0.6 tag, the roadmap accepts only
-core release work:
+v0.6.0 is published for real production use. The release gate completed:
+Windows build, GitHub Linux/Windows checks, FB 3/4/5 matrix, local Docker
+community-path simulation, and Docker smoke. After v0.6.0, the roadmap accepts
+only core stabilization and community-submission work unless PM/HUMAN
+explicitly opens a new milestone:
 
 - release-blocking build, portability, packaging, or CI defects;
 - regressions in Firebird scan, ATTACH, type mapping, pushdown, telemetry,
@@ -904,7 +897,7 @@ Known non-blocking technical debt stays recorded instead of delaying v0.6:
 
 ## Release-testing checklist (run before every push/tag/release)
 
-Required before v0.6 publication:
+Completed for v0.6.0 and required again before future publication:
 
 1. HUMAN final acceptance test for the complete v0.6 feature set.
 2. Windows native build and Firebird sqllogictest group green.
