@@ -65,9 +65,12 @@ CI checks out exactly `repo.ref`, so it must point at a **published** tag.
 - Release assets workflow green for tag `v0.6.0`.
 - Pre-release local validation: Windows green, Docker gcc green, smoke green,
   13/13 firebird tests.
+- Community Windows hotfix validation: local RTools42/MinGW GCC 10.4.0 +
+  Ninja build of `firebird_extension` and `firebird_loadable_extension` green.
 
 ## Remaining boundary
 
 `duckdb/community-extensions#1980` is now waiting on DuckDB maintainer review
-and community CI. Do not force-push or re-point it again without PM/HUMAN
-authorization.
+and community CI. PM/HUMAN authorization on 2026-06-01 approved keeping
+`v0.6.0` as the community reference for the MinGW/GCC 10.4 portability
+hotfix, instead of cutting a new release tag.

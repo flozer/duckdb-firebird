@@ -742,7 +742,7 @@ unique_ptr<StorageExtension> GetFirebirdStorageExtension() {
     auto ext = make_uniq<StorageExtension>();
     ext->attach = FirebirdAttach;
     ext->create_transaction_manager = FirebirdCreateTransactionManager;
-    return ext;
+    return std::move(ext);
 }
 
 } // namespace duckdb

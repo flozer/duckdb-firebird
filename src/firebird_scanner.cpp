@@ -333,7 +333,7 @@ std::unique_ptr<PrimaryKeyInfo> ProbePrimaryKey(
         pk->column = pk_name;
         pk->min_value = min_v;
         pk->max_value = max_v;
-        return pk;
+        return std::move(pk);
     } catch (...) {
         // Any RDB$ access failure → silently fall back to single-thread.
         return nullptr;
