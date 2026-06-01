@@ -239,65 +239,121 @@ private:
         auto conn_owned = pool_ ? pool_->Acquire()
                                 : make_uniq<FirebirdConnection>(conn_info_);
         FirebirdConnection &conn = *conn_owned;
-        // User-visible relations: filter system_flag, but include both
-        // persistent tables (type 0 / NULL) AND views (type 1) AND
-        // external tables (type 2) AND global temporaries (4, 5).
-        // The only thing we deliberately drop is the in-memory MON$
-        // virtual snapshots (type 3) — those are best queried directly
-        // through firebird_scan('SELECT * FROM MON$…') and don't belong
-        // in a user-facing catalog.
-        std::vector<std::string> table_names;
-        {
-            auto cur = conn.OpenCursor(
-                "SELECT TRIM(r.RDB$RELATION_NAME) "
-                "  FROM RDB$RELATIONS r "
-                " WHERE r.RDB$SYSTEM_FLAG = 0 "
-                "   AND (r.RDB$RELATION_TYPE IS NULL OR r.RDB$RELATION_TYPE <> 3) "
-                " ORDER BY r.RDB$RELATION_NAME");
-            while (cur->Fetch()) table_names.push_back(cur->GetText(0));
+
+        // Build + register one catalog entry from a resolved column list.
+        // The binder asks the TableCatalogEntry for its full column list
+        // before it ever calls GetScanFunction, so the real schema has to
+        // be materialised here. Shared by both the batch path and the
+        // per-table fallback below.
+        auto add_entry = [&](const std::string &table_name,
+                             const duckdb::vector<std::string> &col_names,
+                             const duckdb::vector<LogicalType> &col_types,
+                             duckdb::vector<FirebirdColumnDesc> col_descs) {
+            if (col_names.empty()) return;
+            CreateTableInfo info(catalog.GetName(), this->name, table_name);
+            for (size_t i = 0; i < col_names.size(); ++i) {
+                info.columns.AddColumn(ColumnDefinition(col_names[i], col_types[i]));
+                // Firebird NOT NULL → DuckDB NotNullConstraint, so
+                // information_schema.columns.is_nullable reports 'NO' for
+                // the real NOT NULL columns. LogicalIndex is the column's
+                // position in this CreateTableInfo, matching our order.
+                if (i < col_descs.size() && !col_descs[i].nullable) {
+                    info.constraints.push_back(
+                        make_uniq<NotNullConstraint>(LogicalIndex(i)));
+                }
+            }
+            auto entry = make_uniq<FirebirdTableEntry>(
+                catalog, *this, info, conn_info_, pool_,
+                none_encoding_, std::move(col_descs));
+            tables_.emplace(ToUpper(table_name), std::move(entry));
+        };
+
+        // Fast path: a single query loads every user table's columns at once
+        // (LoadAllTableSchemas). This collapses what used to be one
+        // RDB$RELATION_FIELDS round-trip per table into a single round-trip —
+        // the dominant cost when ATTACHing a large schema over a high-latency
+        // link (e.g. ~25s for 2789 tables on a 3ms LAN; minutes over a WAN).
+        // See docs/en/release_v0.6.1_plan.md.
+        bool batch_ok = false;
+        std::string batch_error;
+        try {
+            auto schemas = LoadAllTableSchemas(conn, none_encoding_);
+            for (auto &ts : schemas) {
+                add_entry(ts.table_name, ts.names, ts.types,
+                          std::move(ts.descs));
+            }
+            batch_ok = true;
+        } catch (std::exception &e) {
+            // Batch discovery failed. This can be a benign SQL/metadata
+            // incompatibility (older Firebird, an unexpected RDB$ shape) — in
+            // which case the per-table fallback below recovers — OR a real
+            // connection / credential / permission failure that the fallback
+            // cannot fix. Keep the original message so we can surface it
+            // instead of masking the root cause behind a slower repeat.
+            batch_error = e.what();
+            tables_.clear();
         }
 
-        // The binder asks the TableCatalogEntry for its full column list
-        // before it ever calls GetScanFunction, so we have to materialise
-        // the real schema here — one RDB$RELATION_FIELDS round-trip per
-        // table. A batch-fetch (single query that JOINs across all
-        // tables) is a follow-up optimisation; on a 100-table legacy
-        // database this loop is still well under a second.
-        //
-        // Individual table failures are downgraded to a console-style
-        // skip: a missing-permission or weird-relation table shouldn't
-        // poison the whole ATTACH.
-        for (auto &table_name : table_names) {
+        if (!batch_ok) {
+            // User-visible relations: filter system_flag, but include both
+            // persistent tables (type 0 / NULL) AND views (type 1) AND
+            // external tables (type 2) AND global temporaries (4, 5). The
+            // only thing we deliberately drop is the in-memory MON$ virtual
+            // snapshots (type 3) — those are best queried directly through
+            // firebird_scan('SELECT * FROM MON$…') and don't belong in a
+            // user-facing catalog.
+            std::vector<std::string> table_names;
             try {
-                CreateTableInfo info(catalog.GetName(), this->name, table_name);
-
-                duckdb::vector<std::string> col_names;
-                duckdb::vector<LogicalType> col_types;
-                duckdb::vector<FirebirdColumnDesc> col_descs;
-                LoadTableSchema(conn, table_name,
-                                col_names, col_types, col_descs,
-                                none_encoding_);
-                for (size_t i = 0; i < col_names.size(); ++i) {
-                    info.columns.AddColumn(ColumnDefinition(col_names[i], col_types[i]));
-                    // Firebird NOT NULL → DuckDB NotNullConstraint, so
-                    // information_schema.columns.is_nullable reports
-                    // 'NO' for the real NOT NULL columns. LogicalIndex
-                    // is the column's position in this CreateTableInfo,
-                    // which matches our iteration order.
-                    if (i < col_descs.size() && !col_descs[i].nullable) {
-                        info.constraints.push_back(
-                            make_uniq<NotNullConstraint>(LogicalIndex(i)));
-                    }
+                auto cur = conn.OpenCursor(
+                    "SELECT TRIM(r.RDB$RELATION_NAME) "
+                    "  FROM RDB$RELATIONS r "
+                    " WHERE r.RDB$SYSTEM_FLAG = 0 "
+                    "   AND (r.RDB$RELATION_TYPE IS NULL OR r.RDB$RELATION_TYPE <> 3) "
+                    " ORDER BY r.RDB$RELATION_NAME");
+                while (cur->Fetch()) table_names.push_back(cur->GetText(0));
+            } catch (std::exception &e) {
+                // The fallback's own discovery query failed too — a genuine
+                // connection / credential / permission problem, not a
+                // batch-query quirk. Surface BOTH errors so the batch failure
+                // can't hide behind a second identical one (a silent empty
+                // catalog would otherwise be the only symptom).
+                throw IOException(
+                    "Firebird catalog discovery failed — batch load error: [" +
+                    batch_error + "]; per-table fallback error: [" +
+                    std::string(e.what()) + "]");
+            }
+            // One RDB$RELATION_FIELDS round-trip per table. Individual table
+            // failures are downgraded to a skip so a single bad relation
+            // doesn't poison the whole ATTACH.
+            for (auto &table_name : table_names) {
+                try {
+                    duckdb::vector<std::string> col_names;
+                    duckdb::vector<LogicalType> col_types;
+                    duckdb::vector<FirebirdColumnDesc> col_descs;
+                    LoadTableSchema(conn, table_name,
+                                    col_names, col_types, col_descs,
+                                    none_encoding_);
+                    add_entry(table_name, col_names, col_types,
+                              std::move(col_descs));
+                } catch (std::exception &) {
+                    // Skip — table will simply not appear in fb.main.
                 }
-
-                auto entry = make_uniq<FirebirdTableEntry>(
-                    catalog, *this, info, conn_info_, pool_,
-                    none_encoding_, std::move(col_descs));
-                tables_.emplace(ToUpper(table_name), std::move(entry));
-            } catch (std::exception &) {
-                // Skip — table will simply not appear in fb.main.
+            }
+            // If the fallback found relations but loaded none of them, the
+            // per-table failures are systemic (permission on
+            // RDB$RELATION_FIELDS, a dead transaction) rather than isolated
+            // bad tables. Don't hand back a silent empty catalog — surface
+            // the original batch error, which is the most informative signal.
+            if (!table_names.empty() && tables_.empty()) {
+                throw IOException(
+                    "Firebird catalog discovery loaded 0 of " +
+                    std::to_string(table_names.size()) +
+                    " relations after the batch path failed — likely a "
+                    "systemic permission or connection problem rather than "
+                    "per-table quirks. Batch load error: [" + batch_error + "]");
             }
         }
+
         if (pool_) pool_->Release(std::move(conn_owned));
         loaded_ = true;
     }
