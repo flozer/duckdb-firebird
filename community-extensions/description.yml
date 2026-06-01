@@ -33,7 +33,5 @@ repo:
   github: flozer/duckdb-firebird
   # Pinned to the current public release tag - community-extensions
   # CI checks out exactly this ref to build + sign the published
-  # artefacts. RC: bumped to v0.6.0 locally; do NOT submit until the
-  # v0.6.0 tag is published and GitHub CI is green (see
-  # docs/en/release_v0.6.0_plan.md, section C).
+  # artefacts.
   ref: v0.6.0

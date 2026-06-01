@@ -1,8 +1,8 @@
 # v0.6.0 release plan — execution log and community follow-up
 
 Release execution record for PM/HUMAN review. The project release has been
-merged, tagged, and published; `duckdb/community-extensions#1980` remains the
-next explicit follow-up.
+merged, tagged, and published; `duckdb/community-extensions#1980` has been
+updated to point at v0.6.0 and remains open for DuckDB maintainer review.
 
 Published tag: **`v0.6.0`**.
 
@@ -45,17 +45,16 @@ Completed:
 - `docs/en/release_notes_v0.6.0.md` content pasted into the GitHub Release
   body.
 
-## C. community-extensions/description.yml (separate submission step)
+## C. community-extensions/description.yml (submitted to PR #1980)
 
 `community-extensions/description.yml` is the file copied into a fork of
 `duckdb/community-extensions` to drive the centralized build. The community
 CI checks out exactly `repo.ref`, so it must point at a **published** tag.
 
 - Prepared in the v0.6.0 release commit: `version: 0.6.0`, `ref: v0.6.0`.
-- Open / update PR #1980 only after the GitHub CI is green on the real
-  runners and PM/HUMAN explicitly authorizes touching #1980.
+- PR #1980 updated from the fork branch `flozer:add-firebird-extension`.
 - README "Community Catalog" line `repo.ref: v0.5.6` → `v0.6.0` is complete
-  in this repo. Updating `duckdb/community-extensions#1980` remains separate.
+  in this repo.
 
 ## Verification done
 
@@ -69,6 +68,6 @@ CI checks out exactly `repo.ref`, so it must point at a **published** tag.
 
 ## Remaining boundary
 
-`duckdb/community-extensions#1980` must be updated explicitly as a separate
-community submission step. Do not mix post-release documentation cleanup with
-the community PR update without PM/HUMAN authorization.
+`duckdb/community-extensions#1980` is now waiting on DuckDB maintainer review
+and community CI. Do not force-push or re-point it again without PM/HUMAN
+authorization.
