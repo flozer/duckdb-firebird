@@ -57,6 +57,30 @@ SELECT *
 FROM firebird_scan('C:/dados/empresa.fdb', 'CLIENTES');
 ```
 
+Conexao remota:
+
+```sql
+SELECT *
+FROM firebird_scan(
+  'firebird://APP_READONLY:secret@db.example.com:3050/path/to/database.fdb?charset=UTF8',
+  'CUSTOMER'
+);
+```
+
+Formato equivalente do libfbclient:
+
+```sql
+SELECT *
+FROM firebird_scan(
+  'database=db.example.com/3050:/path/to/database.fdb;user=APP_READONLY;password=secret;charset=UTF8',
+  'CUSTOMER'
+);
+```
+
+Para conexoes remotas, use `firebird://USUARIO:SENHA@HOST:PORTA/caminho`
+ou `database=HOST/PORTA:/caminho;user=USUARIO;password=SENHA`. Nao use
+`HOST:PORTA://caminho`.
+
 Parametros posicionais:
 
 - `connection_string`: caminho local `.fdb` ou URI `firebird://...`.
@@ -228,7 +252,7 @@ Exemplo:
 
 ```sql
 ATTACH 'C:/dados/empresa.fdb' AS fb
-(TYPE firebird, user 'SYSDBA', password 'masterkey');
+(TYPE firebird, user 'APP_READONLY', password 'secret');
 
 SELECT table_schema, table_name
 FROM information_schema.tables
@@ -279,7 +303,7 @@ Exemplo:
 
 ```sql
 ATTACH 'C:/dados/empresa.fdb' AS fb
-(TYPE firebird, user 'SYSDBA', password 'masterkey', charset 'UTF8');
+(TYPE firebird, user 'APP_READONLY', password 'secret', charset 'UTF8');
 
 SELECT *
 FROM fb.main.CLIENTES
@@ -309,7 +333,7 @@ Melhores praticas aplicadas:
 Anexar uma vez e consultar varias tabelas:
 
 ```sql
-ATTACH 'firebird://SYSDBA:masterkey@localhost:3050/C:/dados/empresa.fdb'
+ATTACH 'firebird://APP_READONLY:secret@db.example.com:3050/path/to/database.fdb'
 AS fb (TYPE firebird);
 
 SELECT COUNT(*) FROM fb.main.CLIENTES;
@@ -523,7 +547,7 @@ caminho ATTACH expoe exatamente um schema) e pode ser omitida.
 
 ```sql
 ATTACH 'C:/dados/empresa.fdb' AS fb
-(TYPE firebird, user 'SYSDBA', password 'masterkey');
+(TYPE firebird, user 'APP_READONLY', password 'secret');
 
 SELECT *
 FROM firebird_profile_table('fb.main.CLIENTES');
@@ -857,7 +881,7 @@ a funcao nao enumera catalogos.
 
 ```sql
 ATTACH 'C:/dados/empresa.fdb' AS fb
-(TYPE firebird, user 'SYSDBA', password 'masterkey');
+(TYPE firebird, user 'APP_READONLY', password 'secret');
 
 SELECT IDCLIENTE FROM fb.main.CLIENTES WHERE IDCLIENTE = 1;
 
@@ -1087,4 +1111,3 @@ Toda mudanca publica precisa manter o manual atualizado:
 
 Se o detalhe for grande demais para este arquivo, crie um manual especifico em
 `docs/pt/` e adicione link nesta pagina.
-

@@ -106,6 +106,29 @@ void LoadTableSchema(FirebirdConnection &conn,
                      duckdb::vector<FirebirdColumnDesc> &out_descs,
                      NoneEncoding none_encoding = NoneEncoding::WIN1252);
 
+// One resolved table schema, as produced by LoadAllTableSchemas. The three
+// column vectors are parallel (same length / ordering), matching the
+// out_names / out_types / out_descs triple that LoadTableSchema fills.
+struct FirebirdTableSchema {
+    std::string table_name;
+    duckdb::vector<std::string> names;
+    duckdb::vector<LogicalType> types;
+    duckdb::vector<FirebirdColumnDesc> descs;
+};
+
+// Batch variant of LoadTableSchema: reads the columns for EVERY user table in
+// a single RDB$RELATION_FIELDS ⋈ RDB$FIELDS ⋈ RDB$RELATIONS query and groups
+// the rows per relation client-side. Collapses the historical N-round-trip
+// (one query per table) catalog load into a single round-trip — the dominant
+// cost when ATTACHing a large schema over a high-latency link. Applies the
+// same blr_* → SQL_* normalisation and NONE-charset handling as
+// LoadTableSchema. Throws on query failure; the ATTACH path falls back to the
+// per-table loop. Excludes system relations and MON$ snapshots (type 3),
+// mirroring the RDB$RELATIONS filter used by the catalog discovery query.
+duckdb::vector<FirebirdTableSchema> LoadAllTableSchemas(
+    FirebirdConnection &conn,
+    NoneEncoding none_encoding = NoneEncoding::WIN1252);
+
 // Reads `RDB$DATABASE.RDB$CHARACTER_SET_NAME`. Returns true when the
 // database-level default is NONE. Best-effort: any RDB$ error returns
 // false (we don't want a probe failure to break a working scan).

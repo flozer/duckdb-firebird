@@ -106,7 +106,7 @@ como se fosse um catalogo:
 
 ```sql
 ATTACH 'C:/dados/empresa.fdb' AS fb
-    (TYPE firebird, user 'SYSDBA', password 'masterkey');
+    (TYPE firebird, user 'APP_READONLY', password 'secret');
 
 SELECT *
 FROM fb.main.TABPESSOAS
@@ -179,13 +179,41 @@ LIMIT 10;
 
 ### Servidor remoto
 
+Para bases remotas, prefira o formato URL:
+
+```text
+firebird://USUARIO:SENHA@HOST:PORTA/caminho/no/servidor/database.fdb?charset=UTF8
+```
+
+O caminho do banco e o caminho visto pelo servidor Firebird, nao um
+caminho local da maquina que executa o DuckDB. Nao use
+`HOST:PORTA://caminho/no/servidor/database.fdb`; esse nao e um formato
+valido de conexao Firebird para esta extensao.
+
 ```sql
 SELECT *
 FROM firebird_scan(
-    'firebird://usuario:senha@servidor:3050/C:/dados/empresa.fdb?charset=UTF8',
-    'TABPESSOAS'
+    'firebird://APP_READONLY:secret@db.example.com:3050/path/to/database.fdb?charset=UTF8',
+    'CUSTOMER'
 )
 LIMIT 10;
+```
+
+O formato equivalente do libfbclient coloca a porta depois do host com
+`/PORTA`:
+
+```sql
+SELECT *
+FROM firebird_tables(
+    'database=db.example.com/3050:/path/to/database.fdb;user=APP_READONLY;password=secret;charset=UTF8'
+);
+```
+
+`ATTACH` aceita as mesmas connection strings:
+
+```sql
+ATTACH 'firebird://APP_READONLY:secret@db.example.com:3050/path/to/database.fdb?charset=UTF8'
+    AS fb (TYPE firebird);
 ```
 
 ### Parametros nomeados
@@ -198,8 +226,8 @@ SELECT *
 FROM firebird_scan(
     'C:/legacy/erp.fdb',
     'TABPESSOAS',
-    user='SYSDBA',
-    password='masterkey',
+    user='APP_READONLY',
+    password='secret',
     charset='UTF8'
 )
 LIMIT 10;
@@ -361,7 +389,7 @@ Quando usar `ATTACH`, navegue com nomes qualificados:
 
 ```sql
 ATTACH 'C:/legacy/erp.fdb' AS fb
-    (TYPE firebird, user 'SYSDBA', password 'masterkey');
+    (TYPE firebird, user 'APP_READONLY', password 'secret');
 
 SHOW DATABASES;
 
@@ -377,7 +405,7 @@ DuckDB enxergam tudo:
 
 ```sql
 ATTACH 'C:/legacy/erp.fdb' AS fb
-    (TYPE firebird, user 'SYSDBA', password 'masterkey');
+    (TYPE firebird, user 'APP_READONLY', password 'secret');
 
 -- Listagem de tabelas (e views) do catalogo Firebird:
 SHOW TABLES FROM fb;

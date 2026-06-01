@@ -73,3 +73,6 @@ Testing/
 *.swp
 .DS_Store
 vcpkg_installed/
+
+# CI build artifact (downloaded for local benchmarking, not source)
+bench/ci_artifact/

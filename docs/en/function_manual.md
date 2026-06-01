@@ -27,9 +27,33 @@ Common use:
 
 ```sql
 SELECT *
-FROM firebird_scan('database=C:/data/erp.fdb user=SYSDBA password=masterkey',
+FROM firebird_scan('database=C:/data/erp.fdb user=APP_READONLY password=secret',
                    'CUSTOMER');
 ```
+
+Remote database:
+
+```sql
+SELECT *
+FROM firebird_scan(
+  'firebird://APP_READONLY:secret@db.example.com:3050/path/to/database.fdb?charset=UTF8',
+  'CUSTOMER'
+);
+```
+
+The equivalent libfbclient-style form is:
+
+```sql
+SELECT *
+FROM firebird_scan(
+  'database=db.example.com/3050:/path/to/database.fdb;user=APP_READONLY;password=secret;charset=UTF8',
+  'CUSTOMER'
+);
+```
+
+For remote connections, use `firebird://USER:PASSWORD@HOST:PORT/path`
+or `database=HOST/PORT:/path;user=USER;password=PASSWORD`. Do not use
+`HOST:PORT://path`.
 
 Supported named parameters include:
 
@@ -52,7 +76,7 @@ Lists Firebird tables visible to the connection.
 
 ```sql
 SELECT *
-FROM firebird_tables('database=C:/data/erp.fdb user=SYSDBA password=masterkey');
+FROM firebird_tables('database=C:/data/erp.fdb user=APP_READONLY password=secret');
 ```
 
 ### `information_schema` via `ATTACH`
@@ -61,7 +85,7 @@ After attaching a database, use DuckDB catalog views to inspect exposed
 Firebird tables and columns:
 
 ```sql
-ATTACH 'database=C:/data/erp.fdb user=SYSDBA password=masterkey'
+ATTACH 'database=C:/data/erp.fdb user=APP_READONLY password=secret'
   AS fb (TYPE firebird);
 
 SELECT *
@@ -76,7 +100,7 @@ WHERE table_schema = 'main';
 Attaches a Firebird database as a DuckDB catalog.
 
 ```sql
-ATTACH 'database=C:/data/erp.fdb user=SYSDBA password=masterkey'
+ATTACH 'database=C:/data/erp.fdb user=APP_READONLY password=secret'
   AS fb (TYPE firebird);
 
 SELECT *
@@ -98,7 +122,7 @@ Use this when you want a view-based workflow instead of a storage attach.
 Generates dbt `sources.yml` content from an attached Firebird catalog.
 
 ```sql
-ATTACH 'database=C:/data/erp.fdb user=SYSDBA password=masterkey'
+ATTACH 'database=C:/data/erp.fdb user=APP_READONLY password=secret'
   AS fb (TYPE firebird);
 
 SELECT firebird_generate_dbt_sources('fb');
@@ -117,7 +141,7 @@ through an attached Firebird catalog. The argument is a qualified name in
 (the Firebird ATTACH path exposes exactly one schema) and may be omitted.
 
 ```sql
-ATTACH 'database=C:/data/erp.fdb user=SYSDBA password=masterkey'
+ATTACH 'database=C:/data/erp.fdb user=APP_READONLY password=secret'
   AS fb (TYPE firebird);
 
 SELECT *
@@ -238,7 +262,7 @@ Firebird catalog. The argument is the **explicit ATTACH alias** — the
 function does not enumerate catalogs.
 
 ```sql
-ATTACH 'database=C:/data/erp.fdb user=SYSDBA password=masterkey'
+ATTACH 'database=C:/data/erp.fdb user=APP_READONLY password=secret'
   AS fb (TYPE firebird);
 
 SELECT EMP_ID FROM fb.main.EMPLOYEE WHERE EMP_ID = 1;

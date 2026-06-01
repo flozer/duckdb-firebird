@@ -8,6 +8,7 @@
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <utility>
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/optional_idx.hpp"
@@ -146,6 +147,70 @@ bool DatabaseCharsetIsNone(FirebirdConnection &conn) {
     }
 }
 
+// Maps one RDB$RELATION_FIELDS ⋈ RDB$FIELDS metadata row (raw Firebird values)
+// to a FirebirdColumnDesc + DuckDB LogicalType. Shared by LoadTableSchema (one
+// table) and LoadAllTableSchemas (every table) so the blr_* → SQL_* type
+// normalisation and the NONE-charset → BLOB override live in exactly one place.
+static std::pair<FirebirdColumnDesc, LogicalType> MapFirebirdColumn(
+    std::string name, int16_t field_type, int16_t sub_type, int16_t scale,
+    int16_t length, int16_t charset_id, int16_t null_flag,
+    NoneEncoding none_encoding) {
+    FirebirdColumnDesc desc;
+    desc.name             = std::move(name);
+    desc.sqltype          = field_type;
+    desc.sqlsubtype       = sub_type;
+    desc.sqlscale         = scale;
+    desc.sqllen           = length;
+    desc.character_set_id = charset_id;
+    // RDB$NULL_FLAG: 1 means NOT NULL; absent / 0 means nullable.
+    desc.nullable         = (null_flag != 1);
+
+    // RDB$FIELD_TYPE uses Firebird's *internal* blr_* type codes which
+    // differ from the SQL-level XSQLDA constants. Codes 7..37/261 are
+    // legacy (FB <=3); 23..31 are the Firebird 4 additions. Stay in sync
+    // with src/include/firebird/impl/blr.h upstream.
+    switch (desc.sqltype) {
+    case 7:   desc.sqltype = SQL_SHORT;             break;  // SMALLINT
+    case 8:   desc.sqltype = SQL_LONG;              break;  // INTEGER
+    case 9:   desc.sqltype = SQL_QUAD;              break;  // QUAD
+    case 10:  desc.sqltype = SQL_FLOAT;             break;
+    case 11:  desc.sqltype = SQL_D_FLOAT;           break;
+    case 12:  desc.sqltype = SQL_TYPE_DATE;         break;  // (Dialect 3)
+    case 13:  desc.sqltype = SQL_TYPE_TIME;         break;
+    case 14:  desc.sqltype = SQL_TEXT;              break;  // CHAR
+    case 16:  desc.sqltype = SQL_INT64;             break;
+    case 23:  desc.sqltype = SQL_BOOLEAN;           break;
+    case 24:  desc.sqltype = SQL_DEC16;             break;  // FB4 blr_dec64  (IEEE Decimal64 / DECFLOAT(16))
+    case 25:  desc.sqltype = SQL_DEC34;             break;  // FB4 blr_dec128 (IEEE Decimal128 / DECFLOAT(34))
+    case 26:  desc.sqltype = SQL_INT128;            break;  // FB4 INT128 / DECIMAL/NUMERIC(p>18)
+    case 27:  desc.sqltype = SQL_DOUBLE;            break;
+    case 28:  desc.sqltype = SQL_TIME_TZ;           break;  // FB4 TIME WITH TIME ZONE
+    case 29:  desc.sqltype = SQL_TIMESTAMP_TZ;      break;  // FB4 TIMESTAMP WITH TIME ZONE
+    case 30:  desc.sqltype = SQL_TIME_TZ_EX;        break;  // FB4 EXTENDED TIME WITH TIME ZONE
+    case 31:  desc.sqltype = SQL_TIMESTAMP_TZ_EX;   break;  // FB4 EXTENDED TIMESTAMP WITH TIME ZONE
+    case 35:  desc.sqltype = SQL_TIMESTAMP;         break;
+    case 37:  desc.sqltype = SQL_VARYING;           break;
+    case 261: desc.sqltype = SQL_BLOB;              break;
+    default: /* leave as-is; FirebirdToDuckDBType degrades to VARCHAR */ break;
+    }
+
+    // Map to a DuckDB LogicalType. When this is a text column on a
+    // NONE storage charset and the caller asked for none_encoding=BLOB,
+    // hand the bytes through as raw BLOB instead of pretending they
+    // are UTF-8.
+    LogicalType lt;
+    const bool is_text = (desc.sqltype == SQL_TEXT || desc.sqltype == SQL_VARYING);
+    const bool is_blob_subtype_text = (desc.sqltype == SQL_BLOB && desc.sqlsubtype == 1);
+    const bool is_none_charset = (desc.character_set_id == 0);
+    if (none_encoding == NoneEncoding::BLOB && is_none_charset &&
+        (is_text || is_blob_subtype_text)) {
+        lt = LogicalType::BLOB;
+    } else {
+        lt = FirebirdToDuckDBType(desc);
+    }
+    return {std::move(desc), lt};
+}
+
 void LoadTableSchema(FirebirdConnection &conn,
                      const std::string &table_name,
                      duckdb::vector<std::string> &out_names,
@@ -181,62 +246,13 @@ void LoadTableSchema(FirebirdConnection &conn,
 
     auto cursor = conn.OpenCursor(sql);
     while (cursor->Fetch()) {
-        FirebirdColumnDesc desc;
-        desc.name             = cursor->GetText(0);
-        desc.sqltype          = cursor->GetShort(1);
-        desc.sqlsubtype       = cursor->GetShort(2);
-        desc.sqlscale         = cursor->GetShort(3);
-        desc.sqllen           = cursor->GetShort(4);
-        desc.character_set_id = cursor->GetShort(5);
-        // RDB$NULL_FLAG: 1 means NOT NULL; absent / 0 means nullable.
-        desc.nullable         = (cursor->GetShort(6) != 1);
-
-        // RDB$FIELD_TYPE uses Firebird's *internal* blr_* type codes which
-        // differ from the SQL-level XSQLDA constants. Codes 7..37/261 are
-        // legacy (FB <=3); 23..31 are the Firebird 4 additions. Stay in sync
-        // with src/include/firebird/impl/blr.h upstream.
-        switch (desc.sqltype) {
-        case 7:   desc.sqltype = SQL_SHORT;             break;  // SMALLINT
-        case 8:   desc.sqltype = SQL_LONG;              break;  // INTEGER
-        case 9:   desc.sqltype = SQL_QUAD;              break;  // QUAD
-        case 10:  desc.sqltype = SQL_FLOAT;             break;
-        case 11:  desc.sqltype = SQL_D_FLOAT;           break;
-        case 12:  desc.sqltype = SQL_TYPE_DATE;         break;  // (Dialect 3)
-        case 13:  desc.sqltype = SQL_TYPE_TIME;         break;
-        case 14:  desc.sqltype = SQL_TEXT;              break;  // CHAR
-        case 16:  desc.sqltype = SQL_INT64;             break;
-        case 23:  desc.sqltype = SQL_BOOLEAN;           break;
-        case 24:  desc.sqltype = SQL_DEC16;             break;  // FB4 blr_dec64  (IEEE Decimal64 / DECFLOAT(16))
-        case 25:  desc.sqltype = SQL_DEC34;             break;  // FB4 blr_dec128 (IEEE Decimal128 / DECFLOAT(34))
-        case 26:  desc.sqltype = SQL_INT128;            break;  // FB4 INT128 / DECIMAL/NUMERIC(p>18)
-        case 27:  desc.sqltype = SQL_DOUBLE;            break;
-        case 28:  desc.sqltype = SQL_TIME_TZ;           break;  // FB4 TIME WITH TIME ZONE
-        case 29:  desc.sqltype = SQL_TIMESTAMP_TZ;      break;  // FB4 TIMESTAMP WITH TIME ZONE
-        case 30:  desc.sqltype = SQL_TIME_TZ_EX;        break;  // FB4 EXTENDED TIME WITH TIME ZONE
-        case 31:  desc.sqltype = SQL_TIMESTAMP_TZ_EX;   break;  // FB4 EXTENDED TIMESTAMP WITH TIME ZONE
-        case 35:  desc.sqltype = SQL_TIMESTAMP;         break;
-        case 37:  desc.sqltype = SQL_VARYING;           break;
-        case 261: desc.sqltype = SQL_BLOB;              break;
-        default: /* leave as-is; FirebirdToDuckDBType degrades to VARCHAR */ break;
-        }
-
-        // Map to a DuckDB LogicalType. When this is a text column on a
-        // NONE storage charset and the caller asked for none_encoding=BLOB,
-        // hand the bytes through as raw BLOB instead of pretending they
-        // are UTF-8.
-        LogicalType lt;
-        const bool is_text = (desc.sqltype == SQL_TEXT || desc.sqltype == SQL_VARYING);
-        const bool is_blob_subtype_text = (desc.sqltype == SQL_BLOB && desc.sqlsubtype == 1);
-        const bool is_none_charset = (desc.character_set_id == 0);
-        if (none_encoding == NoneEncoding::BLOB && is_none_charset &&
-            (is_text || is_blob_subtype_text)) {
-            lt = LogicalType::BLOB;
-        } else {
-            lt = FirebirdToDuckDBType(desc);
-        }
-        out_names.push_back(desc.name);
-        out_types.push_back(lt);
-        out_descs.push_back(desc);
+        auto mapped = MapFirebirdColumn(
+            cursor->GetText(0), cursor->GetShort(1), cursor->GetShort(2),
+            cursor->GetShort(3), cursor->GetShort(4), cursor->GetShort(5),
+            cursor->GetShort(6), none_encoding);
+        out_names.push_back(mapped.first.name);
+        out_types.push_back(mapped.second);
+        out_descs.push_back(std::move(mapped.first));
     }
 
     if (out_names.empty()) {
@@ -245,6 +261,55 @@ void LoadTableSchema(FirebirdConnection &conn,
             "' not found or has no readable columns "
             "(RDB$RELATION_FIELDS returned no rows)");
     }
+}
+
+// See firebird_scanner.hpp for the contract. Single query + client-side
+// grouping; rows are ORDER BY relation so each table's columns arrive
+// contiguously.
+duckdb::vector<FirebirdTableSchema> LoadAllTableSchemas(
+    FirebirdConnection &conn, NoneEncoding none_encoding) {
+    // Same projection as LoadTableSchema's per-table query, plus the relation
+    // name as the grouping key and a JOIN to RDB$RELATIONS so we apply the
+    // identical user-relation filter the catalog discovery query uses
+    // (system_flag = 0, excluding MON$ snapshots / type 3).
+    const std::string sql =
+        "SELECT TRIM(rf.RDB$RELATION_NAME), "
+        "       TRIM(rf.RDB$FIELD_NAME), "
+        "       f.RDB$FIELD_TYPE, "
+        "       COALESCE(f.RDB$FIELD_SUB_TYPE, 0), "
+        "       COALESCE(f.RDB$FIELD_SCALE, 0), "
+        "       COALESCE(f.RDB$FIELD_LENGTH, 0), "
+        "       COALESCE(f.RDB$CHARACTER_SET_ID, -1), "
+        "       COALESCE(rf.RDB$NULL_FLAG, f.RDB$NULL_FLAG, 0) "
+        "  FROM RDB$RELATION_FIELDS rf "
+        "  JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE "
+        "  JOIN RDB$RELATIONS r ON r.RDB$RELATION_NAME = rf.RDB$RELATION_NAME "
+        " WHERE r.RDB$SYSTEM_FLAG = 0 "
+        "   AND (r.RDB$RELATION_TYPE IS NULL OR r.RDB$RELATION_TYPE <> 3) "
+        " ORDER BY rf.RDB$RELATION_NAME, rf.RDB$FIELD_POSITION";
+
+    duckdb::vector<FirebirdTableSchema> result;
+    auto cursor = conn.OpenCursor(sql);
+    // Points into `result`. Only reseated right after a push_back (when the
+    // relation name changes), so it never dangles across the column appends.
+    FirebirdTableSchema *current = nullptr;
+    while (cursor->Fetch()) {
+        std::string rel = cursor->GetText(0);
+        auto mapped = MapFirebirdColumn(
+            cursor->GetText(1), cursor->GetShort(2), cursor->GetShort(3),
+            cursor->GetShort(4), cursor->GetShort(5), cursor->GetShort(6),
+            cursor->GetShort(7), none_encoding);
+        if (!current || current->table_name != rel) {
+            FirebirdTableSchema ts;
+            ts.table_name = rel;
+            result.push_back(std::move(ts));
+            current = &result.back();
+        }
+        current->names.push_back(mapped.first.name);
+        current->types.push_back(mapped.second);
+        current->descs.push_back(std::move(mapped.first));
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------

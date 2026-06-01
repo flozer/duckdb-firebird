@@ -106,7 +106,7 @@ database as if it were a catalog:
 
 ```sql
 ATTACH 'C:/dados/empresa.fdb' AS fb
-    (TYPE firebird, user 'SYSDBA', password 'masterkey');
+    (TYPE firebird, user 'APP_READONLY', password 'secret');
 
 SELECT *
 FROM fb.main.TABPESSOAS
@@ -178,13 +178,40 @@ LIMIT 10;
 
 ### Remote server
 
+For remote databases, prefer the URL form:
+
+```text
+firebird://USER:PASSWORD@HOST:PORT/path/to/database.fdb?charset=UTF8
+```
+
+The database path is the path as seen by the Firebird server, not a path
+on the DuckDB client machine. Do not use `HOST:PORT://path/to/database.fdb`;
+that is not a valid Firebird connection string for this extension.
+
 ```sql
 SELECT *
 FROM firebird_scan(
-    'firebird://user:password@server:3050/C:/dados/empresa.fdb?charset=UTF8',
-    'TABPESSOAS'
+    'firebird://APP_READONLY:secret@db.example.com:3050/path/to/database.fdb?charset=UTF8',
+    'CUSTOMER'
 )
 LIMIT 10;
+```
+
+The equivalent libfbclient-style connection string puts the port after
+the host with `/PORT`:
+
+```sql
+SELECT *
+FROM firebird_tables(
+    'database=db.example.com/3050:/path/to/database.fdb;user=APP_READONLY;password=secret;charset=UTF8'
+);
+```
+
+`ATTACH` accepts the same connection strings:
+
+```sql
+ATTACH 'firebird://APP_READONLY:secret@db.example.com:3050/path/to/database.fdb?charset=UTF8'
+    AS fb (TYPE firebird);
 ```
 
 ### Named parameters
@@ -197,8 +224,8 @@ SELECT *
 FROM firebird_scan(
     'C:/legacy/erp.fdb',
     'TABPESSOAS',
-    user='SYSDBA',
-    password='masterkey',
+    user='APP_READONLY',
+    password='secret',
     charset='UTF8'
 )
 LIMIT 10;
@@ -362,7 +389,7 @@ When you use `ATTACH`, browse with qualified names:
 
 ```sql
 ATTACH 'C:/legacy/erp.fdb' AS fb
-    (TYPE firebird, user 'SYSDBA', password 'masterkey');
+    (TYPE firebird, user 'APP_READONLY', password 'secret');
 
 SHOW DATABASES;
 
@@ -378,7 +405,7 @@ sees everything:
 
 ```sql
 ATTACH 'C:/legacy/erp.fdb' AS fb
-    (TYPE firebird, user 'SYSDBA', password 'masterkey');
+    (TYPE firebird, user 'APP_READONLY', password 'secret');
 
 -- List tables (and views) in the Firebird catalog:
 SHOW TABLES FROM fb;
