@@ -59,6 +59,11 @@ strength), per the roadmap.
   type under GCC (the community CI toolchain), making the private `pool_`
   access fail. MSVC had masked it. Forward-declared at namespace scope;
   pure portability fix, no behavior change. (`b662edc`)
+- **MinGW/GCC 10.4 community build break** — the community-extensions Windows
+  build uses RTools42/MinGW GCC 10.4, which rejected implicit return of local
+  `std::unique_ptr` values in `firebird_scanner.cpp` and
+  `firebird_storage.cpp`. The returns now move explicitly; pure portability
+  fix, no behavior change.
 
 ## Deferred
 
@@ -90,6 +95,10 @@ strength), per the roadmap.
 - **Docker smoke end-to-end green**: `LOAD` + `firebird_scan` + `ATTACH` +
   `firebird_profile_table` against a disposable synthetic fixture inside the
   container.
+- **Local RTools42/MinGW validation green**: configured with GCC/G++ 10.4.0
+  and Ninja, then built `firebird_extension` and `firebird_loadable_extension`.
+  The portability hotfix compiles both `firebird_scanner.cpp` and
+  `firebird_storage.cpp` on the community Windows toolchain.
 
 ## Release Assets
 
