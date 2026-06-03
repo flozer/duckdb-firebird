@@ -254,7 +254,7 @@ This sidesteps the catalog plumbing for now; users get federated
 queries against Firebird through familiar `schema.table` syntax, and
 the views inherit every pushdown the scanner supports.
 
-## Deferred work (as of v0.5.1)
+## Deferred work (as of v0.6.0)
 
 Items shipped since the original v0.2 cut (Native `ATTACH`, projection
 and predicate pushdown, prepared statements, PK-range partitioning,

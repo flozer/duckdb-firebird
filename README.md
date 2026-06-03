@@ -9,7 +9,7 @@
     <a href="LICENSE"><img alt="license MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
     <a href="https://github.com/flozer/duckdb-firebird/releases/tag/v0.6.0"><img alt="release v0.6.0" src="https://img.shields.io/badge/release-v0.6.0-blue.svg"></a>
     <a href="https://github.com/flozer/duckdb-firebird/actions/workflows/build-linux-fb-matrix.yml"><img alt="linux matrix" src="https://github.com/flozer/duckdb-firebird/actions/workflows/build-linux-fb-matrix.yml/badge.svg"></a>
-    <a href="https://github.com/duckdb/community-extensions/pull/1980"><img alt="community PR" src="https://img.shields.io/badge/DuckDB%20community-PR%20open-yellow.svg"></a>
+    <a href="https://github.com/duckdb/community-extensions/pull/1980"><img alt="community extension merged" src="https://img.shields.io/badge/DuckDB%20community-merged-brightgreen.svg"></a>
   </p>
   <p>
     <a href="docs/en/usage_guide.md">Usage guide</a> |
@@ -65,6 +65,7 @@ such as GizmoSQL.
 ## Quick Start
 
 ```sql
+INSTALL firebird FROM community;
 LOAD firebird;
 
 -- Live scan
@@ -385,19 +386,26 @@ community-extensions/      DuckDB community descriptor copy
 
 ## Community Catalog
 
-The DuckDB community-extension submission is tracked at
+The DuckDB community-extension submission was merged via
 [duckdb/community-extensions#1980](https://github.com/duckdb/community-extensions/pull/1980).
-The descriptor currently points to `repo.ref: v0.6.0` (runtime-loaded
-Firebird client; no `libfbclient` build dependency).
-
-After it is accepted, users should be able to install with:
+The community descriptor points to `repo.ref: v0.6.0` (runtime-loaded
+Firebird client; no `libfbclient` build dependency), so normal users should
+install from the official DuckDB community repository:
 
 ```sql
 INSTALL firebird FROM community;
 LOAD firebird;
 ```
 
-Until then, load a signed release artifact or a locally built extension.
+Use the GitHub release artifact or a locally built `.duckdb_extension` only
+for development work on this repository, testing unreleased changes, or
+offline machines without access to the DuckDB community repository:
+
+```sql
+LOAD '/absolute/path/to/firebird.duckdb_extension';
+```
+
+Local unsigned builds may require starting DuckDB with `-unsigned`.
 
 ## Author
 

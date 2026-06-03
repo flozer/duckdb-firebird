@@ -120,14 +120,14 @@ tables in the local DuckDB catalog.
 
 ### Current status
 
-The current public version of the project is `v0.5.1`. The publishing
-request to the DuckDB Community catalog is open at
+The current public version of the project is `v0.6.0`. The publishing
+request to the DuckDB Community catalog was merged at
 [`duckdb/community-extensions#1980`](https://github.com/duckdb/community-extensions/pull/1980)
-and points to that tag.
+and now points to that tag.
 
-### Once the extension is published in the community catalog
+### Official community-catalog installation
 
-After the extension is available in the DuckDB community catalog:
+Use DuckDB's official community catalog in environments with internet access:
 
 ```sql
 INSTALL firebird FROM community;
@@ -137,9 +137,11 @@ LOAD firebird;
 Use this on every new environment. `INSTALL` downloads the extension;
 `LOAD` loads it into the current session.
 
-### While using a local build
+### Local build or downloaded release
 
-If you are using a locally produced `.duckdb_extension` file:
+Use a locally produced `.duckdb_extension` file, or a file downloaded from this
+repository's releases, only for development, testing unreleased changes, or
+offline machines without access to the community catalog:
 
 ```sql
 LOAD 'D:/01_Projetos/duckdb-firebird/build/release/extension/firebird/firebird.duckdb_extension';
@@ -851,8 +853,10 @@ WHERE DATAMOVIMENTO >= DATE '2024-01-01';
 
 ```sql
 -- 1. Open a persistent DuckDB file:
---    duckdb analytics.duckdb -unsigned
+--    duckdb analytics.duckdb
+--    use -unsigned only for unsigned local builds
 
+INSTALL firebird FROM community;
 LOAD firebird;
 
 -- 2. Explore the source.
@@ -895,7 +899,8 @@ TO 'C:/exports/pessoas_por_uf.parquet'
 ### `Extension "firebird" could not be loaded`
 
 Make sure the extension was installed, or that the `LOAD` path points
-to the correct file. On a local build, run the CLI with `-unsigned`.
+to the correct file. In the official flow, run `INSTALL firebird FROM community;`
+before `LOAD`. On an unsigned local build, run the CLI with `-unsigned`.
 
 ### Wrong `fbclient.dll` on Windows
 

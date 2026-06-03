@@ -271,10 +271,11 @@ every push to `main`.
 `windows-latest` against a downloaded Firebird Windows SDK ZIP and
 uploads the resulting `firebird.duckdb_extension` as a release artifact.
 
-### v0.5.1 public release verification
+### v0.6.0 public release and community verification
 
-`v0.5.1` points at `0cbf259` and includes the post-v0.5.0 public-repo
-hardening plus compatibility fixes:
+`v0.6.0` is the current public release and the first tag referenced by the
+merged DuckDB Community descriptor. It includes the v0.5 public-repo hardening,
+runtime Firebird client loading, and the v0.6 diagnostics/reliability work:
 
 - `firebird://host:port/path` URL parsing now emits libfbclient's
   `host/port:/path` remote database form.
@@ -282,8 +283,11 @@ hardening plus compatibility fixes:
   headers that omit `SQL_TIMESTAMP_TZ_EX` / `SQL_TIME_TZ_EX`.
 - Linux Firebird fixture setup was hardened for GitHub-hosted runners.
 - GitHub Actions dependencies were updated by Dependabot.
+- `firebird_profile_table`, pushdown explainability, connection-pool stats,
+  DECFLOAT lossless fallback, and adaptive parallel-scan recommendations
+  shipped in v0.6.0.
 
-GitHub Actions on `main@0cbf259`:
+GitHub Actions for the public release path:
 
 | Workflow | Result |
 |---|---|
@@ -293,7 +297,7 @@ GitHub Actions on `main@0cbf259`:
 
 DuckDB community submission
 [`duckdb/community-extensions#1980`](https://github.com/duckdb/community-extensions/pull/1980)
-points to `repo.ref: v0.5.1` and remains a single-file descriptor PR.
+was merged on 2026-06-03 and points to `repo.ref: v0.6.0`.
 
 ### Known gaps deferred past v0.5
 
