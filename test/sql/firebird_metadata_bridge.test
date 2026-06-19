@@ -34,3 +34,14 @@ SELECT column_name, ordinal_position
 ----
 A	1
 B	2
+
+# --- table_constraints: FOREIGN KEY presence ------------------------
+query II
+SELECT table_name, COUNT(*)
+  FROM information_schema.table_constraints
+ WHERE table_catalog = 'fb' AND constraint_type = 'FOREIGN KEY'
+ GROUP BY table_name
+ ORDER BY table_name;
+----
+EMPLOYEE	1
+TCHILD	1

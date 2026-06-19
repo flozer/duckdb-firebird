@@ -153,18 +153,25 @@ Comentário em domain/generator/index/constraint fica fora do incremento 1
      ON UPDATE/ON DELETE)
    O DuckDB gera `table_constraints`/`key_column_usage`/`referential_constraints`.
 
-   **Risco a verificar no plano:** o DuckDB não aplica ações de FK, então o
-   `ForeignKeyConstraint` pode não propagar `ON UPDATE`/`ON DELETE` para
-   `information_schema.referential_constraints` (`update_rule`/`delete_rule`).
-   Verificar empiricamente. `firebird_foreign_keys('fb')` cobre **apenas os
-   campos que o DuckDB não propagar** — especialmente `update_rule`/`delete_rule`
-   — e nunca substitui o information_schema. `table_constraints` e
-   `key_column_usage` (PK, UNIQUE, FK: colunas, ordinal, constraint referenciada)
-   continuam sendo a fonte primária e seus testes são mantidos sempre,
-   independentemente do resultado da verificação. A função FB existe só para
-   recuperar a fidelidade das regras de integridade referencial que o catálogo
-   DuckDB descarta. Origem: `RDB$REF_CONSTRAINTS` + `RDB$RELATION_CONSTRAINTS`
-   + `RDB$INDEX_SEGMENTS`.
+   **Verificação empírica (Task 4, 2026-06-19) — CONCLUÍDA:**
+   - **ATTACH**: OK. `ForeignKeyConstraint` anexado ao `CreateTableInfo` de
+     `FirebirdTableEntry` em catálogo read-only é aceito sem erro.
+   - **`information_schema.table_constraints` FK rows**: PRESENTE. EMPLOYEE (1)
+     e TCHILD (1) aparecem com `constraint_type = 'FOREIGN KEY'`. Test GREEN.
+   - **`information_schema.referential_constraints` rules**: PRESENTE mas regras
+     são PLACEHOLDER. DuckDB gera a linha (constraint_name, unique_constraint_name
+     preenchidos), mas `update_rule`/`delete_rule` ficam sempre `'NO ACTION'`
+     independentemente das regras Firebird reais (CASCADE, SET NULL etc.).
+     `match_option` = `'NONE'`. A `ForeignKeyInfo` não transporta actions; o DuckDB
+     não tem campo para recebê-las na parser layer.
+   - **Conclusão para Task 5**: `firebird_foreign_keys('fb')` é obrigatória para
+     expor as regras ON UPDATE/ON DELETE reais. O information_schema cobre
+     presença de FK e referência à constraint pai; as regras são domínio exclusivo
+     da função FB. `table_constraints` e `key_column_usage` permanecem fonte
+     primária. `firebird_foreign_keys('fb')` cobre **apenas os campos que o DuckDB
+     não propagar** — especialmente `update_rule`/`delete_rule` — e nunca substitui
+     o information_schema. Origem: `RDB$REF_CONSTRAINTS` + `RDB$RELATION_CONSTRAINTS`
+     + `RDB$INDEX_SEGMENTS`.
 2. **Funções FB**: cada uma é uma table function read-only que executa a query
    `RDB$` correspondente pelo client existente, projeta o schema tipado fixo e
    ordena no servidor. Reaproveitar infra de `firebird_tables`/`firebird_types`.
