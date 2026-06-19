@@ -116,4 +116,33 @@ static void MetaFunction(ClientContext &, TableFunctionInput &input,
     return fn;
 }
 
+TableFunction GetFirebirdForeignKeysFunction() {
+    static const MetadataFn desc{
+        "firebird_foreign_keys",
+        {"fk_schema", "fk_table", "fk_constraint", "ordinal_position",
+         "fk_column", "pk_table", "pk_constraint", "update_rule", "delete_rule"},
+        {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+         LogicalType::INTEGER, LogicalType::VARCHAR, LogicalType::VARCHAR,
+         LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+        "SELECT TRIM(rc.RDB$RELATION_NAME), TRIM(rc.RDB$CONSTRAINT_NAME), "
+        "       fkseg.RDB$FIELD_POSITION, TRIM(fkseg.RDB$FIELD_NAME), "
+        "       TRIM(uq.RDB$RELATION_NAME), TRIM(ref.RDB$CONST_NAME_UQ), "
+        "       TRIM(ref.RDB$UPDATE_RULE), TRIM(ref.RDB$DELETE_RULE) "
+        "  FROM RDB$RELATION_CONSTRAINTS rc "
+        "  JOIN RDB$REF_CONSTRAINTS ref ON ref.RDB$CONSTRAINT_NAME = rc.RDB$CONSTRAINT_NAME "
+        "  JOIN RDB$RELATION_CONSTRAINTS uq ON uq.RDB$CONSTRAINT_NAME = ref.RDB$CONST_NAME_UQ "
+        "  JOIN RDB$INDEX_SEGMENTS fkseg ON fkseg.RDB$INDEX_NAME = rc.RDB$INDEX_NAME "
+        " WHERE rc.RDB$CONSTRAINT_TYPE = 'FOREIGN KEY' "
+        " ORDER BY rc.RDB$RELATION_NAME, rc.RDB$CONSTRAINT_NAME, fkseg.RDB$FIELD_POSITION",
+        [](FirebirdStatement &c) -> duckdb::vector<Value> {
+            // RDB$FIELD_POSITION is SMALLINT — use GetShort, not GetLong.
+            Value ordinal = c.IsNull(2) ? Value(LogicalType::INTEGER)
+                                        : Value::INTEGER(c.GetShort(2));
+            return {Value("main"), TextOrNull(c, 0), TextOrNull(c, 1),
+                    ordinal, TextOrNull(c, 3), TextOrNull(c, 4),
+                    TextOrNull(c, 5), TextOrNull(c, 6), TextOrNull(c, 7)};
+        }};
+    return MakeMetadataFunction(desc);
+}
+
 } // namespace duckdb

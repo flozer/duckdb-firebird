@@ -45,3 +45,23 @@ SELECT table_name, COUNT(*)
 ----
 EMPLOYEE	1
 TCHILD	1
+
+# --- firebird_foreign_keys: composite FK, ordinal, rules ------------
+query IIIIII
+SELECT fk_table, fk_constraint, ordinal_position, fk_column, pk_table, pk_constraint
+  FROM firebird_foreign_keys('fb')
+ WHERE fk_constraint = 'FK_TCHILD_TPK'
+ ORDER BY ordinal_position;
+----
+TCHILD	FK_TCHILD_TPK	0	PARENT_A	TPK_COMPOSITE	PK_TPK_COMPOSITE
+TCHILD	FK_TCHILD_TPK	1	PARENT_B	TPK_COMPOSITE	PK_TPK_COMPOSITE
+
+# --- FK referential rules (the fidelity DuckDB drops) ---------------
+query III
+SELECT fk_constraint, update_rule, delete_rule
+  FROM firebird_foreign_keys('fb')
+ WHERE fk_table IN ('EMPLOYEE','TCHILD') AND ordinal_position = 0
+ ORDER BY fk_constraint;
+----
+FK_EMP_DEPT	CASCADE	SET NULL
+FK_TCHILD_TPK	NO ACTION	CASCADE
