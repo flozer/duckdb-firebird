@@ -48,10 +48,25 @@ information_schema é o contrato que dbt/BI já consomem sem aprender API nova.
 Generators, domains, computed columns, dependencies e comments não têm view
 padrão fiel — função tipada preserva o detalhe Firebird sem distorção.
 
+## Convenções de nome e schema (todas as funções)
+
+- **`object_schema` / `table_schema`**: valor canônico `'main'` — a convenção
+  atual da extensão (Firebird não tem schemas; o catálogo já expõe `fb.main.*`).
+  Constante literal, não derivada do `RDB$`.
+- **Identificadores**: os nomes em `RDB$` são `CHAR` com padding de espaços.
+  Aplicar `RTRIM` (server-side ou na projeção) em todo identificador
+  — relation, field, index, constraint, generator, domain — antes de devolver.
+- **Tipos/códigos desconhecidos**: nunca dropar a linha. Onde há mapeamento
+  código→texto (ex.: `object_type`, `depends_on_type`), código sem mapeamento
+  conhecido vira `object_type = 'UNKNOWN'` e o código numérico fiel permanece
+  na coluna `*_type_code` própria. Mapeamento de tipo de dado FB desconhecido
+  vira a string crua do código, nunca NULL silencioso.
+
 ## Contrato das funções FB-específicas
 
 Todas: argumento = nome do catálogo ATTACHed (ex.: `'fb'`). Read-only.
 Ordenação determinística. Schema fixo (sem colunas heterogêneas).
+Convenções de nome/schema acima aplicam-se a todas.
 
 ### `firebird_indexes('fb')`
 
@@ -76,9 +91,15 @@ Regras:
   incremento fixo (o passo é por chamada `GEN_ID`).
 - `initial_value` de `RDB$GENERATORS.RDB$INITIAL_VALUE` quando disponível.
 - `current_value` lido via `GEN_ID(<nome>, 0)` — passo 0 não altera o valor
-  (sem efeito colateral). Requer privilégio de leitura. Se a leitura não puder
-  ser feita com segurança/privilégio, `current_value = NULL` e o comportamento
-  é documentado como indisponível (não erro).
+  (sem efeito colateral).
+- **Quoting seguro**: o nome do generator é interpolado como identificador
+  Firebird entre aspas duplas, com escape de aspas internas
+  (`"` → `""`). Nunca como literal/string concatenada. Defesa contra nome com
+  caractere especial ou aspas.
+- **Isolamento por generator**: cada `current_value` é lido numa execução
+  isolada. Falha de privilégio ou erro em um generator → `current_value = NULL`
+  **somente naquela linha**; a função não aborta nem perde as demais linhas.
+  `initial_value` (lido de `RDB$GENERATORS`) permanece independente disso.
 - Origem: `RDB$GENERATORS` (filtrar `RDB$SYSTEM_FLAG = 0`).
 
 ### `firebird_domains('fb')`
@@ -108,8 +129,17 @@ Origem: `RDB$DEPENDENCIES`.
 
 Colunas: `object_schema`, `object_name`, `object_type`, `column_name`
 (NULL **somente** quando o comentário não é de coluna), `comment` (VARCHAR).
-Origem: `RDB$DESCRIPTION` em `RDB$RELATIONS` / `RDB$RELATION_FIELDS`
-(e demais objetos com descrição no escopo do contrato).
+
+Tipos de comentário suportados no incremento 1 (enumerados, sem
+"demais objetos"):
+
+- `TABLE` — `RDB$RELATIONS.RDB$DESCRIPTION` onde `RDB$VIEW_BLR IS NULL`, `column_name = NULL`
+- `VIEW` — `RDB$RELATIONS.RDB$DESCRIPTION` onde `RDB$VIEW_BLR IS NOT NULL`, `column_name = NULL`
+- `COLUMN` — `RDB$RELATION_FIELDS.RDB$DESCRIPTION`, `column_name` preenchido
+
+Comentário em domain/generator/index/constraint fica fora do incremento 1
+(frente futura se houver demanda). Apenas linhas com `RDB$DESCRIPTION` não-nulo
+(`RDB$SYSTEM_FLAG = 0`).
 
 ## Mecanismo de implementação
 
@@ -126,12 +156,15 @@ Origem: `RDB$DESCRIPTION` em `RDB$RELATIONS` / `RDB$RELATION_FIELDS`
    **Risco a verificar no plano:** o DuckDB não aplica ações de FK, então o
    `ForeignKeyConstraint` pode não propagar `ON UPDATE`/`ON DELETE` para
    `information_schema.referential_constraints` (`update_rule`/`delete_rule`).
-   Verificar empiricamente. Se as regras não aparecerem, expor a FK completa
-   (colunas, ordinal, constraint referenciada, update/delete rule) via função
-   FB-específica `firebird_foreign_keys('fb')` (origem `RDB$REF_CONSTRAINTS` +
-   `RDB$RELATION_CONSTRAINTS` + `RDB$INDEX_SEGMENTS`), mantendo o requisito de
-   teste das regras ON UPDATE/ON DELETE atendido. As demais constraints (PK,
-   UNIQUE) permanecem no information_schema independentemente.
+   Verificar empiricamente. `firebird_foreign_keys('fb')` cobre **apenas os
+   campos que o DuckDB não propagar** — especialmente `update_rule`/`delete_rule`
+   — e nunca substitui o information_schema. `table_constraints` e
+   `key_column_usage` (PK, UNIQUE, FK: colunas, ordinal, constraint referenciada)
+   continuam sendo a fonte primária e seus testes são mantidos sempre,
+   independentemente do resultado da verificação. A função FB existe só para
+   recuperar a fidelidade das regras de integridade referencial que o catálogo
+   DuckDB descarta. Origem: `RDB$REF_CONSTRAINTS` + `RDB$RELATION_CONSTRAINTS`
+   + `RDB$INDEX_SEGMENTS`.
 2. **Funções FB**: cada uma é uma table function read-only que executa a query
    `RDB$` correspondente pelo client existente, projeta o schema tipado fixo e
    ordena no servidor. Reaproveitar infra de `firebird_tables`/`firebird_types`.
