@@ -71,3 +71,11 @@ SELECT fk_constraint, update_rule, delete_rule
 ----
 FK_EMP_DEPT	CASCADE	SET NULL
 FK_TCHILD_TPK	NO ACTION	CASCADE
+
+# --- firebird_indexes: computed index has expression, no column -----
+query IIII
+SELECT index_name, is_unique, column_name, expression_source IS NOT NULL
+  FROM firebird_indexes('fb')
+ WHERE index_name = 'EMP_UPPER_NAME_IDX';
+----
+EMP_UPPER_NAME_IDX	false	NULL	true

@@ -125,6 +125,34 @@ static void MetaFunction(ClientContext &, TableFunctionInput &input,
     return fn;
 }
 
+TableFunction GetFirebirdIndexesFunction() {
+    static const MetadataFn desc{
+        "firebird_indexes",
+        {"table_schema", "table_name", "index_name", "is_unique", "is_active",
+         "segment_position", "column_name", "expression_source"},
+        {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+         LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::INTEGER,
+         LogicalType::VARCHAR, LogicalType::VARCHAR},
+        "SELECT TRIM(i.RDB$RELATION_NAME), TRIM(i.RDB$INDEX_NAME), "
+        "       i.RDB$UNIQUE_FLAG, i.RDB$INDEX_INACTIVE, "
+        "       seg.RDB$FIELD_POSITION, TRIM(seg.RDB$FIELD_NAME), "
+        "       CAST(i.RDB$EXPRESSION_SOURCE AS VARCHAR(4000)) "
+        "  FROM RDB$INDICES i "
+        "  LEFT JOIN RDB$INDEX_SEGMENTS seg ON seg.RDB$INDEX_NAME = i.RDB$INDEX_NAME "
+        " WHERE i.RDB$SYSTEM_FLAG = 0 "
+        " ORDER BY i.RDB$RELATION_NAME, i.RDB$INDEX_NAME, seg.RDB$FIELD_POSITION",
+        [](FirebirdStatement &c) -> duckdb::vector<Value> {
+            // RDB$INDEX_INACTIVE: SMALLINT; NULL or 0 = active, 1 = inactive
+            Value active = Value::BOOLEAN(c.IsNull(3) || c.GetShort(3) == 0);
+            // RDB$UNIQUE_FLAG: SMALLINT — BoolFromFlag uses GetShort
+            // RDB$FIELD_POSITION: SMALLINT, 0-based — ShortOrNull
+            return {Value("main"), TextOrNull(c, 0), TextOrNull(c, 1),
+                    BoolFromFlag(c, 2), active, ShortOrNull(c, 4),
+                    TextOrNull(c, 5), TextOrNull(c, 6)};
+        }};
+    return MakeMetadataFunction(desc);
+}
+
 TableFunction GetFirebirdForeignKeysFunction() {
     static const MetadataFn desc{
         "firebird_foreign_keys",
