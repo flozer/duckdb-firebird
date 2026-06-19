@@ -40,6 +40,7 @@ SALARY	DECIMAL(18,2)	YES
 HIRE_DATE	DATE	YES
 ACTIVE	BOOLEAN	YES
 NOTE	VARCHAR	YES
+NAME_LEN	INTEGER	YES
 
 # --- Reads through the attached catalog ------------------------------------
 

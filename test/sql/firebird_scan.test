@@ -172,13 +172,13 @@ SELECT SUM(EMP_ID) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE', partiti
 
 # --- firebird_tables() — discovery -----------------------------------------
 
-# EMPLOYEE is present, has 7 columns, PK on EMP_ID.
+# EMPLOYEE is present, has 8 columns (incl. NAME_LEN computed column), PK on EMP_ID.
 query IIII
 SELECT table_name, column_count, has_pk, pk_column
   FROM firebird_tables('${FIREBIRD_TEST_DB}')
  WHERE table_name = 'EMPLOYEE';
 ----
-EMPLOYEE	7	true	EMP_ID
+EMPLOYEE	8	true	EMP_ID
 
 # --- firebird_attach_sql() — view-based "attach" ----------------------------
 

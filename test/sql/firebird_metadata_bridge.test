@@ -1,0 +1,36 @@
+# name: test/sql/firebird_metadata_bridge.test
+# description: Metadata Bridge 2.0 -- information_schema constraints + FB metadata functions
+# group: [firebird]
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+require-env ISC_PASSWORD
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird);
+
+# --- table_constraints: PRIMARY KEY + UNIQUE ------------------------
+query III
+SELECT table_name, constraint_type, COUNT(*)
+  FROM information_schema.table_constraints
+ WHERE table_catalog = 'fb' AND constraint_type = 'PRIMARY KEY'
+ GROUP BY table_name, constraint_type
+ ORDER BY table_name;
+----
+DEPT	PRIMARY KEY	1
+EMPLOYEE	PRIMARY KEY	1
+FILE_STORAGE	PRIMARY KEY	1
+TPK_COMPOSITE	PRIMARY KEY	1
+TQUOTES	PRIMARY KEY	1
+
+# --- key_column_usage: composite PK ordinal -------------------------
+query II
+SELECT column_name, ordinal_position
+  FROM information_schema.key_column_usage
+ WHERE table_catalog = 'fb' AND table_name = 'TPK_COMPOSITE'
+ ORDER BY ordinal_position;
+----
+A	1
+B	2
