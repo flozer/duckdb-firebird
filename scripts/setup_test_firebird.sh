@@ -141,6 +141,19 @@ CREATE OR ALTER VIEW V_MULTILINE_KW (DEPT_NO, N) AS
         BY e.DEPT_NO;
 COMMIT;
 
+-- Apostrophe fixture — TQUOTES exercises the prepared-statement bind path
+-- (firebird_bind_params.test): string filters must parametrise so embedded
+-- apostrophes can't break the SQL. Mirrors scripts/smoke_fixture.sql; also
+-- counted by firebird_metadata.test (9 tables / 27 columns) and ordered by
+-- firebird_dbt_sources.test (TPK_COMPOSITE -> TQUOTES -> V_ACTIVE_EMP).
+CREATE TABLE TQUOTES (
+    ID    INTEGER NOT NULL PRIMARY KEY,
+    LABEL VARCHAR(60) NOT NULL
+);
+INSERT INTO TQUOTES VALUES (1, 'D''Agua');
+INSERT INTO TQUOTES VALUES (2, 'O''Brien & Co');
+COMMIT;
+
 -- Composite-PK fixture — guards firebird_generate_dbt_sources() against
 -- emitting "tests: [not_null, unique]" for any single column of a
 -- multi-segment PK. The dbt sources walker resolves this table's PK
