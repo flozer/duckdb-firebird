@@ -74,12 +74,15 @@ true
 
 # ---------------------------------------------------------------------------
 #  Table ordering: tables appear alphabetically by RDB$RELATION_NAME.
-#  EMPLOYEE -> FILE_STORAGE -> TPK_COMPOSITE -> TQUOTES -> V_ACTIVE_EMP.
+#  DEPT -> EMPLOYEE -> FILE_STORAGE -> TCHILD -> TPK_COMPOSITE -> TQUOTES
+#  -> V_ACTIVE_EMP.
 # ---------------------------------------------------------------------------
 
 query T
-SELECT instr(yaml, '"EMPLOYEE"')      < instr(yaml, '"FILE_STORAGE"')
-   AND instr(yaml, '"FILE_STORAGE"')  < instr(yaml, '"TPK_COMPOSITE"')
+SELECT instr(yaml, '"DEPT"')          < instr(yaml, '"EMPLOYEE"')
+   AND instr(yaml, '"EMPLOYEE"')      < instr(yaml, '"FILE_STORAGE"')
+   AND instr(yaml, '"FILE_STORAGE"')  < instr(yaml, '"TCHILD"')
+   AND instr(yaml, '"TCHILD"')        < instr(yaml, '"TPK_COMPOSITE"')
    AND instr(yaml, '"TPK_COMPOSITE"') < instr(yaml, '"TQUOTES"')
    AND instr(yaml, '"TQUOTES"')       < instr(yaml, '"V_ACTIVE_EMP"')
   FROM t_dbt_yaml;
@@ -89,12 +92,19 @@ true
 # ---------------------------------------------------------------------------
 #  Column ordering for EMPLOYEE: RDB$FIELD_POSITION drives the YAML
 #  order. EMP_ID -> EMP_NAME -> DEPT_NO -> SALARY -> HIRE_DATE -> ...
+#  Note: DEPT_NO also appears in the DEPT table section (which precedes
+#  EMPLOYEE alphabetically). We search for DEPT_NO within EMPLOYEE's
+#  subsection (starting from EMP_ID's position) to avoid false matches.
 # ---------------------------------------------------------------------------
 
 query T
-SELECT instr(yaml, '"EMP_ID"')   < instr(yaml, '"EMP_NAME"')
-   AND instr(yaml, '"EMP_NAME"') < instr(yaml, '"DEPT_NO"')
-   AND instr(yaml, '"DEPT_NO"')  < instr(yaml, '"SALARY"')
+SELECT instr(yaml, '"EMP_ID"') < instr(yaml, '"EMP_NAME"')
+   AND instr(yaml, '"EMP_NAME"') <
+       instr(yaml, '"EMP_NAME"') +
+       instr(substr(yaml, instr(yaml, '"EMP_NAME"')), '"DEPT_NO"')
+   AND instr(yaml, '"EMP_NAME"') +
+       instr(substr(yaml, instr(yaml, '"EMP_NAME"')), '"DEPT_NO"') <
+       instr(yaml, '"SALARY"')
   FROM t_dbt_yaml;
 ----
 true
@@ -135,13 +145,13 @@ true
 #  not carry tests on any of its columns.
 # ---------------------------------------------------------------------------
 
-# At least three (EMP_ID, FILE_ID, ID) emit not_null + unique blocks.
+# At least four (DEPT_NO, EMP_ID, FILE_ID, ID) emit not_null + unique blocks.
 
 query I
 SELECT (length(yaml) - length(replace(yaml, '- not_null', ''))) / length('- not_null')
   FROM t_dbt_yaml;
 ----
-3
+4
 
 # Composite PK: TPK_COMPOSITE must list A, B, LABEL and emit zero tests
 # blocks under its table.

@@ -144,8 +144,9 @@ COMMIT;
 -- Apostrophe fixture — TQUOTES exercises the prepared-statement bind path
 -- (firebird_bind_params.test): string filters must parametrise so embedded
 -- apostrophes can't break the SQL. Mirrors scripts/smoke_fixture.sql; also
--- counted by firebird_metadata.test (9 tables / 27 columns) and ordered by
--- firebird_dbt_sources.test (TPK_COMPOSITE -> TQUOTES -> V_ACTIVE_EMP).
+-- counted by firebird_metadata.test (11 tables / 33 columns) and ordered by
+-- firebird_dbt_sources.test (DEPT -> EMPLOYEE -> FILE_STORAGE -> TCHILD ->
+-- TPK_COMPOSITE -> TQUOTES -> V_ACTIVE_EMP).
 CREATE TABLE TQUOTES (
     ID    INTEGER NOT NULL PRIMARY KEY,
     LABEL VARCHAR(60) NOT NULL
@@ -163,6 +164,50 @@ CREATE TABLE TPK_COMPOSITE (
     B     INTEGER NOT NULL,
     LABEL VARCHAR(20),
     CONSTRAINT PK_TPK_COMPOSITE PRIMARY KEY (A, B)
+);
+COMMIT;
+
+-- Parent table for a single-column FK from EMPLOYEE.DEPT_NO.
+CREATE TABLE DEPT (
+    DEPT_NO   VARCHAR(3) NOT NULL PRIMARY KEY,
+    DEPT_NAME VARCHAR(40)
+);
+INSERT INTO DEPT VALUES ('600', 'Engineering');
+INSERT INTO DEPT VALUES ('700', 'Sales');
+INSERT INTO DEPT VALUES ('900', 'Support');
+COMMIT;
+
+-- Single-column FK with explicit referential actions.
+ALTER TABLE EMPLOYEE
+    ADD CONSTRAINT FK_EMP_DEPT FOREIGN KEY (DEPT_NO)
+    REFERENCES DEPT (DEPT_NO) ON UPDATE CASCADE ON DELETE SET NULL;
+COMMIT;
+
+-- Domain (named field) for firebird_domains coverage.
+CREATE DOMAIN D_SALARY AS NUMERIC(10,2) CHECK (VALUE > 0);
+COMMIT;
+
+-- Generator with a known initial value for firebird_generators.
+CREATE SEQUENCE GEN_EMP_ID START WITH 100;
+COMMIT;
+
+-- Computed column for firebird_computed_columns.
+ALTER TABLE EMPLOYEE ADD NAME_LEN COMPUTED BY (CHAR_LENGTH(EMP_NAME));
+COMMIT;
+
+-- Comments for firebird_comments (TABLE + COLUMN).
+COMMENT ON TABLE EMPLOYEE IS 'Staff records fixture';
+COMMENT ON COLUMN EMPLOYEE.EMP_NAME IS 'Full name';
+COMMIT;
+
+-- Composite FK child: exercises multi-column FK, ordinal position,
+-- referenced composite PK, and ON UPDATE/ON DELETE rules.
+CREATE TABLE TCHILD (
+    PARENT_A INTEGER NOT NULL,
+    PARENT_B INTEGER NOT NULL,
+    NOTE     VARCHAR(20),
+    CONSTRAINT FK_TCHILD_TPK FOREIGN KEY (PARENT_A, PARENT_B)
+        REFERENCES TPK_COMPOSITE (A, B) ON UPDATE NO ACTION ON DELETE CASCADE
 );
 COMMIT;
 EOF
