@@ -38,11 +38,12 @@ struct MetadataFn {
     std::function<duckdb::vector<Value>(FirebirdStatement &)> map_row;
 };
 
-// Carries the MetadataFn pointer through the DuckDB function_info slot so
-// that MetaBindDispatch (a non-capturing function pointer) can read it.
+// Carries an owned copy of MetadataFn through the DuckDB function_info slot so
+// that MetaBindDispatch (a non-capturing function pointer) can read it without
+// depending on the lifetime of the caller's descriptor.
 struct MetadataFnInfo : public TableFunctionInfo {
-    const MetadataFn *desc = nullptr;
-    explicit MetadataFnInfo(const MetadataFn &d) : desc(&d) {}
+    MetadataFn desc;
+    explicit MetadataFnInfo(const MetadataFn &d) : desc(d) {}
 };
 
 struct MetaBindData : public TableFunctionData {
@@ -61,7 +62,7 @@ MetaBindDispatch(ClientContext &context, TableFunctionBindInput &input,
                  vector<LogicalType> &return_types, vector<string> &names) {
     D_ASSERT(input.info);
     auto &info = input.info->Cast<MetadataFnInfo>();
-    const MetadataFn &desc = *info.desc;
+    const MetadataFn &desc = info.desc;
 
     if (input.inputs.empty() || input.inputs[0].IsNull()) {
         throw BinderException("%s(catalog_name VARCHAR): catalog_name is "
