@@ -1,6 +1,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "firebird_dbt_sources.hpp"
+#include "firebird_metadata_functions.hpp"
 #include "firebird_extension.hpp"
 #include "firebird_observability.hpp"
 #include "firebird_profile_table.hpp"
