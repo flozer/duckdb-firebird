@@ -56,6 +56,12 @@ SELECT fk_table, fk_constraint, ordinal_position, fk_column, pk_table, pk_constr
 TCHILD	FK_TCHILD_TPK	0	PARENT_A	TPK_COMPOSITE	PK_TPK_COMPOSITE
 TCHILD	FK_TCHILD_TPK	1	PARENT_B	TPK_COMPOSITE	PK_TPK_COMPOSITE
 
+# --- firebird_foreign_keys: fk_schema is always 'main' --------------
+query I
+SELECT DISTINCT fk_schema FROM firebird_foreign_keys('fb');
+----
+main
+
 # --- FK referential rules (the fidelity DuckDB drops) ---------------
 query III
 SELECT fk_constraint, update_rule, delete_rule

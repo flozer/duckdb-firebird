@@ -20,9 +20,18 @@ namespace duckdb {
 [[maybe_unused]] static Value TextOrNull(FirebirdStatement &c, idx_t i) {
     return c.IsNull(i) ? Value(LogicalType::VARCHAR) : Value(c.GetText(i));
 }
+// NOTE: uses GetLong (4-byte). Use ONLY for Firebird INTEGER columns.
+// For SMALLINT columns use ShortOrNull (GetLong over-reads a 2-byte field).
 [[maybe_unused]] static Value IntOrNull(FirebirdStatement &c, idx_t i) {
     return c.IsNull(i) ? Value(LogicalType::INTEGER)
                        : Value::INTEGER(c.GetLong(i));
+}
+// For Firebird SMALLINT (2-byte) columns — RDB$FIELD_POSITION, RDB$*_TYPE,
+// RDB$FIELD_SUB_TYPE, RDB$FIELD_SCALE, RDB$SYSTEM_FLAG, RDB$NULL_FLAG, etc.
+// GetLong() would over-read a 2-byte field; use GetShort.
+[[maybe_unused]] static Value ShortOrNull(FirebirdStatement &c, idx_t i) {
+    return c.IsNull(i) ? Value(LogicalType::INTEGER)
+                       : Value::INTEGER(static_cast<int32_t>(c.GetShort(i)));
 }
 [[maybe_unused]] static Value BoolFromFlag(FirebirdStatement &c, idx_t i) {
     return Value::BOOLEAN(!c.IsNull(i) && c.GetShort(i) != 0);
@@ -135,11 +144,9 @@ TableFunction GetFirebirdForeignKeysFunction() {
         " WHERE rc.RDB$CONSTRAINT_TYPE = 'FOREIGN KEY' "
         " ORDER BY rc.RDB$RELATION_NAME, rc.RDB$CONSTRAINT_NAME, fkseg.RDB$FIELD_POSITION",
         [](FirebirdStatement &c) -> duckdb::vector<Value> {
-            // RDB$FIELD_POSITION is SMALLINT — use GetShort, not GetLong.
-            Value ordinal = c.IsNull(2) ? Value(LogicalType::INTEGER)
-                                        : Value::INTEGER(c.GetShort(2));
+            // RDB$FIELD_POSITION is SMALLINT — use ShortOrNull, not IntOrNull.
             return {Value("main"), TextOrNull(c, 0), TextOrNull(c, 1),
-                    ordinal, TextOrNull(c, 3), TextOrNull(c, 4),
+                    ShortOrNull(c, 2), TextOrNull(c, 3), TextOrNull(c, 4),
                     TextOrNull(c, 5), TextOrNull(c, 6), TextOrNull(c, 7)};
         }};
     return MakeMetadataFunction(desc);
