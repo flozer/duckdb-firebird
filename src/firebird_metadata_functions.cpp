@@ -424,12 +424,12 @@ TableFunction GetFirebirdDependenciesFunction() {
         [](FirebirdStatement &c) -> duckdb::vector<Value> {
             // col 1: RDB$DEPENDENT_TYPE  (SMALLINT)
             Value obj_type_label = c.IsNull(1)
-                ? Value(LogicalType::VARCHAR)
+                ? Value(std::string("UNKNOWN"))
                 : Value(DepTypeLabel(c.GetShort(1)));
             Value obj_type_code  = ShortOrNull(c, 1);
             // col 3: RDB$DEPENDED_ON_TYPE (SMALLINT)
             Value dep_type_label = c.IsNull(3)
-                ? Value(LogicalType::VARCHAR)
+                ? Value(std::string("UNKNOWN"))
                 : Value(DepTypeLabel(c.GetShort(3)));
             Value dep_type_code  = ShortOrNull(c, 3);
             return {
@@ -440,6 +440,47 @@ TableFunction GetFirebirdDependenciesFunction() {
                 dep_type_label,     // depends_on_type
                 dep_type_code,      // depends_on_type_code
                 TextOrNull(c, 4),   // field_name (NULL when not column-level)
+            };
+        }};
+    return MakeMetadataFunction(desc);
+}
+
+// ── firebird_comments ────────────────────────────────────────────────────────
+// Returns object-level and column-level comments (RDB$DESCRIPTION) for all
+// user-defined tables, views, and their columns.
+// RDB$DESCRIPTION is a text BLOB; CAST to VARCHAR(4000) to stay within the
+// 32765-byte row limit on UTF-8 databases.
+TableFunction GetFirebirdCommentsFunction() {
+    static const MetadataFn desc{
+        "firebird_comments",
+        {"object_schema", "object_name", "object_type", "column_name", "comment"},
+        {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+         LogicalType::VARCHAR, LogicalType::VARCHAR},
+        // Relations (TABLE / VIEW)
+        "SELECT TRIM(r.RDB$RELATION_NAME),"
+        "       CASE WHEN r.RDB$VIEW_BLR IS NULL THEN 'TABLE' ELSE 'VIEW' END,"
+        "       CAST(NULL AS VARCHAR(63)),"
+        "       CAST(r.RDB$DESCRIPTION AS VARCHAR(4000))"
+        "  FROM RDB$RELATIONS r"
+        " WHERE COALESCE(r.RDB$SYSTEM_FLAG,0) = 0"
+        "   AND r.RDB$DESCRIPTION IS NOT NULL"
+        " UNION ALL"
+        // Columns
+        " SELECT TRIM(rf.RDB$RELATION_NAME),"
+        "        'COLUMN',"
+        "        TRIM(rf.RDB$FIELD_NAME),"
+        "        CAST(rf.RDB$DESCRIPTION AS VARCHAR(4000))"
+        "   FROM RDB$RELATION_FIELDS rf"
+        "  WHERE COALESCE(rf.RDB$SYSTEM_FLAG,0) = 0"
+        "    AND rf.RDB$DESCRIPTION IS NOT NULL"
+        " ORDER BY 1, 2, 3",
+        [](FirebirdStatement &c) -> duckdb::vector<Value> {
+            return {
+                Value("main"),      // object_schema (literal)
+                TextOrNull(c, 0),   // object_name
+                TextOrNull(c, 1),   // object_type
+                TextOrNull(c, 2),   // column_name (NULL for TABLE/VIEW rows)
+                TextOrNull(c, 3),   // comment
             };
         }};
     return MakeMetadataFunction(desc);

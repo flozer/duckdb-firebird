@@ -119,3 +119,13 @@ SELECT object_name, depends_on_name, depends_on_type
  LIMIT 1;
 ----
 V_ACTIVE_EMP	EMPLOYEE	TABLE
+
+# --- firebird_comments --------------------------------------
+query IIII
+SELECT object_name, object_type, column_name, comment
+  FROM firebird_comments('fb')
+ WHERE object_name = 'EMPLOYEE'
+ ORDER BY object_type, column_name;
+----
+EMPLOYEE	COLUMN	EMP_NAME	Full name
+EMPLOYEE	TABLE	NULL	Staff records fixture
