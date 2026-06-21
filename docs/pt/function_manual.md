@@ -602,6 +602,8 @@ Colunas de saida:
 SELECT * FROM firebird_foreign_keys('fb');
 ```
 
+**Nota**: `firebird_foreign_keys.ordinal_position` é 0-based (o `RDB$FIELD_POSITION` bruto do Firebird), enquanto `information_schema.key_column_usage.ordinal_position` é 1-based. Leve em conta a diferença de um ao juntar as duas superficies.
+
 ### `firebird_indexes(catalog_name)`
 
 Lista todos os indices de usuario com seus segmentos.
@@ -659,6 +661,8 @@ Colunas de saida:
 ```sql
 SELECT * FROM firebird_domains('fb');
 ```
+
+**Nota**: para dominios `CHAR`/`VARCHAR`, o comprimento relatado é o comprimento em bytes declarado pelo Firebird (`RDB$FIELD_LENGTH`). Em charsets multibyte (ex.: UTF8) este é maior que o comprimento em caracteres (um `VARCHAR(10)` em UTF8 reporta `VARCHAR(40)`).
 
 ### `firebird_computed_columns(catalog_name)`
 
