@@ -180,4 +180,104 @@ TableFunction GetFirebirdForeignKeysFunction() {
     return MakeMetadataFunction(desc);
 }
 
+// ── firebird_generators ────────────────────────────────────────────────────
+// Bespoke (not the shared scaffold): current_value requires a per-generator
+// GEN_ID("name", 0) query with safe quoting and per-row isolation so that
+// a privilege error on one generator NULLs only that row, not the whole call.
+
+// Firebird identifier quoting: wrap in double quotes, double internal quotes.
+static std::string QuoteFbIdent(const std::string &id) {
+    std::string out = "\"";
+    for (char ch : id) {
+        if (ch == '"') out += "\"\"";
+        else            out += ch;
+    }
+    out += "\"";
+    return out;
+}
+
+struct GenRow { std::string name; Value initial; Value current; };
+
+struct GenBindData : public TableFunctionData {
+    std::string catalog_name;
+};
+struct GenGlobalState : public GlobalTableFunctionState {
+    std::vector<GenRow> rows;
+    idx_t cursor = 0;
+    idx_t MaxThreads() const override { return 1; }
+};
+
+static unique_ptr<FunctionData>
+GenBind(ClientContext &context, TableFunctionBindInput &input,
+        vector<LogicalType> &return_types, vector<string> &names) {
+    if (input.inputs.empty() || input.inputs[0].IsNull())
+        throw BinderException("firebird_generators(catalog_name VARCHAR): catalog_name is required.");
+    auto bind = make_uniq<GenBindData>();
+    bind->catalog_name = input.inputs[0].ToString();
+    ValidateFirebirdAttachAlias(context, bind->catalog_name);
+    names        = {"generator_name", "initial_value", "current_value"};
+    return_types = {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT};
+    return std::move(bind);
+}
+
+static unique_ptr<GlobalTableFunctionState>
+GenInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
+    auto &bind = input.bind_data->Cast<GenBindData>();
+    auto g = make_uniq<GenGlobalState>();
+    auto lease = AcquireFirebirdCatalogLease(context, bind.catalog_name);
+    FirebirdConnection &conn = *lease.conn;
+
+    // Phase 1: list generators + initial_value (BIGINT — use GetInt64).
+    auto cur = conn.OpenCursor(
+        "SELECT TRIM(RDB$GENERATOR_NAME), RDB$INITIAL_VALUE "
+        "  FROM RDB$GENERATORS WHERE RDB$SYSTEM_FLAG = 0 "
+        " ORDER BY RDB$GENERATOR_NAME");
+    while (cur->Fetch()) {
+        GenRow r;
+        r.name    = cur->GetText(0);
+        r.initial = cur->IsNull(1)
+                        ? Value(LogicalType::BIGINT)
+                        : Value::BIGINT(cur->GetInt64(1));
+        r.current = Value(LogicalType::BIGINT); // default NULL
+        g->rows.push_back(std::move(r));
+    }
+
+    // Phase 2: per-generator current_value via GEN_ID(<quoted_name>, 0).
+    // Step 0 is side-effect-free (does not advance the sequence).
+    // Each generator is isolated: a privilege error or failure on one
+    // generator sets current_value = NULL for that row only.
+    for (auto &r : g->rows) {
+        try {
+            auto c2 = conn.OpenCursor(
+                "SELECT GEN_ID(" + QuoteFbIdent(r.name) + ", 0) FROM RDB$DATABASE");
+            if (c2->Fetch() && !c2->IsNull(0)) {
+                r.current = Value::BIGINT(c2->GetInt64(0));
+            }
+        } catch (std::exception &) {
+            /* leave r.current = NULL (BIGINT null) */
+        }
+    }
+    return std::move(g);
+}
+
+static void GenFunction(ClientContext &, TableFunctionInput &input,
+                        DataChunk &output) {
+    auto &g = input.global_state->Cast<GenGlobalState>();
+    idx_t row = 0;
+    const idx_t target = STANDARD_VECTOR_SIZE;
+    while (row < target && g.cursor < g.rows.size()) {
+        auto &r = g.rows[g.cursor++];
+        output.data[0].SetValue(row, Value(r.name));
+        output.data[1].SetValue(row, r.initial);
+        output.data[2].SetValue(row, r.current);
+        ++row;
+    }
+    output.SetCardinality(row);
+}
+
+TableFunction GetFirebirdGeneratorsFunction() {
+    return TableFunction("firebird_generators", {LogicalType::VARCHAR},
+                         GenFunction, GenBind, GenInitGlobal);
+}
+
 } // namespace duckdb

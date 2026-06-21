@@ -79,3 +79,17 @@ SELECT index_name, is_unique, column_name, expression_source IS NOT NULL
  WHERE index_name = 'EMP_UPPER_NAME_IDX';
 ----
 EMP_UPPER_NAME_IDX	false	NULL	true
+
+# --- firebird_generators: initial value known, current readable -----
+query II
+SELECT generator_name, initial_value
+  FROM firebird_generators('fb')
+ WHERE generator_name = 'GEN_EMP_ID';
+----
+GEN_EMP_ID	100
+
+query I
+SELECT current_value >= 99 FROM firebird_generators('fb')
+ WHERE generator_name = 'GEN_EMP_ID';
+----
+true
