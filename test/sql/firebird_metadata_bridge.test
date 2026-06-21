@@ -109,3 +109,13 @@ SELECT table_name, column_name
  WHERE table_name = 'EMPLOYEE';
 ----
 EMPLOYEE	NAME_LEN
+
+# --- firebird_dependencies: view depends on its base table ----------
+query III
+SELECT object_name, depends_on_name, depends_on_type
+  FROM firebird_dependencies('fb')
+ WHERE object_name = 'V_ACTIVE_EMP' AND depends_on_name = 'EMPLOYEE'
+ ORDER BY field_name
+ LIMIT 1;
+----
+V_ACTIVE_EMP	EMPLOYEE	TABLE

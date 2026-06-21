@@ -382,4 +382,67 @@ TableFunction GetFirebirdComputedColumnsFunction() {
     return MakeMetadataFunction(desc);
 }
 
+// ── firebird_dependencies ─────────────────────────────────────────────────────
+// Maps RDB$ object-type codes to human-readable labels.
+// Unknown codes return "UNKNOWN"; the raw code is preserved in *_type_code.
+static std::string DepTypeLabel(int16_t code) {
+    switch (code) {
+        case  0: return "TABLE";
+        case  1: return "VIEW";
+        case  2: return "TRIGGER";
+        case  3: return "COMPUTED_FIELD";
+        case  4: return "VALIDATION";
+        case  5: return "PROCEDURE";
+        case  6: return "EXPRESSION_INDEX";
+        case  7: return "EXCEPTION";
+        case  8: return "USER";
+        case  9: return "FIELD";
+        case 10: return "INDEX";
+        case 14: return "GENERATOR";
+        case 15: return "UDF";
+        case 17: return "COLLATION";
+        case 18: return "PACKAGE";
+        case 19: return "PACKAGE_BODY";
+        default: return "UNKNOWN";
+    }
+}
+
+TableFunction GetFirebirdDependenciesFunction() {
+    static const MetadataFn desc{
+        "firebird_dependencies",
+        {"object_name", "object_type", "object_type_code",
+         "depends_on_name", "depends_on_type", "depends_on_type_code",
+         "field_name"},
+        {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::INTEGER,
+         LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::INTEGER,
+         LogicalType::VARCHAR},
+        "SELECT TRIM(RDB$DEPENDENT_NAME), RDB$DEPENDENT_TYPE,"
+        "       TRIM(RDB$DEPENDED_ON_NAME), RDB$DEPENDED_ON_TYPE,"
+        "       TRIM(RDB$FIELD_NAME)"
+        "  FROM RDB$DEPENDENCIES"
+        " ORDER BY RDB$DEPENDENT_NAME, RDB$DEPENDED_ON_NAME, RDB$FIELD_NAME",
+        [](FirebirdStatement &c) -> duckdb::vector<Value> {
+            // col 1: RDB$DEPENDENT_TYPE  (SMALLINT)
+            Value obj_type_label = c.IsNull(1)
+                ? Value(LogicalType::VARCHAR)
+                : Value(DepTypeLabel(c.GetShort(1)));
+            Value obj_type_code  = ShortOrNull(c, 1);
+            // col 3: RDB$DEPENDED_ON_TYPE (SMALLINT)
+            Value dep_type_label = c.IsNull(3)
+                ? Value(LogicalType::VARCHAR)
+                : Value(DepTypeLabel(c.GetShort(3)));
+            Value dep_type_code  = ShortOrNull(c, 3);
+            return {
+                TextOrNull(c, 0),   // object_name
+                obj_type_label,     // object_type
+                obj_type_code,      // object_type_code
+                TextOrNull(c, 2),   // depends_on_name
+                dep_type_label,     // depends_on_type
+                dep_type_code,      // depends_on_type_code
+                TextOrNull(c, 4),   // field_name (NULL when not column-level)
+            };
+        }};
+    return MakeMetadataFunction(desc);
+}
+
 } // namespace duckdb
