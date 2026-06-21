@@ -358,4 +358,28 @@ TableFunction GetFirebirdDomainsFunction() {
     return MakeMetadataFunction(desc);
 }
 
+// ── firebird_computed_columns ─────────────────────────────────────────────────
+// Returns computed/calculated columns (COMPUTED BY expressions) for all
+// user-defined tables.  RDB$COMPUTED_SOURCE is a text BLOB; cast to
+// VARCHAR(4000) to stay within the 32765-byte row limit on UTF-8 test DBs.
+TableFunction GetFirebirdComputedColumnsFunction() {
+    static const MetadataFn desc{
+        "firebird_computed_columns",
+        {"table_schema", "table_name", "column_name", "expression_source"},
+        {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+         LogicalType::VARCHAR},
+        "SELECT TRIM(rf.RDB$RELATION_NAME), TRIM(rf.RDB$FIELD_NAME), "
+        "       CAST(f.RDB$COMPUTED_SOURCE AS VARCHAR(4000)) "
+        "  FROM RDB$RELATION_FIELDS rf "
+        "  JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE "
+        " WHERE f.RDB$COMPUTED_SOURCE IS NOT NULL "
+        "   AND COALESCE(rf.RDB$SYSTEM_FLAG,0) = 0 "
+        " ORDER BY rf.RDB$RELATION_NAME, rf.RDB$FIELD_POSITION",
+        [](FirebirdStatement &c) -> duckdb::vector<Value> {
+            return {Value("main"), TextOrNull(c, 0), TextOrNull(c, 1),
+                    TextOrNull(c, 2)};
+        }};
+    return MakeMetadataFunction(desc);
+}
+
 } // namespace duckdb

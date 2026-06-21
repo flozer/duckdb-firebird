@@ -101,3 +101,11 @@ SELECT domain_name, base_type, check_source IS NOT NULL
  WHERE domain_name = 'D_SALARY';
 ----
 D_SALARY	NUMERIC(10,2)	true
+
+# --- firebird_computed_columns --------------------------------------
+query II
+SELECT table_name, column_name
+  FROM firebird_computed_columns('fb')
+ WHERE table_name = 'EMPLOYEE';
+----
+EMPLOYEE	NAME_LEN
