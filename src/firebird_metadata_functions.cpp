@@ -280,4 +280,82 @@ TableFunction GetFirebirdGeneratorsFunction() {
                          GenFunction, GenBind, GenInitGlobal);
 }
 
+// ── firebird_domains ──────────────────────────────────────────────────────────
+// Maps RDB$FIELD_TYPE (SMALLINT) + sub_type/length/scale/precision to a
+// faithful Firebird type string.  Unknown field_type → "TYPE_<n>", never NULL.
+// scale: Firebird stores it negative (e.g. -2 for scale=2); expose absolute.
+static std::string FormatFbType(int ftype, int sub_type, int length,
+                                int scale, int precision) {
+    int s = (scale < 0) ? -scale : scale;
+    switch (ftype) {
+    case 7:  // SMALLINT / NUMERIC(<=4,x) / DECIMAL(<=4,x)
+    case 8:  // INTEGER  / NUMERIC / DECIMAL
+    case 16: // BIGINT   / NUMERIC / DECIMAL (also INT128 in FB4+)
+        if (sub_type == 1) return "NUMERIC(" + std::to_string(precision) + "," + std::to_string(s) + ")";
+        if (sub_type == 2) return "DECIMAL(" + std::to_string(precision) + "," + std::to_string(s) + ")";
+        if (ftype == 7)  return "SMALLINT";
+        if (ftype == 8)  return "INTEGER";
+        return "BIGINT";
+    case 10:  return "FLOAT";
+    case 27:  return "DOUBLE PRECISION";
+    case 12:  return "DATE";
+    case 13:  return "TIME";
+    case 35:  return "TIMESTAMP";
+    case 14:  return "CHAR(" + std::to_string(length) + ")";
+    case 37:  return "VARCHAR(" + std::to_string(length) + ")";
+    case 261: return (sub_type == 1) ? "BLOB SUB_TYPE TEXT" : "BLOB";
+    default:  return "TYPE_" + std::to_string(ftype);
+    }
+}
+
+TableFunction GetFirebirdDomainsFunction() {
+    static const MetadataFn desc{
+        "firebird_domains",
+        {"domain_name", "base_type", "length", "scale", "is_nullable",
+         "charset_name", "check_source", "default_source"},
+        {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::INTEGER,
+         LogicalType::INTEGER, LogicalType::BOOLEAN, LogicalType::VARCHAR,
+         LogicalType::VARCHAR, LogicalType::VARCHAR},
+        // col indices:  0=domain_name  1=ftype  2=sub_type  3=length
+        //               4=scale        5=prec    6=null_flag 7=charset
+        //               8=check_src    9=default_src
+        "SELECT TRIM(f.RDB$FIELD_NAME), f.RDB$FIELD_TYPE, "
+        "       COALESCE(f.RDB$FIELD_SUB_TYPE,0), f.RDB$FIELD_LENGTH, "
+        "       COALESCE(f.RDB$FIELD_SCALE,0), COALESCE(f.RDB$FIELD_PRECISION,0), "
+        "       f.RDB$NULL_FLAG, TRIM(cs.RDB$CHARACTER_SET_NAME), "
+        "       CAST(f.RDB$VALIDATION_SOURCE AS VARCHAR(4000)), "
+        "       CAST(f.RDB$DEFAULT_SOURCE AS VARCHAR(4000)) "
+        "  FROM RDB$FIELDS f "
+        "  LEFT JOIN RDB$CHARACTER_SETS cs ON cs.RDB$CHARACTER_SET_ID = f.RDB$CHARACTER_SET_ID "
+        " WHERE COALESCE(f.RDB$SYSTEM_FLAG,0) = 0 "
+        "   AND f.RDB$FIELD_NAME NOT STARTING WITH 'RDB$' "
+        "   AND f.RDB$FIELD_NAME NOT STARTING WITH 'MON$' "
+        " ORDER BY f.RDB$FIELD_NAME",
+        [](FirebirdStatement &c) -> duckdb::vector<Value> {
+            // All RDB$FIELD_* type/sub_type/scale/precision/null_flag are SMALLINT.
+            int ftype    = c.IsNull(1) ? 0  : static_cast<int>(c.GetShort(1));
+            int sub_type = c.IsNull(2) ? 0  : static_cast<int>(c.GetShort(2));
+            int length   = c.IsNull(3) ? 0  : static_cast<int>(c.GetShort(3));
+            int scale    = c.IsNull(4) ? 0  : static_cast<int>(c.GetShort(4));
+            int prec     = c.IsNull(5) ? 0  : static_cast<int>(c.GetShort(5));
+            // scale is stored negative in Firebird; expose absolute value.
+            int abs_scale = (scale < 0) ? -scale : scale;
+            std::string bt = FormatFbType(ftype, sub_type, length, scale, prec);
+            // is_nullable: NULL flag absent or 0 means nullable.
+            Value is_nullable = Value::BOOLEAN(c.IsNull(6) || c.GetShort(6) == 0);
+            return {
+                TextOrNull(c, 0),                                   // domain_name
+                Value(bt),                                          // base_type
+                ShortOrNull(c, 3),                                  // length  (SMALLINT)
+                c.IsNull(4) ? Value(LogicalType::INTEGER)
+                            : Value::INTEGER(abs_scale),            // scale (absolute)
+                is_nullable,                                        // is_nullable
+                TextOrNull(c, 7),                                   // charset_name
+                TextOrNull(c, 8),                                   // check_source
+                TextOrNull(c, 9),                                   // default_source
+            };
+        }};
+    return MakeMetadataFunction(desc);
+}
+
 } // namespace duckdb

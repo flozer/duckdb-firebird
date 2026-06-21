@@ -93,3 +93,11 @@ SELECT current_value >= 99 FROM firebird_generators('fb')
  WHERE generator_name = 'GEN_EMP_ID';
 ----
 true
+
+# --- firebird_domains: named domain with CHECK ----------------------
+query III
+SELECT domain_name, base_type, check_source IS NOT NULL
+  FROM firebird_domains('fb')
+ WHERE domain_name = 'D_SALARY';
+----
+D_SALARY	NUMERIC(10,2)	true
