@@ -60,9 +60,10 @@ $testFixtureVar = @{
     'firebird_pool_stats.test'    = 'FIREBIRD_TEST_DB'
     'firebird_observability.test' = 'FIREBIRD_TEST_DB'
     'firebird_profile_table.test' = 'FIREBIRD_TEST_DB'
-    'firebird_dbt_sources.test'   = 'FIREBIRD_TEST_DB'
-    'firebird_decfloat.test'      = 'FIREBIRD_DECFLOAT_DB'
-    'firebird_none_charset.test'  = 'FIREBIRD_NONE_DB'
+    'firebird_dbt_sources.test'        = 'FIREBIRD_TEST_DB'
+    'firebird_metadata_bridge.test'    = 'FIREBIRD_TEST_DB'
+    'firebird_decfloat.test'           = 'FIREBIRD_DECFLOAT_DB'
+    'firebird_none_charset.test'       = 'FIREBIRD_NONE_DB'
 }
 
 function Invoke-Build([string]$buildDir) {

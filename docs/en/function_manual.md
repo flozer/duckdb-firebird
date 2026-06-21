@@ -131,6 +131,187 @@ SELECT firebird_generate_dbt_sources('fb');
 The generated YAML is a starting point. Users should still review names,
 tests, descriptions, and project conventions.
 
+## Level 3b - Metadata Bridge 2.0
+
+Starting with v0.7, the extension populates standard `information_schema` views
+with constraint data and provides additional catalog functions for deep
+inspection of Firebird metadata.
+
+### Populated `information_schema` views
+
+After `ATTACH ... (TYPE firebird)`, the following views are populated:
+
+#### `information_schema.table_constraints`
+
+Exposes PK, UNIQUE, and FK constraints for all user tables.
+
+```sql
+SELECT constraint_name, constraint_type, table_name
+FROM information_schema.table_constraints
+WHERE table_catalog = 'fb'
+ORDER BY table_name, constraint_type;
+```
+
+#### `information_schema.key_column_usage`
+
+Maps columns participating in PK, UNIQUE, and FK constraints.
+
+```sql
+SELECT constraint_name, table_name, column_name, ordinal_position
+FROM information_schema.key_column_usage
+WHERE table_catalog = 'fb'
+ORDER BY table_name, constraint_name, ordinal_position;
+```
+
+#### `information_schema.referential_constraints`
+
+Exposes FK constraints with reference information.
+
+**Note**: the `update_rule` and `delete_rule` columns always return
+`'NO ACTION'` due to a DuckDB limitation. For the real Firebird rules
+(`CASCADE`, `SET NULL`, etc.) use `firebird_foreign_keys` (described below).
+
+```sql
+SELECT constraint_name, unique_constraint_name
+FROM information_schema.referential_constraints
+WHERE constraint_catalog = 'fb';
+```
+
+### `firebird_foreign_keys(catalog_name)`
+
+Lists all foreign-key constraints with real Firebird referential rules.
+
+Output columns:
+
+| Column | Type | Description |
+|---|---|---|
+| `fk_schema` | VARCHAR | Always `'main'` |
+| `fk_table` | VARCHAR | Table declaring the FK |
+| `fk_constraint` | VARCHAR | FK constraint name |
+| `ordinal_position` | INTEGER | Column position in the key (0-based) |
+| `fk_column` | VARCHAR | Column in the child table |
+| `pk_table` | VARCHAR | Referenced table |
+| `pk_constraint` | VARCHAR | Referenced PK/UNIQUE constraint name |
+| `update_rule` | VARCHAR | Firebird rule (`CASCADE`, `SET NULL`, `NO ACTION`, etc.) |
+| `delete_rule` | VARCHAR | Firebird rule (`CASCADE`, `SET NULL`, `NO ACTION`, etc.) |
+
+```sql
+SELECT * FROM firebird_foreign_keys('fb');
+```
+
+### `firebird_indexes(catalog_name)`
+
+Lists all user indexes with their segments.
+
+Output columns:
+
+| Column | Type | Description |
+|---|---|---|
+| `table_schema` | VARCHAR | Always `'main'` |
+| `table_name` | VARCHAR | Table owning the index |
+| `index_name` | VARCHAR | Index name |
+| `is_unique` | BOOLEAN | `true` if the index is unique |
+| `is_active` | BOOLEAN | `true` if the index is active |
+| `segment_position` | INTEGER | Column position in the index (0-based) |
+| `column_name` | VARCHAR | Segment column name (`NULL` for expression indexes) |
+| `expression_source` | VARCHAR | Expression (expression indexes only; `NULL` otherwise) |
+
+```sql
+SELECT * FROM firebird_indexes('fb');
+```
+
+### `firebird_generators(catalog_name)`
+
+Lists user generators/sequences with initial and current values.
+
+Output columns:
+
+| Column | Type | Description |
+|---|---|---|
+| `generator_name` | VARCHAR | Generator name |
+| `initial_value` | BIGINT | Configured initial value |
+| `current_value` | BIGINT | Current value via `GEN_ID(name, 0)`; `NULL` if no privilege |
+
+```sql
+SELECT * FROM firebird_generators('fb');
+```
+
+### `firebird_domains(catalog_name)`
+
+Lists user-defined domains with type, nullability, charset, and constraints.
+
+Output columns:
+
+| Column | Type | Description |
+|---|---|---|
+| `domain_name` | VARCHAR | Domain name |
+| `base_type` | VARCHAR | Firebird type string (e.g. `VARCHAR(100)`, `NUMERIC(10,2)`) |
+| `length` | INTEGER | Length in bytes (for text types) |
+| `scale` | INTEGER | Decimal scale (absolute value) |
+| `is_nullable` | BOOLEAN | `true` if the domain allows `NULL` |
+| `charset_name` | VARCHAR | Character set (text types only) |
+| `check_source` | VARCHAR | Domain `CHECK` clause (`NULL` if none) |
+| `default_source` | VARCHAR | Domain `DEFAULT` clause (`NULL` if none) |
+
+```sql
+SELECT * FROM firebird_domains('fb');
+```
+
+### `firebird_computed_columns(catalog_name)`
+
+Lists computed columns (`COMPUTED BY`) for all user tables.
+
+Output columns:
+
+| Column | Type | Description |
+|---|---|---|
+| `table_schema` | VARCHAR | Always `'main'` |
+| `table_name` | VARCHAR | Table containing the column |
+| `column_name` | VARCHAR | Computed column name |
+| `expression_source` | VARCHAR | `COMPUTED BY` expression |
+
+```sql
+SELECT * FROM firebird_computed_columns('fb');
+```
+
+### `firebird_dependencies(catalog_name)`
+
+Lists dependencies between database objects (tables, procedures, triggers, etc.).
+
+Output columns:
+
+| Column | Type | Description |
+|---|---|---|
+| `object_name` | VARCHAR | Dependent object |
+| `object_type` | VARCHAR | Human-readable type (e.g. `TABLE`, `TRIGGER`, `PROCEDURE`) |
+| `object_type_code` | INTEGER | Raw `RDB$DEPENDENT_TYPE` code |
+| `depends_on_name` | VARCHAR | Object depended upon |
+| `depends_on_type` | VARCHAR | Human-readable type of the referenced object |
+| `depends_on_type_code` | INTEGER | Raw `RDB$DEPENDED_ON_TYPE` code |
+| `field_name` | VARCHAR | Specific column referenced (`NULL` for object-level dependencies) |
+
+```sql
+SELECT * FROM firebird_dependencies('fb');
+```
+
+### `firebird_comments(catalog_name)`
+
+Lists `RDB$DESCRIPTION` comments for user tables, views, and columns.
+
+Output columns:
+
+| Column | Type | Description |
+|---|---|---|
+| `object_schema` | VARCHAR | Always `'main'` |
+| `object_name` | VARCHAR | Table or view name |
+| `object_type` | VARCHAR | `'TABLE'`, `'VIEW'`, or `'COLUMN'` |
+| `column_name` | VARCHAR | Column name (column rows only; `NULL` for object rows) |
+| `comment` | VARCHAR | Comment text |
+
+```sql
+SELECT * FROM firebird_comments('fb');
+```
+
 ## Level 4 - Diagnostics and observability
 
 ### `firebird_profile_table(qualified_name)`
