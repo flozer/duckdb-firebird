@@ -129,3 +129,11 @@ SELECT object_name, object_type, column_name, comment
 ----
 EMPLOYEE	COLUMN	EMP_NAME	Full name
 EMPLOYEE	TABLE	NULL	Staff records fixture
+
+# --- firebird_comments: long BLOB comment (>4000 chars) round-trips fully ----
+# DEPT has a 4100-char comment; ReadBlob must return all 4100 chars.
+# Under the old VARCHAR(4000) CAST this would have returned <=4000.
+query I
+SELECT LENGTH(comment) FROM firebird_comments('fb') WHERE object_name='DEPT' AND object_type='TABLE';
+----
+4100

@@ -635,7 +635,7 @@ Colunas de saida:
 |---|---|---|
 | `generator_name` | VARCHAR | Nome do gerador |
 | `initial_value` | BIGINT | Valor inicial configurado |
-| `current_value` | BIGINT | Valor atual (lido via `GEN_ID(name, 0)`; `NULL` se sem privilegio) |
+| `current_value` | BIGINT | Valor atual (lido via `GEN_ID(name, 0)`; `NULL` se sem privilegio). Lido por gerador individualmente (um round-trip cada) para preservar isolamento por gerador; em bancos com muitos geradores, isso implica N+1 round-trips. |
 
 ```sql
 SELECT * FROM firebird_generators('fb');

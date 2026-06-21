@@ -20,6 +20,13 @@ namespace duckdb {
 [[maybe_unused]] static Value TextOrNull(FirebirdStatement &c, idx_t i) {
     return c.IsNull(i) ? Value(LogicalType::VARCHAR) : Value(c.GetText(i));
 }
+// Reads a BLOB column via ReadBlob (full content, no 4000-byte truncation).
+// Use for RDB$EXPRESSION_SOURCE, RDB$VALIDATION_SOURCE, RDB$DEFAULT_SOURCE,
+// RDB$COMPUTED_SOURCE, RDB$DESCRIPTION — all text BLOBs that may exceed 4000
+// bytes. The column must be selected as the RAW BLOB (no CAST).
+[[maybe_unused]] static Value BlobTextOrNull(FirebirdStatement &c, idx_t i) {
+    return c.IsNull(i) ? Value(LogicalType::VARCHAR) : Value(c.ReadBlob(i));
+}
 // NOTE: uses GetLong (4-byte). Use ONLY for Firebird INTEGER columns.
 // For SMALLINT columns use ShortOrNull (GetLong over-reads a 2-byte field).
 [[maybe_unused]] static Value IntOrNull(FirebirdStatement &c, idx_t i) {
@@ -136,7 +143,7 @@ TableFunction GetFirebirdIndexesFunction() {
         "SELECT TRIM(i.RDB$RELATION_NAME), TRIM(i.RDB$INDEX_NAME), "
         "       i.RDB$UNIQUE_FLAG, i.RDB$INDEX_INACTIVE, "
         "       seg.RDB$FIELD_POSITION, TRIM(seg.RDB$FIELD_NAME), "
-        "       CAST(i.RDB$EXPRESSION_SOURCE AS VARCHAR(4000)) "
+        "       i.RDB$EXPRESSION_SOURCE "
         "  FROM RDB$INDICES i "
         "  LEFT JOIN RDB$INDEX_SEGMENTS seg ON seg.RDB$INDEX_NAME = i.RDB$INDEX_NAME "
         " WHERE i.RDB$SYSTEM_FLAG = 0 "
@@ -146,9 +153,10 @@ TableFunction GetFirebirdIndexesFunction() {
             Value active = Value::BOOLEAN(c.IsNull(3) || c.GetShort(3) == 0);
             // RDB$UNIQUE_FLAG: SMALLINT — BoolFromFlag uses GetShort
             // RDB$FIELD_POSITION: SMALLINT, 0-based — ShortOrNull
+            // col 6: RDB$EXPRESSION_SOURCE is a text BLOB — use BlobTextOrNull
             return {Value("main"), TextOrNull(c, 0), TextOrNull(c, 1),
                     BoolFromFlag(c, 2), active, ShortOrNull(c, 4),
-                    TextOrNull(c, 5), TextOrNull(c, 6)};
+                    TextOrNull(c, 5), BlobTextOrNull(c, 6)};
         }};
     return MakeMetadataFunction(desc);
 }
@@ -246,6 +254,14 @@ GenInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
     // Step 0 is side-effect-free (does not advance the sequence).
     // Each generator is isolated: a privilege error or failure on one
     // generator sets current_value = NULL for that row only.
+    //
+    // NOTE (N+1 round-trips): this loop issues one SELECT per generator, which
+    // is deliberately N+1 rather than a single batch query. Batching would
+    // require a dynamic SQL expression listing all generator names, which
+    // sacrifices per-generator isolation — a single privilege error or
+    // generator-specific fault would NULL every current_value, not just the
+    // failing one. The per-row isolation guarantee is the hard requirement;
+    // on databases with very many generators this cost is O(N) round-trips.
     for (auto &r : g->rows) {
         try {
             auto c2 = conn.OpenCursor(
@@ -318,13 +334,13 @@ TableFunction GetFirebirdDomainsFunction() {
          LogicalType::VARCHAR, LogicalType::VARCHAR},
         // col indices:  0=domain_name  1=ftype  2=sub_type  3=length
         //               4=scale        5=prec    6=null_flag 7=charset
-        //               8=check_src    9=default_src
+        //               8=check_src (BLOB)  9=default_src (BLOB)
         "SELECT TRIM(f.RDB$FIELD_NAME), f.RDB$FIELD_TYPE, "
         "       COALESCE(f.RDB$FIELD_SUB_TYPE,0), f.RDB$FIELD_LENGTH, "
         "       COALESCE(f.RDB$FIELD_SCALE,0), COALESCE(f.RDB$FIELD_PRECISION,0), "
         "       f.RDB$NULL_FLAG, TRIM(cs.RDB$CHARACTER_SET_NAME), "
-        "       CAST(f.RDB$VALIDATION_SOURCE AS VARCHAR(4000)), "
-        "       CAST(f.RDB$DEFAULT_SOURCE AS VARCHAR(4000)) "
+        "       f.RDB$VALIDATION_SOURCE, "
+        "       f.RDB$DEFAULT_SOURCE "
         "  FROM RDB$FIELDS f "
         "  LEFT JOIN RDB$CHARACTER_SETS cs ON cs.RDB$CHARACTER_SET_ID = f.RDB$CHARACTER_SET_ID "
         " WHERE COALESCE(f.RDB$SYSTEM_FLAG,0) = 0 "
@@ -351,8 +367,8 @@ TableFunction GetFirebirdDomainsFunction() {
                             : Value::INTEGER(abs_scale),            // scale (absolute)
                 is_nullable,                                        // is_nullable
                 TextOrNull(c, 7),                                   // charset_name
-                TextOrNull(c, 8),                                   // check_source
-                TextOrNull(c, 9),                                   // default_source
+                BlobTextOrNull(c, 8),                               // check_source (BLOB)
+                BlobTextOrNull(c, 9),                               // default_source (BLOB)
             };
         }};
     return MakeMetadataFunction(desc);
@@ -360,8 +376,9 @@ TableFunction GetFirebirdDomainsFunction() {
 
 // ── firebird_computed_columns ─────────────────────────────────────────────────
 // Returns computed/calculated columns (COMPUTED BY expressions) for all
-// user-defined tables.  RDB$COMPUTED_SOURCE is a text BLOB; cast to
-// VARCHAR(4000) to stay within the 32765-byte row limit on UTF-8 test DBs.
+// user-defined tables.  RDB$COMPUTED_SOURCE is a text BLOB; read via
+// BlobTextOrNull (ReadBlob) so the full expression is returned without any
+// VARCHAR(4000) truncation.
 TableFunction GetFirebirdComputedColumnsFunction() {
     static const MetadataFn desc{
         "firebird_computed_columns",
@@ -369,15 +386,16 @@ TableFunction GetFirebirdComputedColumnsFunction() {
         {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
          LogicalType::VARCHAR},
         "SELECT TRIM(rf.RDB$RELATION_NAME), TRIM(rf.RDB$FIELD_NAME), "
-        "       CAST(f.RDB$COMPUTED_SOURCE AS VARCHAR(4000)) "
+        "       f.RDB$COMPUTED_SOURCE "
         "  FROM RDB$RELATION_FIELDS rf "
         "  JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE "
         " WHERE f.RDB$COMPUTED_SOURCE IS NOT NULL "
         "   AND COALESCE(rf.RDB$SYSTEM_FLAG,0) = 0 "
         " ORDER BY rf.RDB$RELATION_NAME, rf.RDB$FIELD_POSITION",
         [](FirebirdStatement &c) -> duckdb::vector<Value> {
+            // col 2: RDB$COMPUTED_SOURCE is a text BLOB — use BlobTextOrNull
             return {Value("main"), TextOrNull(c, 0), TextOrNull(c, 1),
-                    TextOrNull(c, 2)};
+                    BlobTextOrNull(c, 2)};
         }};
     return MakeMetadataFunction(desc);
 }
@@ -448,39 +466,41 @@ TableFunction GetFirebirdDependenciesFunction() {
 // ── firebird_comments ────────────────────────────────────────────────────────
 // Returns object-level and column-level comments (RDB$DESCRIPTION) for all
 // user-defined tables, views, and their columns.
-// RDB$DESCRIPTION is a text BLOB; CAST to VARCHAR(4000) to stay within the
-// 32765-byte row limit on UTF-8 databases.
+// RDB$DESCRIPTION is a text BLOB; read via BlobTextOrNull (ReadBlob) so the
+// full comment text is returned without any VARCHAR(4000) truncation.
+// Both UNION ALL arms select the raw BLOB column so the result-set column type
+// is consistent (BLOB in both arms) and Firebird can merge the UNION.
 TableFunction GetFirebirdCommentsFunction() {
     static const MetadataFn desc{
         "firebird_comments",
         {"object_schema", "object_name", "object_type", "column_name", "comment"},
         {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
          LogicalType::VARCHAR, LogicalType::VARCHAR},
-        // Relations (TABLE / VIEW)
+        // Relations (TABLE / VIEW) — col 3 is RDB$DESCRIPTION (raw BLOB)
         "SELECT TRIM(r.RDB$RELATION_NAME),"
         "       CASE WHEN r.RDB$VIEW_BLR IS NULL THEN 'TABLE' ELSE 'VIEW' END,"
         "       CAST(NULL AS VARCHAR(63)),"
-        "       CAST(r.RDB$DESCRIPTION AS VARCHAR(4000))"
+        "       r.RDB$DESCRIPTION"
         "  FROM RDB$RELATIONS r"
         " WHERE COALESCE(r.RDB$SYSTEM_FLAG,0) = 0"
         "   AND r.RDB$DESCRIPTION IS NOT NULL"
         " UNION ALL"
-        // Columns
+        // Columns — col 3 is also RDB$DESCRIPTION (raw BLOB) to match above
         " SELECT TRIM(rf.RDB$RELATION_NAME),"
         "        'COLUMN',"
         "        TRIM(rf.RDB$FIELD_NAME),"
-        "        CAST(rf.RDB$DESCRIPTION AS VARCHAR(4000))"
+        "        rf.RDB$DESCRIPTION"
         "   FROM RDB$RELATION_FIELDS rf"
         "  WHERE COALESCE(rf.RDB$SYSTEM_FLAG,0) = 0"
         "    AND rf.RDB$DESCRIPTION IS NOT NULL"
         " ORDER BY 1, 2, 3",
         [](FirebirdStatement &c) -> duckdb::vector<Value> {
             return {
-                Value("main"),      // object_schema (literal)
-                TextOrNull(c, 0),   // object_name
-                TextOrNull(c, 1),   // object_type
-                TextOrNull(c, 2),   // column_name (NULL for TABLE/VIEW rows)
-                TextOrNull(c, 3),   // comment
+                Value("main"),         // object_schema (literal)
+                TextOrNull(c, 0),      // object_name
+                TextOrNull(c, 1),      // object_type
+                TextOrNull(c, 2),      // column_name (NULL for TABLE/VIEW rows)
+                BlobTextOrNull(c, 3),  // comment (text BLOB, full content)
             };
         }};
     return MakeMetadataFunction(desc);

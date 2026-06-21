@@ -232,7 +232,7 @@ Output columns:
 |---|---|---|
 | `generator_name` | VARCHAR | Generator name |
 | `initial_value` | BIGINT | Configured initial value |
-| `current_value` | BIGINT | Current value via `GEN_ID(name, 0)`; `NULL` if no privilege |
+| `current_value` | BIGINT | Current value via `GEN_ID(name, 0)`; `NULL` if no privilege. Read per-generator (one round-trip each) to preserve per-generator isolation; on databases with very many generators this is N+1 round-trips. |
 
 ```sql
 SELECT * FROM firebird_generators('fb');

@@ -39,6 +39,8 @@
 #include "duckdb/catalog/dependency_list.hpp"
 #include "duckdb/catalog/entry_lookup_info.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/printer.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/constraints/foreign_key_constraint.hpp"
@@ -332,9 +334,12 @@ private:
         std::unordered_map<std::string, std::vector<UniqueKey>> unique_keys;
         try {
             unique_keys = LoadUniqueConstraints(conn);
-        } catch (std::exception &) {
-            // Leave unique_keys empty — constraints will not appear in
-            // information_schema but the catalog is otherwise usable.
+        } catch (std::exception &e) {
+            // Leave unique_keys empty — PK/UNIQUE constraints will not appear
+            // in information_schema but the catalog is otherwise usable.
+            Printer::Print(StringUtil::Format(
+                "firebird: failed to load PK/UNIQUE constraints "
+                "(information_schema will be incomplete): %s", e.what()));
         }
 
         // Load FOREIGN KEY constraints. Same fallback: failure leaves the map
@@ -342,9 +347,12 @@ private:
         std::unordered_map<std::string, std::vector<ForeignKey>> fkeys;
         try {
             fkeys = LoadForeignKeys(conn);
-        } catch (std::exception &) {
+        } catch (std::exception &e) {
             // Leave fkeys empty — FK constraints will simply not appear in
             // information_schema but the catalog remains usable.
+            Printer::Print(StringUtil::Format(
+                "firebird: failed to load FK constraints "
+                "(information_schema will be incomplete): %s", e.what()));
         }
 
         // Build + register one catalog entry from a resolved column list.
