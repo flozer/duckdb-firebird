@@ -11,11 +11,17 @@
 bind + otimização do SQL pelo caminho normal do DuckDB, localiza o(s) scan(s)
 Firebird no plano otimizado, e reporta a query remota que o scanner
 **produziria** — SQL remoto, projeção, filtros empurrados/residuais + motivo,
-ROWS, e estratégia/elegibilidade de PK-range. **Nunca abre cursor; nunca envia
-SQL ao Firebird alvo.** Restrito a `SELECT` / `WITH … SELECT` read-only.
+ROWS, e estratégia/elegibilidade de PK-range. **Nunca abre cursor de DADOS da
+query do usuário; nunca envia o SQL da query ao Firebird alvo.** Em catálogo
+"frio", o bind via `ExtractPlan` pode carregar metadados de catálogo (schema) e
+rodar o probe de PK (MIN/MAX) na primeira referência a uma tabela — exatamente
+como o bind de qualquer query ATTACH — e isso fica memoizado. Não há cursor de
+dados da query nem envio do SQL do usuário. Restrito a `SELECT` /
+`WITH … SELECT` read-only.
 
 Diferença vs `firebird_last_query()`: aquele é pós-execução (exige rodar a
-query e pagar o custo remoto); este é a-priori e zero-custo no Firebird.
+query e pagar o custo remoto); este é a-priori e nunca abre cursor de DADOS
+da query do usuário nem envia o SQL da query ao Firebird.
 
 ## Gate obrigatório: spike de integração com o planner
 
@@ -80,8 +86,12 @@ semântica** — decisão separada do Fernando, fora deste spec.
    estratégia. Sem MIN/MAX, sem bounds, sem contagem de partições (seriam falsa
    precisão que o modo a-priori não possui).
 
-Totalmente offline: só metadados já cacheados pelo ATTACH; **zero SQL novo ao
-Firebird**, nenhum `OpenCursor`.
+Garantia de escopo: explain nunca abre cursor de DADOS da query do usuário e
+nunca envia o SQL da query ao Firebird. Em catálogo "frio", o bind via
+`ExtractPlan` pode carregar metadados de catálogo e rodar o probe de PK
+(MIN/MAX) na primeira referência a uma tabela — exatamente como o bind de
+qualquer query ATTACH — e isso fica memoizado. Não há cursor de dados da query
+nem novo SQL do usuário enviado ao Firebird. Nenhum `OpenCursor` de dados.
 
 ### Pré-requisito: ampliar o cache de PK do `FirebirdTableEntry`
 
@@ -170,8 +180,10 @@ caso contrário `false` / `serial`.
 
 ## Segurança / read-only
 
-- Allow-list SELECT/CTE no parse; nenhuma execução, nenhum cursor, nenhum SQL
-  remoto → inerentemente read-only e zero-custo no Firebird.
+- Allow-list SELECT/CTE no parse; nenhuma execução, nenhum cursor de DADOS,
+  nenhum SQL da query do usuário enviado ao Firebird → inerentemente read-only.
+  Metadados de catálogo e probe de PK podem carregar lazily na primeira
+  referência a uma tabela (memoizado), exatamente como qualquer bind ATTACH.
 - `remote_sql` carrega só placeholders do builder — explain **não** pode virar
   vazamento de texto sensível (sem literais inline, sem connection string).
 

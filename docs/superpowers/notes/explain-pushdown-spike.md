@@ -180,22 +180,36 @@ and no reentrant `Build()`.
   (`firebird_client.cpp:379,384`).
 - ATTACH-path scan binding goes through
   `FirebirdStorage…::GetScanFunction` (`firebird_storage.cpp:109-139`), which
-  builds a fully-populated `FirebirdBindData` **from the schema cached at ATTACH**
-  — header comment lines 20-24: "we build a fully-populated FirebirdBindData up
-  front … The planner uses our pre-built bind data verbatim and **never
+  builds a fully-populated `FirebirdBindData` from schema already in the catalog
+  entry — header comment lines 20-24: "we build a fully-populated FirebirdBindData
+  up front … The planner uses our pre-built bind data verbatim and **never
   re-invokes the bind callback**." No `OpenCursor` in that path.
-- All `OpenCursor` call sites are either catalog/metadata loads done **at
-  ATTACH** (`firebird_storage.cpp:257,301,447,473` — `LoadAllTableSchemas` etc.)
-  or the **scan execute** path (`firebird_scanner.cpp:805-806`, inside the
-  per-chunk function). Plan extraction touches neither: it stops at the
-  optimized `LogicalGet`, before any operator executes.
+- `OpenCursor` call sites are either the **scan execute** path
+  (`firebird_scanner.cpp:805-806`, inside the per-chunk function) or catalog
+  metadata loads. Plan extraction stops at the optimized `LogicalGet`, before
+  any operator executes, so no data cursor is opened on the user's query.
 - Optimization (filter/projection pushdown, the complex-filter callback) is
   pure in-memory work on `bind_data` — no I/O to Firebird.
 
-**Conclusion:** extracting + walking the plan for an ATTACHed-table SELECT fires
-zero `OpenCursor` against the target table. (Recommended test instrumentation:
-an atomic `OpenCursor` counter, or an after-ATTACH invalid-credential fixture —
-the explain must still succeed, as noted in the design's test section.)
+**Important nuance — lazy catalog discovery on a cold catalog:** DuckDB catalog
+discovery is lazy: `EnsureTablesLoaded` fires on the first `LookupEntry` for a
+table not yet in the in-memory catalog, and `GetScanFunction` (called by the
+binder) triggers `ProbePrimaryKey` (including a MIN/MAX probe round-trip) the
+first time a given table is resolved. These are ATTACH-path binder behaviors, not
+explain-specific: any query that binds `fb.main.EMPLOYEE` for the first time
+causes the same catalog loads. `ExtractPlan` on a cold catalog will therefore run
+these metadata loads + the PK probe on first reference — memoised immediately
+after, so subsequent explain calls or real queries against the same table see no
+new round-trips.
+
+**Scoped guarantee:** `firebird_explain_pushdown` never opens a **data cursor**
+on the user's query and never sends the user's query SQL to Firebird. Catalog
+metadata + the PK probe may lazily load on first table reference exactly as any
+ATTACH-path query's bind does, and are memoised. (Recommended test
+instrumentation: an atomic `OpenCursor` counter distinguishing metadata vs. data
+cursors, or an after-ATTACH invalid-credential fixture — the explain must
+succeed after ATTACH has already loaded metadata, as noted in the design's test
+section.)
 
 ### Direct `firebird_scan(...)` WOULD connect at bind — confirmed
 

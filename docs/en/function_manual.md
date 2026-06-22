@@ -436,10 +436,22 @@ reference and the reason vocabulary.
 ### `firebird_explain_pushdown(sql)`
 
 Returns an a-priori, plan-only analysis of what a `SELECT` statement would
-push down to Firebird — **without executing the query** and **without
-opening a connection or cursor**. This is the complement of
+push down to Firebird — **without executing the query** and **without opening
+a data cursor on the user's query**. This is the complement of
 `firebird_last_query()`: explain is prospective (before any run), while
 `firebird_last_query()` is post-hoc (after the last real scan).
+
+Explain never opens a data cursor on the user's query and never sends the
+user's query SQL to Firebird. On a cold catalog (first reference to a table),
+the bind via `ExtractPlan` may load catalog metadata (schema) and run the PK
+probe (MIN/MAX) — exactly as the bind of any ATTACH-path query does — and
+these loads are memoised immediately. No data cursor is opened on the user's
+query; no user-query SQL is sent to Firebird.
+
+**Note on `remote_sql`:** the column shows the base remote SELECT the scanner
+would send; complex predicates (LIKE-prefix, NOT IN, BETWEEN) appear in the
+`pushed_filters` list rather than inline in `remote_sql` — the same telemetry
+split used by `firebird_last_query()`.
 
 Because explain never runs the query, it leaves no entry in
 `firebird_last_query()` telemetry.

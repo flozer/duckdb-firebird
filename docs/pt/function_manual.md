@@ -994,10 +994,22 @@ WHERE error_message <> '';
 #### O que faz e como funciona
 
 Retorna uma analise a priori, baseada apenas no plano logico, de o que um
-`SELECT` empurraria ao Firebird — **sem executar a query** e **sem abrir
-conexao ou cursor**. E o complemento de `firebird_last_query()`: explain e
-prospectivo (antes de qualquer execucao), enquanto `firebird_last_query()` e
-post-hoc (apos o ultimo scan real).
+`SELECT` empurraria ao Firebird — **sem executar a query** e **sem abrir cursor
+de dados na query do usuario**. E o complemento de `firebird_last_query()`:
+explain e prospectivo (antes de qualquer execucao), enquanto
+`firebird_last_query()` e post-hoc (apos o ultimo scan real).
+
+Explain nunca abre cursor de DADOS na query do usuario e nunca envia o SQL da
+query ao Firebird. Em catalogo "frio" (primeira referencia a uma tabela), o
+bind via `ExtractPlan` pode carregar metadados de catalogo (schema) e rodar o
+probe de PK (MIN/MAX) — exatamente como o bind de qualquer query ATTACH — e
+isso fica memoizado. Nao ha cursor de dados da query nem envio do SQL do
+usuario.
+
+**Nota sobre `remote_sql`:** a coluna mostra o SELECT remoto base que o scanner
+enviaria; predicados complexos (LIKE-prefixo, NOT IN, BETWEEN) aparecem na
+lista `pushed_filters` em vez de inline no `remote_sql` — o mesmo split de
+telemetria usado por `firebird_last_query()`.
 
 Como explain nunca executa a query, nao deixa registro no telemetro de
 `firebird_last_query()`.
