@@ -21,8 +21,53 @@ SELECT COUNT(*) FROM firebird_explain_pushdown('SELECT 1');
 statement error
 SELECT * FROM firebird_explain_pushdown('UPDATE fb.main.EMPLOYEE SET EMP_NAME = ''x''');
 ----
+only a single read-only SELECT/WITH...SELECT is allowed
 
 # direct firebird_scan rejected (would open a connection at bind)
 statement error
 SELECT * FROM firebird_explain_pushdown('SELECT * FROM firebird_scan(''${FIREBIRD_TEST_DB}'', ''EMPLOYEE'')');
 ----
+direct firebird_scan(...) is not supported here
+
+# direct firebird_scan hidden in a UNION branch is also rejected
+statement error
+SELECT * FROM firebird_explain_pushdown('SELECT 1 UNION ALL SELECT EMP_ID FROM firebird_scan(''${FIREBIRD_TEST_DB}'', ''EMPLOYEE'')');
+----
+direct firebird_scan(...) is not supported here
+
+# simple equality pushed; remote_sql uses '?' not the literal 4
+query I
+SELECT scan_ordinal FROM firebird_explain_pushdown(
+  'SELECT EMP_ID FROM fb.main.EMPLOYEE WHERE EMP_ID = 4');
+----
+1
+
+query I
+SELECT len(pushed_filters) > 0 FROM firebird_explain_pushdown(
+  'SELECT EMP_ID FROM fb.main.EMPLOYEE WHERE EMP_ID = 4');
+----
+true
+
+# remote_sql contains a placeholder and NOT the literal value or a path
+query I
+SELECT remote_sql LIKE '%?%'
+   AND remote_sql NOT LIKE '%fbtest%'
+   AND remote_sql NOT LIKE '%= 4%'
+  FROM firebird_explain_pushdown(
+  'SELECT EMP_ID FROM fb.main.EMPLOYEE WHERE EMP_ID = 4');
+----
+true
+
+# projection prune
+query I
+SELECT projected_columns
+  FROM firebird_explain_pushdown('SELECT EMP_ID FROM fb.main.EMPLOYEE');
+----
+[EMP_ID]
+
+# LIMIT pushed
+query I
+SELECT limit_pushed FROM firebird_explain_pushdown(
+  'SELECT * FROM fb.main.EMPLOYEE LIMIT 100');
+----
+100
