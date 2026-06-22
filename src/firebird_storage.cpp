@@ -971,20 +971,6 @@ FirebirdCreateTransactionManager(optional_ptr<StorageExtensionInfo> /*info*/,
     return make_uniq<FirebirdTransactionManager>(db);
 }
 
-// ---------------------------------------------------------------------------
-//  GetFirebirdPkDescriptor — cross-TU accessor (declared in firebird_scanner.hpp)
-// ---------------------------------------------------------------------------
-//
-// Returns a pointer to the PrimaryKeyDescriptor cached on `entry` when it is a
-// FirebirdTableEntry; nullptr for any other TableCatalogEntry subclass.
-// FirebirdTableEntry is a file-local class so the cast must live here.
-// The descriptor was populated at ATTACH time — zero new I/O.
-
-const PrimaryKeyDescriptor *GetFirebirdPkDescriptor(TableCatalogEntry &entry) {
-    auto *fb_entry = dynamic_cast<FirebirdTableEntry *>(&entry);
-    if (!fb_entry) return nullptr;
-    return &fb_entry->GetPkDescriptor();
-}
 
 unique_ptr<StorageExtension> GetFirebirdStorageExtension() {
     auto ext = make_uniq<StorageExtension>();

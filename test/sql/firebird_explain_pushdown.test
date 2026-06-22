@@ -101,3 +101,9 @@ SELECT pk_range_reason, pk_range_eligible, scan_strategy
   FROM firebird_explain_pushdown('SELECT * FROM fb.main.TCHILD');
 ----
 no primary key	false	serial
+
+# composite PK has no single PK column -> pk_range_column NULL
+query I
+SELECT pk_range_column IS NULL FROM firebird_explain_pushdown('SELECT * FROM fb.main.TPK_COMPOSITE');
+----
+true

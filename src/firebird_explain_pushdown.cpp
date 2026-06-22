@@ -20,7 +20,6 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/parser/parser.hpp"
@@ -453,7 +452,9 @@ static void ExplainPushdownFunction(ClientContext &,
             ? Value(r.rows_clause)
             : Value(LogicalType::VARCHAR));
         output.data[10].SetValue(row, Value::BOOLEAN(r.pk_range_eligible));
-        output.data[11].SetValue(row, Value(r.pk_range_column));
+        output.data[11].SetValue(row, r.pk_range_column.empty()
+            ? Value(LogicalType::VARCHAR)
+            : Value(r.pk_range_column));
         output.data[12].SetValue(row, Value(r.pk_range_reason));
         output.data[13].SetValue(row, Value(r.scan_strategy));
         ++row;
