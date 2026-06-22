@@ -146,3 +146,30 @@ SELECT len(residual_filters) = len(not_pushed_reasons)
   FROM firebird_explain_pushdown('SELECT * FROM fbn.main.TXT WHERE LABEL NOT IN (''a'',''b'')');
 ----
 true
+
+# Task 7: self-join — two scans of the same table, scan_ordinal must be distinct
+# DuckDB produces two LogicalGet nodes for a self-join (one per alias), so we
+# expect ordinals 1 and 2 with the same table_name.
+# NOTE: if DuckDB's optimizer deduplicates the self-join to a single LogicalGet
+# the expected output below would need to change to a single row — see report.
+query II
+SELECT scan_ordinal, table_name FROM firebird_explain_pushdown(
+  'SELECT a.EMP_ID FROM fb.main.EMPLOYEE a JOIN fb.main.EMPLOYEE b ON a.DEPT_NO=b.DEPT_NO')
+ORDER BY scan_ordinal;
+----
+1	EMPLOYEE
+2	EMPLOYEE
+
+# Task 7: valid WITH...SELECT — the CTE body is a Firebird scan; explain returns the scan
+query I
+SELECT table_name FROM firebird_explain_pushdown(
+  'WITH x AS (SELECT EMP_ID FROM fb.main.EMPLOYEE) SELECT * FROM x');
+----
+EMPLOYEE
+
+# Task 7: WITH...DELETE must be rejected by the statement-type guard
+statement error
+SELECT * FROM firebird_explain_pushdown(
+  'WITH x AS (SELECT 1) DELETE FROM fb.main.EMPLOYEE');
+----
+only a single read-only SELECT/WITH...SELECT is allowed
