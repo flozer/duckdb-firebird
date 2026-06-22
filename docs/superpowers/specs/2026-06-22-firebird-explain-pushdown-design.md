@@ -38,6 +38,19 @@ semântica** — decisão separada do Fernando, fora deste spec.
 1. **Parse / validação.** Exatamente uma instrução `SELECT` ou
    `WITH … SELECT`. Rejeitar (BinderException) multi-statement, DDL, DML,
    `COPY`, `EXPLAIN`, `PRAGMA`, etc. — allow-list, não block-list.
+
+   **Apenas tabelas de catálogo Firebird já anexado.** A função explica scans
+   que vêm de um `ATTACH … (TYPE firebird)` (LogicalGet via storage extension,
+   schema já cacheado). Deve **rejeitar** a table function direta
+   `firebird_scan(connection_string, table)` no SQL interno: o bind dela
+   carrega o schema abrindo uma **conexão Firebird** — violaria "nenhum
+   SQL/cursor remoto". Detectar e rejeitar com BinderException acionável:
+   `firebird_explain_pushdown: direct firebird_scan(...) is not supported here
+   (it would open a Firebird connection at bind). ATTACH … (TYPE firebird) and
+   reference alias.main.table instead.` A detecção ocorre **antes** de
+   bindar/otimizar o SQL interno (para não disparar a conexão do
+   firebird_scan): inspecionar a árvore parseada por uma table function de nome
+   `firebird_scan` e abortar se presente.
 2. **Bind + optimize.** Levar o SQL interno a plano lógico otimizado pelo
    caminho interno do DuckDB. Projeção / `TableFilterSet` / filtros complexos /
    limit-offset são decididos aqui — idêntico a um scan real.
@@ -52,13 +65,44 @@ semântica** — decisão separada do Fernando, fora deste spec.
    capture-only: where-clause serial (sem PK bounds), sem cursor, sem conexão.
    Captura `remote_sql`, `pushed_filter_sql`, `residual_filter_indices`,
    `residual_filter_reasons`, projeção, limit/offset.
-5. **PK-range (sem probe).** A partir do PK info **já cacheado pelo catálogo**
-   (ATTACH), determinar elegibilidade + coluna + tipo + motivo + estratégia.
-   Sem MIN/MAX, sem bounds, sem contagem de partições (seriam falsa precisão
-   que o modo a-priori não possui).
+5. **PK-range (sem probe).** A partir do **descritor de PK cacheado pelo
+   catálogo** (ATTACH), determinar elegibilidade + coluna + tipo + motivo +
+   estratégia. Sem MIN/MAX, sem bounds, sem contagem de partições (seriam falsa
+   precisão que o modo a-priori não possui).
 
 Totalmente offline: só metadados já cacheados pelo ATTACH; **zero SQL novo ao
 Firebird**, nenhum `OpenCursor`.
+
+### Pré-requisito: ampliar o cache de PK do `FirebirdTableEntry`
+
+O cache atual **não basta** para os quatro motivos normalizados offline. Hoje
+o `FirebirdTableEntry` guarda `PrimaryKeyInfo` apenas para **PK numérica de
+coluna única** (usado pelo particionamento por faixa); `nullptr` colapsa três
+casos distintos — *sem PK*, *PK composta* e *PK não-numérica* — que
+`pk_range_reason` precisa diferenciar.
+
+Ampliar o cache, populado no ATTACH a partir dos metadados de constraint que o
+catálogo **já carrega** (o `LoadUniqueConstraints` da Metadata Bridge 2.0 já lê
+`RDB$RELATION_CONSTRAINTS`/`RDB$INDEX_SEGMENTS`) + os tipos de coluna já
+presentes na entry — portanto **zero I/O novo**:
+
+```
+struct PrimaryKeyDescriptor {
+    bool                        has_pk;        // existe PK?
+    duckdb::vector<std::string> columns;       // colunas da PK, em ordem ordinal
+    bool                        single_numeric;// 1 coluna E tipo numérico (INT/BIGINT)
+};
+```
+
+Derivação dos quatro motivos (puramente do descritor):
+- `!has_pk` → `no primary key`
+- `columns.size() > 1` → `composite PK`
+- `columns.size() == 1 && !single_numeric` → `non-numeric PK`
+- `single_numeric` → `single numeric PK` (único caso elegível)
+
+O `PrimaryKeyInfo` atual (usado pelo scanner para partição) permanece como
+está; o descritor é metadado de catálogo adicional, não substitui a sonda de
+partição em tempo de scan.
 
 ## Saída — uma linha por scan Firebird no plano
 
@@ -67,6 +111,7 @@ Listas paralelas (consistente com `firebird_last_query()` /
 
 | coluna | tipo | nota |
 |--------|------|------|
+| `scan_ordinal` | BIGINT | preorder do plano otimizado, começando em 1 — contrato de ordem estável |
 | `table_name` | VARCHAR | |
 | `remote_sql` | VARCHAR | **somente placeholders `?`/binds do builder — nunca literais nem connection string** |
 | `projected_columns` | LIST(VARCHAR) | |
@@ -83,6 +128,14 @@ Listas paralelas (consistente com `firebird_last_query()` /
 
 Plano sem scan Firebird (ex.: `SELECT 1`, SQL puramente analítico) → **zero
 linhas** (naturalmente componível; não é erro).
+
+### Contrato de ordem
+
+Uma linha por `LogicalGet` Firebird no plano otimizado, emitidas em **preorder
+da travessia do plano**, com `scan_ordinal` 1-based atribuído nessa ordem. Num
+self-join, as duas linhas têm o mesmo `table_name` mas `scan_ordinal` distinto
+(1, 2) — resultado depurável e testes estáveis. Os testes asseram por
+`scan_ordinal`, não por ordem implícita.
 
 ### Invariantes de cardinalidade
 
@@ -124,11 +177,19 @@ Novo `test/sql/firebird_explain_pushdown.test`:
   `residual_filters` + `not_pushed_reasons` (comprimentos iguais).
 - **CHARACTER SET NONE / NOT IN:** garante o par residual+reason e o caminho
   `complex_filter[none_gated]` (usar `none.fdb` / coluna NONE).
-- **PK composta:** `TPK_COMPOSITE` → `pk_range_eligible = false`,
-  `pk_range_reason = 'composite PK'`, `scan_strategy = 'serial'`.
-- **Dois scans Firebird no mesmo SQL** (join de duas tabelas fb) → duas linhas,
-  ordem de travessia determinística.
+- **Quatro motivos `pk_range_reason`** (cobertos pela fixture existente, todos
+  offline a partir do descritor de PK):
+  - `EMPLOYEE` (EMP_ID INTEGER) → `single numeric PK`, `eligible = true`, `pk-range-partitionable`
+  - `DEPT` (DEPT_NO VARCHAR(3) PK) → `non-numeric PK`, `eligible = false`, `serial`
+  - `TPK_COMPOSITE` (PK A,B) → `composite PK`, `eligible = false`, `serial`
+  - `TCHILD` (sem PK) → `no primary key`, `eligible = false`, `serial`
+- **Dois scans Firebird no mesmo SQL** — incluir um **self-join** (mesma
+  tabela duas vezes): duas linhas, mesmo `table_name`, `scan_ordinal` 1 e 2;
+  asserir por `scan_ordinal`.
 - **`SELECT 1`** (sem scan Firebird) → zero linhas.
+- **Rejeição de `firebird_scan(...)` direto:**
+  `firebird_explain_pushdown('SELECT * FROM firebird_scan(''...'', ''EMPLOYEE'')')`
+  → erro acionável (matcher), sem abrir conexão.
 - **`WITH` válido** (`WITH x AS (SELECT … FROM fb.EMPLOYEE) SELECT … FROM x`)
   → explica o scan dentro do CTE.
 - **Guarda read-only:** `WITH … DELETE` e `UPDATE …` → erro (matcher de erro).
@@ -147,7 +208,10 @@ adicionando `firebird_explain_pushdown.test`.
 
 - Novo `src/firebird_explain_pushdown.cpp` + `src/include/firebird_explain_pushdown.hpp`.
 - Registrar a table function em `src/firebird_extension.cpp`.
-- Reusar `FirebirdQueryBuilder::Build()` (capture-only) + PK info do catálogo.
+- `src/firebird_storage.cpp` (+ `firebird_scanner.hpp`): ampliar o cache de PK
+  do `FirebirdTableEntry` para `PrimaryKeyDescriptor` (cardinalidade + colunas +
+  `single_numeric`), populado no ATTACH a partir das constraints já carregadas.
+- Reusar `FirebirdQueryBuilder::Build()` (capture-only) + descritor de PK do catálogo.
 - Separado do scanner para não inchá-lo.
 
 ## Fora de escopo
