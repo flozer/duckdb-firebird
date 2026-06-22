@@ -120,6 +120,7 @@ public:
         data->column_descs = cached_column_descs_;
         data->none_encoding = none_encoding_;
         data->pool = pool_;
+        data->pk_descriptor = pk_descriptor_; // cached at ATTACH, zero I/O
 
         // PK probe — lazy + memoised. The first scan against a table
         // pays the three RDB$ round-trips; subsequent scans return the
@@ -968,6 +969,21 @@ static unique_ptr<TransactionManager>
 FirebirdCreateTransactionManager(optional_ptr<StorageExtensionInfo> /*info*/,
                                  AttachedDatabase &db, Catalog & /*catalog*/) {
     return make_uniq<FirebirdTransactionManager>(db);
+}
+
+// ---------------------------------------------------------------------------
+//  GetFirebirdPkDescriptor — cross-TU accessor (declared in firebird_scanner.hpp)
+// ---------------------------------------------------------------------------
+//
+// Returns a pointer to the PrimaryKeyDescriptor cached on `entry` when it is a
+// FirebirdTableEntry; nullptr for any other TableCatalogEntry subclass.
+// FirebirdTableEntry is a file-local class so the cast must live here.
+// The descriptor was populated at ATTACH time — zero new I/O.
+
+const PrimaryKeyDescriptor *GetFirebirdPkDescriptor(TableCatalogEntry &entry) {
+    auto *fb_entry = dynamic_cast<FirebirdTableEntry *>(&entry);
+    if (!fb_entry) return nullptr;
+    return &fb_entry->GetPkDescriptor();
 }
 
 unique_ptr<StorageExtension> GetFirebirdStorageExtension() {

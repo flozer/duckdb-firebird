@@ -51,6 +51,10 @@ struct FirebirdBindData : public TableFunctionData {
     // time to gate text-filter pushdown.
     duckdb::vector<FirebirdColumnDesc> column_descs;
     std::unique_ptr<PrimaryKeyInfo> pk;
+    // Full descriptor built at ATTACH time from the constraint map + column
+    // types (zero I/O). Carries has_pk / columns / single_numeric for
+    // ClassifyPkRange; populated by FirebirdTableEntry::GetScanFunction.
+    PrimaryKeyDescriptor pk_descriptor;
     idx_t partitions_override = 0;
     // Optional ROWS N hint pushed into every per-partition Firebird query.
     // 0 = unset (no limit). DuckDB's TableFunction API has no built-in
@@ -162,6 +166,15 @@ std::unique_ptr<PrimaryKeyInfo> ProbePrimaryKey(
     const std::string &table_name,
     const duckdb::vector<std::string> &all_column_names,
     const duckdb::vector<LogicalType> &all_column_types);
+
+// --- cross-TU accessor for PK descriptor ----------------------------------
+
+// Returns a pointer to the PrimaryKeyDescriptor cached on `entry` if it is a
+// FirebirdTableEntry (defined in firebird_storage.cpp), nullptr otherwise.
+// Implemented in firebird_storage.cpp; declared here so firebird_explain_
+// pushdown.cpp can call it without importing the file-local class.
+// Zero I/O — the descriptor was populated at ATTACH time.
+const PrimaryKeyDescriptor *GetFirebirdPkDescriptor(TableCatalogEntry &entry);
 
 // --- table-function factories ----------------------------------------------
 

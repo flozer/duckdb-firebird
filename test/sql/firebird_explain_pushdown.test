@@ -72,3 +72,32 @@ SELECT limit_pushed IS NULL FROM firebird_explain_pushdown(
   'SELECT * FROM fb.main.EMPLOYEE LIMIT 100');
 ----
 true
+
+# PK-range classification: 4 normalized reasons
+# EMPLOYEE: EMP_ID INTEGER PK -> single numeric PK, eligible=true, pk-range-partitionable
+query III
+SELECT pk_range_reason, pk_range_eligible, scan_strategy
+  FROM firebird_explain_pushdown('SELECT * FROM fb.main.EMPLOYEE');
+----
+single numeric PK	true	pk-range-partitionable
+
+# DEPT: DEPT_NO VARCHAR(3) PK -> non-numeric PK, eligible=false, serial
+query III
+SELECT pk_range_reason, pk_range_eligible, scan_strategy
+  FROM firebird_explain_pushdown('SELECT * FROM fb.main.DEPT');
+----
+non-numeric PK	false	serial
+
+# TPK_COMPOSITE: composite PK -> composite PK, eligible=false, serial
+query III
+SELECT pk_range_reason, pk_range_eligible, scan_strategy
+  FROM firebird_explain_pushdown('SELECT * FROM fb.main.TPK_COMPOSITE');
+----
+composite PK	false	serial
+
+# TCHILD: no PK -> no primary key, eligible=false, serial
+query III
+SELECT pk_range_reason, pk_range_eligible, scan_strategy
+  FROM firebird_explain_pushdown('SELECT * FROM fb.main.TCHILD');
+----
+no primary key	false	serial

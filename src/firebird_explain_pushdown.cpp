@@ -20,6 +20,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/parser/parser.hpp"
@@ -361,6 +362,25 @@ static void WalkPlan(LogicalOperator &op,
                                     std::to_string(real_limit.GetIndex());
                 }
                 r.rows_clause_valid = true;
+            }
+
+            // PK-range eligibility (Task 5): classify from the PrimaryKeyDescriptor
+            // cached on FirebirdBindData at ATTACH time — zero I/O.
+            // bd.pk_descriptor is always populated (default: has_pk=false) so
+            // ClassifyPkRange can be called unconditionally for any firebird_scan
+            // LogicalGet.
+            // Note: LogicalGet::GetTable() returns nullptr for firebird_scan
+            // because the function does not register a get_bind_info callback;
+            // the bind-data descriptor is the correct and only source.
+            {
+                auto c = ClassifyPkRange(bd.pk_descriptor);
+                r.pk_range_eligible = c.eligible;
+                r.pk_range_column   = c.column;
+                r.pk_range_reason   = c.reason;
+                r.scan_strategy     =
+                    (c.strategy == PkRangeStrategy::PK_RANGE_PARTITIONABLE)
+                        ? "pk-range-partitionable"
+                        : "serial";
             }
 
             rows.push_back(std::move(r));
