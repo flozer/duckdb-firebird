@@ -51,9 +51,19 @@ semântica** — decisão separada do Fernando, fora deste spec.
    bindar/otimizar o SQL interno (para não disparar a conexão do
    firebird_scan): inspecionar a árvore parseada por uma table function de nome
    `firebird_scan` e abortar se presente.
-2. **Bind + optimize.** Levar o SQL interno a plano lógico otimizado pelo
-   caminho interno do DuckDB. Projeção / `TableFilterSet` / filtros complexos /
-   limit-offset são decididos aqui — idêntico a um scan real.
+2. **Bind + optimize.** Levar o SQL interno a plano lógico otimizado via
+   `ClientContext::ExtractPlan`. Projeção / `TableFilterSet` / filtros complexos
+   / limit-offset são decididos aqui — idêntico a um scan real.
+
+   **Correção do spike (2026-06-22, `docs/superpowers/notes/explain-pushdown-spike.md`):**
+   `ExtractPlan` toma um `context_lock` **não-recursivo**; chamá-lo no
+   `ClientContext` externo (o que executa a função) **trava (deadlock)**.
+   Portanto a extração ocorre na **fase de execução** (InitGlobal), sobre uma
+   **`Connection` nova** (`Connection(*context.db)`) — que tem ClientContext +
+   lock próprios e compartilha os catálogos ATTACHed. Guardar
+   `enable_optimizer` (plano não-otimizado não teria pushdown). As guardas de
+   parse (allow-list + rejeição de `firebird_scan` direto) ficam em **bind**
+   (só parse, sem ExtractPlan) e rodam antes da extração.
 3. **Travessia do plano otimizado.** Para cada `LogicalGet` ligado à table
    function Firebird, **copiar** do `bind_data` (e do LogicalGet) o que é
    necessário: `table_name`, nomes/tipos/descs de coluna, `none_encoding`,

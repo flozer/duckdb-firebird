@@ -285,7 +285,17 @@ Run the test. Expected: FAIL — explain returns 0 rows (walk not implemented).
 
 - [ ] **Step 3: Implement plan walk + capture**
 
-In bind (after the guards), using the spike-confirmed API: get the optimized plan for `sql` (e.g. `auto plan = context.ExtractPlan(sql);`). Recursively walk in **preorder**, assigning `scan_ordinal` starting at 1 to each `LogicalGet` whose `bind_data` casts to `FirebirdBindData` (identify per the spike). For each:
+**Mechanism per the spike verdict (`docs/superpowers/notes/explain-pushdown-spike.md`) — MANDATORY:** `ExtractPlan` takes a NON-recursive `context_lock`. Calling it on the outer `ClientContext` (the one running this function) deadlocks. Therefore do the extraction in the **execute phase** (InitGlobal), on a **fresh `Connection`** over the same database, which has its own ClientContext+lock and shares the ATTACHed catalogs:
+```cpp
+Connection con(*context.db);
+con.context->RunFunctionInTransaction([&](){ /* if needed */ });
+auto plan = con.context->ExtractPlan(sql);   // optimized plan
+```
+Guard the optimizer: if `con.context->config.enable_optimizer == false` (or DBConfig), the plan would be un-optimized (pushdown not applied) → either temporarily enable it on `con` or throw a clear error. Confirm the exact `Connection`/`ExtractPlan` calling form against the spike doc.
+
+The SELECT/CTE allow-list + direct-`firebird_scan` rejection (Task 3) stay in **bind** (parse-only, no ExtractPlan) — they must run before this execute-phase extraction.
+
+Recursively walk the plan in **preorder** over `op.children`, assigning `scan_ordinal` starting at 1 to each `LogicalGet` identified as Firebird (`get.function.name == "firebird_scan"`; then `get.bind_data->Cast<FirebirdBindData>()`). For each:
 - `column_ids` from the Get (`GetColumnIds()`); `table_filters` (`TableFilterSet`); `bind_data` → `FirebirdBindData`.
 - Call `FirebirdQueryBuilder::Build(bd.table_name, bd.column_names, bd.column_types, column_ids, filters, bd.limit_override, /*extra_where=*/"", &bd.column_descs, bd.none_encoding, bd.offset_override)` — capture-only, serial WHERE (no PK bounds), no cursor.
 - `remote_sql = result.sql`; `pushed_filters = result.pushed_filter_sql` + each `bd.extra_predicates[i].sql`; `residual_filters` = `"filter[" + idx + "]"` per `result.residual_filter_indices`; `not_pushed_reasons = result.residual_filter_reasons`.
