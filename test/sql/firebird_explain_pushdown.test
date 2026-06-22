@@ -65,9 +65,10 @@ SELECT projected_columns
 ----
 [EMP_ID]
 
-# LIMIT pushed
+# SQL LIMIT is applied by DuckDB above the scan; NOT pushed to Firebird ROWS.
+# limit_pushed/offset_pushed/rows_clause are NULL for SQL LIMIT.
 query I
-SELECT limit_pushed FROM firebird_explain_pushdown(
+SELECT limit_pushed IS NULL FROM firebird_explain_pushdown(
   'SELECT * FROM fb.main.EMPLOYEE LIMIT 100');
 ----
-100
+true

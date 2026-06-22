@@ -22,7 +22,6 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
-#include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/parser/query_node.hpp"
@@ -257,50 +256,25 @@ ExplainPushdownBind(ClientContext &,
 // Build() is called capture-only — it produces the remote SQL + pushdown
 // telemetry without touching Firebird (no OpenCursor). This mirrors the
 // scanner's own observability capture (firebird_scanner.cpp ~696-769).
-
-// Limit/offset inherited from an enclosing LogicalLimit (SQL LIMIT/OFFSET).
-// DuckDB has no LIMIT-pushdown hook for table functions, so a SQL LIMIT lands
-// in a LogicalLimit parent rather than in FirebirdBindData. We carry the
-// nearest enclosing constant LIMIT/OFFSET down to the firebird scan below it,
-// matching what the scanner's ROWS clause would express for that slice.
-struct InheritedPaging {
-    bool         has_limit  = false;
-    idx_t        limit      = 0;
-    bool         has_offset = false;
-    idx_t        offset     = 0;
-};
+//
+// limit_pushed / offset_pushed / rows_clause reflect ONLY the real pushdown:
+// the row_limit= / row_offset= named-parameter path (bd.limit_override /
+// bd.offset_override). SQL LIMIT is applied by DuckDB above the scan in a
+// LogicalLimit node and is NOT pushed into the Firebird ROWS clause. These
+// three columns are NULL for ordinary ATTACH-path SELECTs (no named params).
 
 static void WalkPlan(LogicalOperator &op,
                      std::vector<ExplainRow> &rows,
-                     int64_t &next_ordinal,
-                     InheritedPaging paging) {
-    // Capture a constant SQL LIMIT/OFFSET to apply to firebird scans below.
-    if (op.type == LogicalOperatorType::LOGICAL_LIMIT) {
-        auto &lim = op.Cast<LogicalLimit>();
-        if (lim.limit_val.Type() == LimitNodeType::CONSTANT_VALUE) {
-            paging.has_limit = true;
-            paging.limit     = lim.limit_val.GetConstantValue();
-        }
-        if (lim.offset_val.Type() == LimitNodeType::CONSTANT_VALUE) {
-            paging.has_offset = true;
-            paging.offset     = lim.offset_val.GetConstantValue();
-        }
-    }
+                     int64_t &next_ordinal) {
     if (op.type == LogicalOperatorType::LOGICAL_GET) {
         auto &get = op.Cast<LogicalGet>();
         if (get.function.name == "firebird_scan" && get.bind_data) {
             auto &bd = get.bind_data->Cast<FirebirdBindData>();
 
-            // Effective paging: bind-data override (row_limit=) wins; else the
-            // enclosing SQL LIMIT/OFFSET.
-            optional_idx eff_limit  = bd.limit_override;
-            optional_idx eff_offset = bd.offset_override;
-            if (!eff_limit.IsValid() && paging.has_limit) {
-                eff_limit = optional_idx(paging.limit);
-                if (paging.has_offset) {
-                    eff_offset = optional_idx(paging.offset);
-                }
-            }
+            // Real pushdown only: named-param path (row_limit= / row_offset=).
+            // SQL LIMIT lands in a LogicalLimit parent — not pushed to Firebird.
+            const optional_idx &real_limit  = bd.limit_override;
+            const optional_idx &real_offset = bd.offset_override;
 
             // Project the ColumnIndex list down to raw column ids (column_t),
             // matching the scanner's gstate.column_ids contract. RowId comes
@@ -321,11 +295,11 @@ static void WalkPlan(LogicalOperator &op,
                 bd.column_types,
                 column_ids,
                 &get.table_filters,
-                eff_limit,
+                real_limit,
                 /*extra_predicate=*/"",
                 &bd.column_descs,
                 bd.none_encoding,
-                eff_offset);
+                real_offset);
 
             ExplainRow r;
             r.scan_ordinal = next_ordinal++;
@@ -363,26 +337,28 @@ static void WalkPlan(LogicalOperator &op,
                 r.not_pushed_reasons.push_back(reason);
             }
 
-            // paging hints + the ROWS clause the scanner would emit.
-            r.limit_pushed_valid  = eff_limit.IsValid();
+            // Paging: reflect only the real row_limit=/row_offset= pushdown.
+            // NULL (via _valid=false) when no named-param override was set.
+            r.limit_pushed_valid  = real_limit.IsValid();
             if (r.limit_pushed_valid) {
-                r.limit_pushed = static_cast<int64_t>(eff_limit.GetIndex());
+                r.limit_pushed = static_cast<int64_t>(real_limit.GetIndex());
             }
-            r.offset_pushed_valid = eff_offset.IsValid();
+            r.offset_pushed_valid = real_offset.IsValid();
             if (r.offset_pushed_valid) {
-                r.offset_pushed = static_cast<int64_t>(eff_offset.GetIndex());
+                r.offset_pushed = static_cast<int64_t>(real_offset.GetIndex());
             }
             // ROWS clause — copy firebird_query.cpp:390-396 formatting.
-            if (eff_limit.IsValid()) {
-                if (eff_offset.IsValid()) {
-                    const idx_t start = eff_offset.GetIndex() + 1;
-                    const idx_t end   = eff_offset.GetIndex() +
-                                        eff_limit.GetIndex();
+            // Only set when the real named-param limit is present.
+            if (real_limit.IsValid()) {
+                if (real_offset.IsValid()) {
+                    const idx_t start = real_offset.GetIndex() + 1;
+                    const idx_t end   = real_offset.GetIndex() +
+                                        real_limit.GetIndex();
                     r.rows_clause = "ROWS " + std::to_string(start) +
                                     " TO " + std::to_string(end);
                 } else {
                     r.rows_clause = "ROWS " +
-                                    std::to_string(eff_limit.GetIndex());
+                                    std::to_string(real_limit.GetIndex());
                 }
                 r.rows_clause_valid = true;
             }
@@ -391,7 +367,7 @@ static void WalkPlan(LogicalOperator &op,
         }
     }
     for (auto &child : op.children) {
-        WalkPlan(*child, rows, next_ordinal, paging);
+        WalkPlan(*child, rows, next_ordinal);
     }
 }
 
@@ -418,7 +394,7 @@ ExplainPushdownInitGlobal(ClientContext &context, TableFunctionInitInput &input)
     auto plan = con.context->ExtractPlan(bind.sql);
     if (plan) {
         int64_t next_ordinal = 1;
-        WalkPlan(*plan, gstate->rows, next_ordinal, InheritedPaging{});
+        WalkPlan(*plan, gstate->rows, next_ordinal);
     }
     return std::move(gstate);
 }

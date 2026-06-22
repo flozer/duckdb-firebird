@@ -271,12 +271,13 @@ SELECT projected_columns
 ----
 [EMP_ID]
 
-# LIMIT pushed
+# SQL LIMIT is NOT pushed; the Firebird scanner only emits ROWS for the
+# row_limit= named param (absent in ATTACH-path SQL), so these columns are NULL.
 query I
-SELECT limit_pushed FROM firebird_explain_pushdown(
+SELECT limit_pushed IS NULL FROM firebird_explain_pushdown(
   'SELECT * FROM fb.main.EMPLOYEE LIMIT 100');
 ----
-100
+true
 ```
 
 - [ ] **Step 2: Run, verify it fails**

@@ -136,6 +136,8 @@ Listas paralelas (consistente com `firebird_last_query()` /
 | `pk_range_reason` | VARCHAR | valor **normalizado** (ver abaixo) |
 | `scan_strategy` | VARCHAR | `serial` \| `pk-range-partitionable` |
 
+**Nota:** `limit_pushed` / `offset_pushed` / `rows_clause` refletem APENAS o pushdown real via parâmetros nomeados `row_limit=` / `row_offset=` (campo `limit_override` / `offset_override` do `FirebirdBindData`). SQL `LIMIT` é aplicado pelo DuckDB acima do scan num nó `LogicalLimit` — o scanner Firebird **nunca** emite `ROWS` para SQL `LIMIT`. Portanto estas três colunas são NULL para SELECTs pelo caminho ATTACH (sem parâmetros nomeados).
+
 Plano sem scan Firebird (ex.: `SELECT 1`, SQL puramente analítico) → **zero
 linhas** (naturalmente componível; não é erro).
 
