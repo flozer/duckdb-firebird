@@ -30,7 +30,12 @@ env:
 jobs:
   build:
     name: windows-x64
-    runs-on: windows-latest
+    # windows-latest ships MSVC 14.51, which removed
+    # stdext::checked_array_iterator that DuckDB v1.5.3's bundled
+    # third_party/fmt still uses (fmt/format.h fails before extension code).
+    # Toolset 14.43 is not installed on that image, so pin the older image
+    # whose default MSVC still has the symbol.
+    runs-on: windows-2022
     timeout-minutes: 90
 
     steps:
