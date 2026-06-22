@@ -1018,7 +1018,7 @@ Entrada rejeitada (levanta erro):
 
 | Coluna | Tipo | Notas |
 | --- | --- | --- |
-| `scan_ordinal` | INTEGER | Ordinal 1-based; distinto por no `LogicalGet`, inclusive self-joins |
+| `scan_ordinal` | BIGINT | Ordinal 1-based; distinto por no `LogicalGet`, inclusive self-joins |
 | `table_name` | VARCHAR | Nome da tabela Firebird (nunca a connection string) |
 | `remote_sql` | VARCHAR | SQL que seria enviado ao Firebird; valores de bind aparecem como `?` — sem literais, sem fragmentos de connection string |
 | `projected_columns` | VARCHAR[] | Colunas selecionadas do Firebird apos projection pruning |

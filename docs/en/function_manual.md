@@ -460,7 +460,7 @@ Rejected input (raises an error):
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `scan_ordinal` | INTEGER | 1-based ordinal; distinct for each `LogicalGet` node, including self-joins |
+| `scan_ordinal` | BIGINT | 1-based ordinal; distinct for each `LogicalGet` node, including self-joins |
 | `table_name` | VARCHAR | Firebird table name (never the connection string) |
 | `remote_sql` | VARCHAR | SQL that would be sent to Firebird; bind values appear as `?` — no literals, no connection-string fragments |
 | `projected_columns` | VARCHAR[] | Columns selected from Firebird (post projection-pruning) |
