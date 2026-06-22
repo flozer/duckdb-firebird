@@ -173,3 +173,17 @@ SELECT * FROM firebird_explain_pushdown(
   'WITH x AS (SELECT 1) DELETE FROM fb.main.EMPLOYEE');
 ----
 only a single read-only SELECT/WITH...SELECT is allowed
+
+# Task 8: no-cursor proof — explain never opens a Firebird cursor
+# firebird_explain_pushdown() calls ExtractPlan + walks the logical plan;
+# it never calls OpenCursor or executes the query against Firebird.
+# Because every test in this file uses firebird_explain_pushdown() exclusively
+# (no bare SELECT FROM fb.main.* that would actually run a scan), the session
+# telemetry has no EMPLOYEE entry. Asserting COUNT(*) == 0 is deterministic.
+statement ok
+SELECT * FROM firebird_explain_pushdown('SELECT * FROM fb.main.EMPLOYEE');
+
+query I
+SELECT COUNT(*) FROM firebird_last_query() WHERE remote_sql LIKE '%EMPLOYEE%';
+----
+0

@@ -433,6 +433,72 @@ pushdown-explainability columns (`limit_pushed`, `offset_pushed`,
 filter stayed local. See `docs/en/observability.md` for the full column
 reference and the reason vocabulary.
 
+### `firebird_explain_pushdown(sql)`
+
+Returns an a-priori, plan-only analysis of what a `SELECT` statement would
+push down to Firebird — **without executing the query** and **without
+opening a connection or cursor**. This is the complement of
+`firebird_last_query()`: explain is prospective (before any run), while
+`firebird_last_query()` is post-hoc (after the last real scan).
+
+Because explain never runs the query, it leaves no entry in
+`firebird_last_query()` telemetry.
+
+#### Accepted input
+
+- A single `SELECT` statement referencing one or more Firebird tables via an
+  `ATTACH` alias (e.g. `fb.main.EMPLOYEE`).
+- A `WITH ... SELECT` (CTE) whose body is a Firebird scan.
+
+Rejected input (raises an error):
+
+- DML statements (`UPDATE`, `DELETE`, `INSERT`, `MERGE`).
+- Direct `firebird_scan(...)` calls — use the `ATTACH` alias form instead.
+- `WITH ... DELETE` or other non-SELECT CTE statements.
+
+#### Output columns (14)
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `scan_ordinal` | INTEGER | 1-based ordinal; distinct for each `LogicalGet` node, including self-joins |
+| `table_name` | VARCHAR | Firebird table name (never the connection string) |
+| `remote_sql` | VARCHAR | SQL that would be sent to Firebird; bind values appear as `?` — no literals, no connection-string fragments |
+| `projected_columns` | VARCHAR[] | Columns selected from Firebird (post projection-pruning) |
+| `pushed_filters` | VARCHAR[] | Predicates the scanner would push to Firebird |
+| `residual_filters` | VARCHAR[] | Predicates DuckDB would revalidate above the scan; always `len(residual_filters) == len(not_pushed_reasons)` |
+| `not_pushed_reasons` | VARCHAR[] | One coarse reason per `residual_filters` entry, same order; values: `NONE_CHARSET`, `UNSUPPORTED_OP`, `ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING` |
+| `limit_pushed` | BIGINT | `row_limit=` named-parameter value if it would be pushed to a Firebird `ROWS` clause; `NULL` for SQL `LIMIT` (DuckDB applies SQL `LIMIT` above the scan) |
+| `offset_pushed` | BIGINT | `row_offset=` named-parameter value if pushed; `NULL` otherwise |
+| `rows_clause` | VARCHAR | Firebird `ROWS m TO n` clause that would be emitted, or `NULL` |
+| `pk_range_eligible` | BOOLEAN | `true` only for a single-column numeric primary key |
+| `pk_range_column` | VARCHAR | Name of that PK column, or `NULL` when not eligible (e.g. composite or non-numeric PK) |
+| `pk_range_reason` | VARCHAR | One of four normalized values: `single numeric PK`, `non-numeric PK`, `composite PK`, `no primary key` |
+| `scan_strategy` | VARCHAR | `pk-range-partitionable` when `pk_range_eligible` is true; `serial` otherwise |
+
+#### Invariants
+
+- `len(residual_filters) == len(not_pushed_reasons)` always holds.
+- A `NOT IN` on a `CHARACTER SET NONE` text column is recorded in
+  `residual_filters` as `complex_filter[none_gated]` with the parallel
+  `not_pushed_reasons` entry `NONE_CHARSET`.
+- `limit_pushed` / `offset_pushed` / `rows_clause` are `NULL` for SQL
+  `LIMIT` — only the `row_limit=` / `row_offset=` named parameters of the
+  scanner are considered for pushdown.
+- `pk_range_column` is `NULL` whenever `pk_range_eligible` is `false`.
+
+#### Usage example
+
+```sql
+ATTACH 'C:/data/erp.fdb user=APP_READONLY password=secret'
+  AS fb (TYPE firebird);
+
+-- Check what would be pushed before actually running the query:
+SELECT table_name, pushed_filters, residual_filters, not_pushed_reasons,
+       pk_range_eligible, scan_strategy
+FROM firebird_explain_pushdown(
+  'SELECT EMP_ID, EMP_NAME FROM fb.main.EMPLOYEE WHERE EMP_ID > 10');
+```
+
 ### `firebird_query_log()`
 
 Returns the in-memory query log for the current DuckDB session.
