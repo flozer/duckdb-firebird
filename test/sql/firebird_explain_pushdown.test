@@ -107,3 +107,42 @@ query I
 SELECT pk_range_column IS NULL FROM firebird_explain_pushdown('SELECT * FROM fb.main.TPK_COMPOSITE');
 ----
 true
+
+# Task 6: invariant — residual_filters and not_pushed_reasons always equal length
+# NOT IN on a numeric column: no NONE gating, but invariant must hold regardless.
+query I
+SELECT len(residual_filters) = len(not_pushed_reasons)
+  FROM firebird_explain_pushdown('SELECT * FROM fb.main.EMPLOYEE WHERE EMP_ID NOT IN (1,2,3)');
+----
+true
+
+# Task 6: NONE-gated complex filter surfaces in explain
+# A NOT IN over a CHARACTER SET NONE text column cannot be pushed to Firebird
+# (UTF-8 literal vs raw CP1252 bytes), so the scanner records it in
+# gated_complex_reasons. firebird_explain_pushdown must mirror that:
+# residual_filters contains 'complex_filter[none_gated]' and the parallel
+# not_pushed_reasons entry is 'NONE_CHARSET'.
+
+require-env FIREBIRD_NONE_DB
+
+statement ok
+ATTACH '${FIREBIRD_NONE_DB}' AS fbn (TYPE firebird);
+
+query I
+SELECT list_contains(residual_filters, 'complex_filter[none_gated]')
+  FROM firebird_explain_pushdown('SELECT * FROM fbn.main.TXT WHERE LABEL NOT IN (''a'',''b'')');
+----
+true
+
+query I
+SELECT list_contains(not_pushed_reasons, 'NONE_CHARSET')
+  FROM firebird_explain_pushdown('SELECT * FROM fbn.main.TXT WHERE LABEL NOT IN (''a'',''b'')');
+----
+true
+
+# Invariant holds for the NONE-gated case too
+query I
+SELECT len(residual_filters) = len(not_pushed_reasons)
+  FROM firebird_explain_pushdown('SELECT * FROM fbn.main.TXT WHERE LABEL NOT IN (''a'',''b'')');
+----
+true

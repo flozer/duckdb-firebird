@@ -336,6 +336,9 @@ static void WalkPlan(LogicalOperator &op,
                 r.residual_filters.push_back("complex_filter[none_gated]");
                 r.not_pushed_reasons.push_back(reason);
             }
+            // Cardinality invariant: residual_filters and not_pushed_reasons
+            // must always be parallel — one reason per residual slot.
+            D_ASSERT(r.residual_filters.size() == r.not_pushed_reasons.size());
 
             // Paging: reflect only the real row_limit=/row_offset= pushdown.
             // NULL (via _valid=false) when no named-param override was set.
