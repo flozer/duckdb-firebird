@@ -44,6 +44,11 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+          # Pin: windows-latest now ships MSVC 14.51, which removed
+          # stdext::checked_array_iterator that DuckDB v1.5.3's bundled
+          # third_party/fmt still uses (fmt/format.h compile failure before
+          # extension code). 14.43 (VS 17.13) is the last toolset retaining it.
+          toolset: "14.43"
 
       - name: Install Ninja
         shell: pwsh
