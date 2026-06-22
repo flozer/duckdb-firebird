@@ -1,0 +1,28 @@
+# name: test/sql/firebird_explain_pushdown.test
+# description: a-priori plan-only pushdown explainer
+# group: [firebird]
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+require-env ISC_PASSWORD
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird);
+
+# no firebird scan in plan -> zero rows
+query I
+SELECT COUNT(*) FROM firebird_explain_pushdown('SELECT 1');
+----
+0
+
+# read-only guard: DML rejected
+statement error
+SELECT * FROM firebird_explain_pushdown('UPDATE fb.main.EMPLOYEE SET EMP_NAME = ''x''');
+----
+
+# direct firebird_scan rejected (would open a connection at bind)
+statement error
+SELECT * FROM firebird_explain_pushdown('SELECT * FROM firebird_scan(''${FIREBIRD_TEST_DB}'', ''EMPLOYEE'')');
+----
