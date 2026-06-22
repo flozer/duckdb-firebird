@@ -81,12 +81,14 @@ public:
                        FirebirdConnectionInfo conn_info,
                        std::shared_ptr<FirebirdConnectionPool> pool,
                        NoneEncoding none_encoding,
-                       duckdb::vector<FirebirdColumnDesc> column_descs)
+                       duckdb::vector<FirebirdColumnDesc> column_descs,
+                       PrimaryKeyDescriptor pk_descriptor)
         : TableCatalogEntry(catalog, schema, info),
           conn_info_(std::move(conn_info)),
           pool_(std::move(pool)),
           none_encoding_(none_encoding),
-          cached_column_descs_(std::move(column_descs)) {
+          cached_column_descs_(std::move(column_descs)),
+          pk_descriptor_(std::move(pk_descriptor)) {
         // Mirror the column list out of CreateTableInfo so we can hand
         // a fresh copy to every GetScanFunction call without re-reading
         // RDB$RELATION_FIELDS. EnsureTablesLoaded in the schema entry
@@ -96,6 +98,8 @@ public:
             cached_column_types_.push_back(col.Type());
         }
     }
+
+    const PrimaryKeyDescriptor &GetPkDescriptor() const { return pk_descriptor_; }
 
     unique_ptr<BaseStatistics>
     GetStatistics(ClientContext & /*ctx*/, column_t /*column_id*/) override {
@@ -147,6 +151,7 @@ private:
     duckdb::vector<FirebirdColumnDesc> cached_column_descs_;
     duckdb::vector<std::string> cached_column_names_;
     duckdb::vector<LogicalType> cached_column_types_;
+    PrimaryKeyDescriptor pk_descriptor_; // populated at ATTACH, zero new I/O
 
     std::mutex pk_lock_;
     bool pk_loaded_ = false;
@@ -402,9 +407,40 @@ private:
                         fk.pk_columns, fk.fk_columns, std::move(fk_info)));
                 }
             }
+            // Build PrimaryKeyDescriptor from already-loaded constraint map +
+            // column types — zero new Firebird I/O.
+            PrimaryKeyDescriptor pk_desc;
+            if (uk_it != unique_keys.end()) {
+                for (auto &key : uk_it->second) {
+                    if (key.is_primary) {
+                        pk_desc.has_pk  = true;
+                        pk_desc.columns = key.columns;
+                        // single_numeric: exactly one column AND that column's
+                        // LogicalType is an integer family type.
+                        if (key.columns.size() == 1) {
+                            const auto &pk_col = key.columns[0];
+                            for (size_t ci = 0; ci < col_names.size(); ++ci) {
+                                if (col_names[ci] == pk_col) {
+                                    auto tid = col_types[ci].id();
+                                    pk_desc.single_numeric =
+                                        (tid == LogicalTypeId::INTEGER  ||
+                                         tid == LogicalTypeId::BIGINT   ||
+                                         tid == LogicalTypeId::SMALLINT ||
+                                         tid == LogicalTypeId::HUGEINT  ||
+                                         tid == LogicalTypeId::TINYINT  ||
+                                         tid == LogicalTypeId::UINTEGER ||
+                                         tid == LogicalTypeId::UBIGINT);
+                                    break;
+                                }
+                            }
+                        }
+                        break; // only one PK can exist per table
+                    }
+                }
+            }
             auto entry = make_uniq<FirebirdTableEntry>(
                 catalog, *this, info, conn_info_, pool_,
-                none_encoding_, std::move(col_descs));
+                none_encoding_, std::move(col_descs), std::move(pk_desc));
             tables_.emplace(ToUpper(table_name), std::move(entry));
         };
 
