@@ -28,6 +28,12 @@ namespace duckdb {
 //   - full_scan_risk        LOW | MEDIUM | HIGH
 //   - recommended_partitions INTEGER       advisory only
 //   - warnings              LIST(VARCHAR)
+//   - alerts                LIST(STRUCT(code, severity, message))
+//
+// `alerts` is the structured, machine-readable form of `warnings`: it is
+// 1:1 and in the same order (alerts[i].message == warnings[i]). `code` is a
+// stable public identifier (never reused or redefined once shipped) and
+// `severity` is LOW | MEDIUM | HIGH (the full_scan_risk vocabulary).
 //
 // This is a *factual* diagnostic, not a cost-based advisor. Heuristics
 // are simple and explicit; the warnings column carries the caveats.

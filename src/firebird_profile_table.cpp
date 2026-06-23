@@ -99,6 +99,16 @@ struct IndexMeta {
     bool is_pk = false;
 };
 
+// One structured diagnostic. `code` is a stable public identifier (never
+// reused or redefined once shipped); `severity` is LOW | MEDIUM | HIGH,
+// reusing the full_scan_risk vocabulary; `message` is the human-readable
+// prose (also surfaced verbatim in the legacy `warnings` column).
+struct Alert {
+    std::string code;
+    std::string severity;
+    std::string message;
+};
+
 struct TableProfile {
     std::string table_name;
     std::string object_type = "TABLE"; // TABLE | VIEW
@@ -109,8 +119,16 @@ struct TableProfile {
     std::vector<std::string> filter_candidates;
     std::string full_scan_risk = "MEDIUM"; // LOW | MEDIUM | HIGH
     int32_t recommended_partitions = 1;
-    std::vector<std::string> warnings;
+    std::vector<Alert> alerts;
 };
+
+// Single source for every diagnostic. The legacy `warnings` column is
+// derived from these alerts' messages at emit time, so the two lists
+// cannot diverge.
+static void AddAlert(TableProfile &p, const char *code, const char *severity,
+                     std::string message) {
+    p.alerts.push_back(Alert{code, severity, std::move(message)});
+}
 
 // SQL-quote a single-quoted string literal (doubles embedded quotes). Local
 // copy of the scanner's helper so any user-controlled relation name reaching
@@ -541,7 +559,7 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
         // pointer to the heavy-view guidance.
         p.full_scan_risk = "HIGH";
         p.recommended_partitions = 1;
-        p.warnings.push_back(
+        AddAlert(p, "view_no_scan_lever", "HIGH",
             "Object is a VIEW: no primary key, indexes, or partition lever. "
             "A scan reads the full view definition. Consider materializing "
             "through DuckDB/dbt/Parquet for repeated analytics.");
@@ -552,26 +570,26 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
         // so explicitly rather than imply a simple view.
         ViewAnalysis va = AnalyzeViewSource(conn, upper);
         if (!va.inspected) {
-            p.warnings.push_back(
+            AddAlert(p, "view_definition_not_inspected", "MEDIUM",
                 "View definition not inspected (RDB$VIEW_SOURCE unavailable "
                 "or unreadable): join/aggregation/filter shape is unknown. "
                 "Treat as potentially heavy.");
         } else {
             if (va.has_join) {
-                p.warnings.push_back(
+                AddAlert(p, "view_contains_join", "HIGH",
                     "View contains a JOIN: a scan may materialize a join "
                     "server-side on every read. Prefer materializing through "
                     "DuckDB/dbt/Parquet for repeated analytics.");
             }
             if (va.has_group_by || va.has_aggregate) {
-                p.warnings.push_back(
+                AddAlert(p, "view_contains_aggregation", "HIGH",
                     "View contains aggregation (GROUP BY or aggregate "
                     "functions): each scan recomputes the aggregate "
                     "server-side. Materialize the result if queried "
                     "repeatedly.");
             }
             if (!va.has_where) {
-                p.warnings.push_back(
+                AddAlert(p, "view_no_filter", "MEDIUM",
                     "View has no WHERE filter in its definition: a scan reads "
                     "the full underlying data set. Push a selective filter or "
                     "materialize.");
@@ -597,7 +615,7 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
         p.recommended_partitions = parts;
         p.full_scan_risk = (parts > 1) ? "MEDIUM" : "LOW";
         if (parts > 1) {
-            p.warnings.push_back(
+            AddAlert(p, "partition_advisory", "LOW",
                 "Recommended partitions=" + std::to_string(parts) +
                 " is advisory and derived from the PK MIN/MAX range width, "
                 "not the row count. The PK range may be sparse (gaps, "
@@ -610,7 +628,7 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
             // cheap, reliable probe for the server's ParallelWorkers setting
             // from the catalog, so this is surfaced as a generic caveat
             // rather than a detected condition.
-            p.warnings.push_back(
+            AddAlert(p, "server_parallelism_caveat", "LOW",
                 "If Firebird server-side parallelism is already "
                 "enabled/configured (e.g. Firebird 5 ParallelWorkers), prefer "
                 "starting with partitions=1 or benchmark before combining "
@@ -620,7 +638,7 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
             // ProbePrimaryKey accepted it, but partitioning would not pay
             // off. Be explicit so the caller does not wonder why a numeric
             // PK still recommends serial.
-            p.warnings.push_back(
+            AddAlert(p, "pk_range_small_serial", "LOW",
                 "Primary key range is small (PK MIN/MAX span < 10000): "
                 "serial scan recommended; partitioning would add overhead "
                 "without meaningful parallelism.");
@@ -631,12 +649,12 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
         p.full_scan_risk = "HIGH";
         p.recommended_partitions = 1;
         if (!p.has_primary_key) {
-            p.warnings.push_back(
+            AddAlert(p, "no_primary_key", "HIGH",
                 "No primary key detected: a scan is a full table scan and "
                 "cannot be range-partitioned. Add a selective WHERE on an "
                 "indexed column, or materialize the table.");
         } else if (p.primary_key_columns.size() > 1) {
-            p.warnings.push_back(
+            AddAlert(p, "composite_pk_serial", "LOW",
                 "Primary key is composite: the parallel-scan lever needs a "
                 "single-column numeric PK. Scans run serially.");
         } else {
@@ -662,12 +680,12 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
                 }
             }
             if (pk_numeric) {
-                p.warnings.push_back(
+                AddAlert(p, "numeric_pk_no_range_serial", "LOW",
                     "Primary key is single-column numeric but has no usable "
                     "MIN/MAX range (empty or near-empty table): no partition "
                     "lever, scans run serially.");
             } else {
-                p.warnings.push_back(
+                AddAlert(p, "non_numeric_pk_serial", "LOW",
                     "Primary key is single-column but non-numeric: the "
                     "parallel-scan lever needs a numeric PK. Scans run "
                     "serially.");
@@ -680,7 +698,7 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
         // Already warned above for the no-PK case; nothing extra.
     }
     if (p.filter_candidates.empty() && !is_view) {
-        p.warnings.push_back(
+        AddAlert(p, "no_indexed_filter_columns", "MEDIUM",
             "No cheap indexed filter columns detected: WHERE clauses may not "
             "use an index and could force a full scan.");
     }
@@ -692,7 +710,7 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
         }
     }
     if (any_none) {
-        p.warnings.push_back(
+        AddAlert(p, "none_charset_text_columns", "MEDIUM",
             "Relation has CHARACTER SET NONE text columns: text-filter "
             "pushdown is disabled for those columns (UTF-8 literals may not "
             "round-trip against raw NONE bytes).");
@@ -746,6 +764,7 @@ ProfileTableBind(ClientContext &context, TableFunctionBindInput &input,
         "full_scan_risk",
         "recommended_partitions",
         "warnings",
+        "alerts",
     };
     return_types = {
         LogicalType::VARCHAR,
@@ -758,6 +777,10 @@ ProfileTableBind(ClientContext &context, TableFunctionBindInput &input,
         LogicalType::VARCHAR,
         LogicalType::INTEGER,
         LogicalType::LIST(LogicalType::VARCHAR),
+        LogicalType::LIST(LogicalType::STRUCT({
+            {"code", LogicalType::VARCHAR},
+            {"severity", LogicalType::VARCHAR},
+            {"message", LogicalType::VARCHAR}})),
     };
     return std::move(bind);
 }
@@ -772,6 +795,33 @@ static Value VarcharList(const std::vector<std::string> &xs) {
     vals.reserve(xs.size());
     for (const auto &s : xs) {
         vals.emplace_back(Value(s));
+    }
+    return Value::LIST(LogicalType::VARCHAR, std::move(vals));
+}
+
+static Value AlertStructList(const std::vector<Alert> &alerts) {
+    child_list_t<LogicalType> struct_children = {
+        {"code", LogicalType::VARCHAR},
+        {"severity", LogicalType::VARCHAR},
+        {"message", LogicalType::VARCHAR}};
+    auto struct_type = LogicalType::STRUCT(struct_children);
+    vector<Value> vals;
+    vals.reserve(alerts.size());
+    for (const auto &a : alerts) {
+        child_list_t<Value> sv = {
+            {"code", Value(a.code)},
+            {"severity", Value(a.severity)},
+            {"message", Value(a.message)}};
+        vals.emplace_back(Value::STRUCT(std::move(sv)));
+    }
+    return Value::LIST(struct_type, std::move(vals));
+}
+
+static Value WarningsFromAlerts(const std::vector<Alert> &alerts) {
+    vector<Value> vals;
+    vals.reserve(alerts.size());
+    for (const auto &a : alerts) {
+        vals.emplace_back(Value(a.message));
     }
     return Value::LIST(LogicalType::VARCHAR, std::move(vals));
 }
@@ -802,7 +852,8 @@ static void ProfileTableFunction(ClientContext &context,
     output.data[6].SetValue(0, VarcharList(p.filter_candidates));
     output.data[7].SetValue(0, Value(p.full_scan_risk));
     output.data[8].SetValue(0, Value::INTEGER(p.recommended_partitions));
-    output.data[9].SetValue(0, VarcharList(p.warnings));
+    output.data[9].SetValue(0, WarningsFromAlerts(p.alerts));
+    output.data[10].SetValue(0, AlertStructList(p.alerts));
     g.emitted = true;
 }
 
