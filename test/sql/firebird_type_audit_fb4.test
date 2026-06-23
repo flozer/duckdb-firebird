@@ -17,7 +17,7 @@ ATTACH '${FIREBIRD_BIZ4_DB}' AS b (TYPE firebird);
 #                T_TZ TIME WITH TIME ZONE                 → 1 time_tz row
 #                TS_TZ TIMESTAMP WITH TIME ZONE           → 1 timestamp_tz row
 # BIG_DEC DECIMAL(38,5) is scaled (scale=5) → excluded by the int128 WHERE guard.
-query II
+query TT
 SELECT finding, COUNT(*)
   FROM firebird_type_audit('b')
  WHERE table_name = 'FB4_TYPES'
@@ -31,7 +31,7 @@ time_tz	1
 timestamp_tz	1
 
 # Spot-check: the scale-0 INT128 column (BIG_NUM) projects as HUGEINT.
-query II
+query TT
 SELECT finding, duckdb_type
   FROM firebird_type_audit('b')
  WHERE table_name = 'FB4_TYPES' AND finding = 'int128';

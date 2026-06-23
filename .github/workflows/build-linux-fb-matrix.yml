@@ -153,6 +153,7 @@ jobs:
         env:
           ISC_USER: SYSDBA
           ISC_PASSWORD: masterkey
+          FIREBIRD_BIZ4_DB: firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/biz4.fdb?charset=UTF8
         run: |
           ./build/release/duckdb -unsigned <<'EOF'
           SELECT
@@ -166,7 +167,6 @@ jobs:
                 partitions=1)
            LIMIT 1;
           EOF
-          echo "FIREBIRD_BIZ4_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/biz4.fdb?charset=UTF8" >> $GITHUB_ENV
           ./build/release/test/unittest test/sql/firebird_type_audit_fb4.test
 
       - name: Stop Firebird container
