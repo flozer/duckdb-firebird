@@ -33,6 +33,7 @@ static void LoadInternal(ExtensionLoader &loader) {
     loader.RegisterFunction(GetFirebirdDependenciesFunction());
     loader.RegisterFunction(GetFirebirdCommentsFunction());
     loader.RegisterFunction(GetFirebirdExplainPushdownFunction());
+    loader.RegisterFunction(GetFirebirdTypeAuditFunction());
 
     // Register the StorageExtension so DuckDB knows how to handle
     //   ATTACH 'firebird://…' AS fb (TYPE firebird);

@@ -1,0 +1,55 @@
+# name: test/sql/firebird_type_audit.test
+# description: type/charset fidelity audit — findings-only (FB-version-agnostic findings)
+# group: [firebird]
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+require-env ISC_PASSWORD
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird);
+
+# EMPLOYEE.NOTE is BLOB SUB_TYPE 1 (text, non-NONE) -> blob_text
+query IIII
+SELECT table_name, column_name, duckdb_type, finding
+  FROM firebird_type_audit('fb')
+ WHERE table_name = 'EMPLOYEE' AND column_name = 'NOTE';
+----
+EMPLOYEE	NOTE	VARCHAR	blob_text
+
+# FILE_STORAGE.PAYLOAD is BLOB SUB_TYPE 0 (binary) -> NOT a finding (lossless BLOB)
+query I
+SELECT COUNT(*) FROM firebird_type_audit('fb')
+ WHERE table_name = 'FILE_STORAGE' AND column_name = 'PAYLOAD';
+----
+0
+
+# trivial columns never appear
+query I
+SELECT COUNT(*) FROM firebird_type_audit('fb')
+ WHERE table_name = 'EMPLOYEE' AND column_name IN ('EMP_ID','HIRE_DATE','ACTIVE');
+----
+0
+
+require-env FIREBIRD_NONE_DB
+
+statement ok
+ATTACH '${FIREBIRD_NONE_DB}' AS fbn (TYPE firebird);
+
+# none.fdb TXT.LABEL is VARCHAR CHARACTER SET NONE -> none_charset
+query III
+SELECT column_name, duckdb_type, finding
+  FROM firebird_type_audit('fbn')
+ WHERE table_name = 'TXT' AND column_name = 'LABEL';
+----
+LABEL	VARCHAR	none_charset
+
+# none.fdb TXT.NOTE is BLOB SUB_TYPE 1 CHARACTER SET NONE -> none_charset wins over blob_text
+query II
+SELECT column_name, finding
+  FROM firebird_type_audit('fbn')
+ WHERE table_name = 'TXT' AND column_name = 'NOTE';
+----
+NOTE	none_charset

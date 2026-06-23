@@ -506,4 +506,99 @@ TableFunction GetFirebirdCommentsFunction() {
     return MakeMetadataFunction(desc);
 }
 
+TableFunction GetFirebirdTypeAuditFunction() {
+    static const MetadataFn desc{
+        "firebird_type_audit",
+        {"table_schema","table_name","column_name","firebird_type",
+         "duckdb_type","finding","detail"},
+        {LogicalType::VARCHAR,LogicalType::VARCHAR,LogicalType::VARCHAR,
+         LogicalType::VARCHAR,LogicalType::VARCHAR,LogicalType::VARCHAR,
+         LogicalType::VARCHAR},
+        // Findings-only: the WHERE matches exactly the 6 finding conditions,
+        // so every fetched row is a finding. RDB$FIELD_TYPE codes per the
+        // scanner's blr->SQL map: 24/25 DECFLOAT, 26 INT128, 28/29 TZ,
+        // 14/37 CHAR/VARCHAR, 261 BLOB. CHARACTER_SET_ID 0 = NONE.
+        "SELECT TRIM(rf.RDB$RELATION_NAME), TRIM(rf.RDB$FIELD_NAME), "
+        "       f.RDB$FIELD_TYPE, COALESCE(f.RDB$FIELD_SUB_TYPE,0), "
+        "       COALESCE(f.RDB$FIELD_SCALE,0), COALESCE(f.RDB$FIELD_PRECISION,0), "
+        "       COALESCE(f.RDB$FIELD_LENGTH,0), COALESCE(f.RDB$CHARACTER_SET_ID,-1) "
+        "  FROM RDB$RELATION_FIELDS rf "
+        "  JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE "
+        " WHERE COALESCE(rf.RDB$SYSTEM_FLAG,0) = 0 AND ( "
+        "       f.RDB$FIELD_TYPE IN (24,25,28,29) "
+        "    OR (f.RDB$FIELD_TYPE = 26 AND COALESCE(f.RDB$FIELD_SCALE,0) = 0) "
+        "    OR (f.RDB$FIELD_TYPE IN (14,37) AND f.RDB$CHARACTER_SET_ID = 0) "
+        "    OR (f.RDB$FIELD_TYPE = 261 AND f.RDB$FIELD_SUB_TYPE = 1) ) "
+        " ORDER BY rf.RDB$RELATION_NAME, rf.RDB$FIELD_NAME",
+        [](FirebirdStatement &c) -> duckdb::vector<Value> {
+            int ft   = c.GetShort(2);
+            int st   = c.GetShort(3);
+            int prec = c.GetShort(5);
+            int len  = c.GetShort(6);
+            int cs   = c.IsNull(7) ? -1 : c.GetShort(7);
+            const bool none = (cs == 0);
+            std::string fbtype, ddtype, finding, detail;
+            switch (ft) {
+            case 24:
+            case 25:
+                fbtype  = (ft == 24) ? "DECFLOAT(16)" : "DECFLOAT(34)";
+                ddtype  = "VARCHAR";
+                finding = "decfloat_as_varchar";
+                detail  = "DECFLOAT projected as VARCHAR via server-side CAST "
+                          "(no native decimal-float type); textual semantics on filters.";
+                break;
+            case 26: // scale 0 only reaches here (WHERE guard) -> HUGEINT
+                fbtype  = (st == 1) ? ("NUMERIC(" + std::to_string(prec) + ",0)")
+                        : (st == 2) ? ("DECIMAL(" + std::to_string(prec) + ",0)")
+                                    : "INT128";
+                ddtype  = "HUGEINT";
+                finding = "int128";
+                detail  = "128-bit integer projected as HUGEINT (lossless); "
+                          "BI tools without int128 support may need care.";
+                break;
+            case 28:
+                fbtype = "TIME WITH TIME ZONE"; ddtype = "TIME WITH TIME ZONE";
+                finding = "time_tz";
+                detail = "TIME WITH TIME ZONE; session offset / zone-id handling caveat.";
+                break;
+            case 29:
+                fbtype = "TIMESTAMP WITH TIME ZONE"; ddtype = "TIMESTAMP WITH TIME ZONE";
+                finding = "timestamp_tz";
+                detail = "TIMESTAMP WITH TIME ZONE; session offset / zone-id handling caveat.";
+                break;
+            case 14:
+            case 37:
+                fbtype  = ((ft == 14) ? "CHAR(" : "VARCHAR(") + std::to_string(len) +
+                          ") CHARACTER SET NONE";
+                ddtype  = "VARCHAR";
+                finding = "none_charset";
+                detail  = "CHARACTER SET NONE: decoding depends on the scan's "
+                          "none_encoding (documented default win1252; not read here); "
+                          "strict mode may reject, round-trip not guaranteed.";
+                break;
+            case 261: // text BLOB (sub_type 1 per WHERE)
+                if (none) {
+                    fbtype  = "BLOB SUB_TYPE 1 CHARACTER SET NONE";
+                    ddtype  = "VARCHAR";
+                    finding = "none_charset";
+                    detail  = "NONE-charset text BLOB: decoding depends on the scan's "
+                              "none_encoding (documented default win1252; not read here).";
+                } else {
+                    fbtype  = "BLOB SUB_TYPE 1";
+                    ddtype  = "VARCHAR";
+                    finding = "blob_text";
+                    detail  = "Text BLOB projected as VARCHAR; charset + size caveat.";
+                }
+                break;
+            default:
+                fbtype = "TYPE_" + std::to_string(ft); ddtype = ""; finding = "UNKNOWN";
+                detail = "unexpected field type reached the audit WHERE";
+                break;
+            }
+            return {Value("main"), TextOrNull(c, 0), TextOrNull(c, 1),
+                    Value(fbtype), Value(ddtype), Value(finding), Value(detail)};
+        }};
+    return MakeMetadataFunction(desc);
+}
+
 } // namespace duckdb

@@ -1,0 +1,39 @@
+# name: test/sql/firebird_type_audit_fb4.test
+# description: type audit — FB4+ findings (DECFLOAT/INT128/TIME-TZ/TIMESTAMP-TZ)
+# group: [firebird]
+
+require firebird
+
+require-env FIREBIRD_BIZ4_DB
+
+require-env ISC_PASSWORD
+
+statement ok
+ATTACH '${FIREBIRD_BIZ4_DB}' AS b (TYPE firebird);
+
+# All four FB4+ finding codes present on FB4_TYPES.
+# FB4_TYPES has: DEC16 DECFLOAT(16), DEC34 DECFLOAT(34) → 2 decfloat_as_varchar rows
+#                BIG_NUM INT128 (scale 0)                 → 1 int128 row
+#                T_TZ TIME WITH TIME ZONE                 → 1 time_tz row
+#                TS_TZ TIMESTAMP WITH TIME ZONE           → 1 timestamp_tz row
+# BIG_DEC DECIMAL(38,5) is scaled (scale=5) → excluded by the int128 WHERE guard.
+query TT
+SELECT finding, COUNT(*)
+  FROM firebird_type_audit('b')
+ WHERE table_name = 'FB4_TYPES'
+   AND finding IN ('decfloat_as_varchar','int128','time_tz','timestamp_tz')
+ GROUP BY finding
+ ORDER BY finding;
+----
+decfloat_as_varchar	2
+int128	1
+time_tz	1
+timestamp_tz	1
+
+# Spot-check: the scale-0 INT128 column (BIG_NUM) projects as HUGEINT.
+query TT
+SELECT finding, duckdb_type
+  FROM firebird_type_audit('b')
+ WHERE table_name = 'FB4_TYPES' AND finding = 'int128';
+----
+int128	HUGEINT
