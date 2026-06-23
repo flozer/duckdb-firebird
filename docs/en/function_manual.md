@@ -348,7 +348,8 @@ Output columns:
 - `filter_candidates` - indexed columns whose type pushes down cheaply
 - `full_scan_risk` - `LOW`, `MEDIUM`, or `HIGH`
 - `recommended_partitions` - advisory `partitions=N` value
-- `warnings` - list of explicit caveats
+- `warnings` - list of explicit caveats (human-readable strings)
+- `alerts` - structured form of `warnings`: `LIST(STRUCT(code VARCHAR, severity VARCHAR, message VARCHAR))`
 
 This is a factual diagnostic, not a cost-based advisor. Heuristics are
 simple and explicit: a watermark candidate is judged by type, not by proven
@@ -408,6 +409,43 @@ them repeatedly.
 The diagnostic reads only the Firebird system tables (`RDB$*`) plus a
 best-effort primary-key `MIN`/`MAX` probe; it never reads business rows and
 never returns the connection string or credentials.
+
+### `alerts` column — structured warning catalog
+
+`alerts` is the machine-readable counterpart of `warnings`. Both columns are
+produced from the same internal alert list, so they are **1:1 and in the same
+order**: `alerts[i].message == warnings[i]` for every index `i`.
+
+Each element of `alerts` is a `STRUCT(code VARCHAR, severity VARCHAR, message VARCHAR)`:
+
+- `code` — stable identifier (see catalog below); public API contract.
+- `severity` — one of `LOW`, `MEDIUM`, or `HIGH`, reusing the `full_scan_risk`
+  vocabulary: `LOW` = advisory / informational, `MEDIUM` = degraded but
+  functional, `HIGH` = real operational risk.
+- `message` — the same human-readable string that appears in `warnings`.
+
+**Stable-code contract:** alert codes are public API. Once a code is shipped it
+is never reused for a different condition and its meaning never changes. New
+conditions always receive new codes.
+
+Alert code catalog:
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| `view_no_scan_lever` | HIGH | Object is a VIEW: no PK/index/partition lever available |
+| `view_definition_not_inspected` | MEDIUM | View source unreadable; shape unknown |
+| `view_contains_join` | HIGH | View definition contains a JOIN |
+| `view_contains_aggregation` | HIGH | View definition has GROUP BY or an aggregate function |
+| `view_no_filter` | MEDIUM | View definition has no WHERE filter |
+| `partition_advisory` | LOW | Recommended partitions (derived from PK range) is advisory |
+| `server_parallelism_caveat` | LOW | Server-side parallelism (Firebird 5) caveat when `partitions > 1` |
+| `pk_range_small_serial` | LOW | PK MIN/MAX span is small — serial scan recommended |
+| `no_primary_key` | HIGH | No primary key — full scan only, not range-partitionable |
+| `composite_pk_serial` | LOW | Composite PK — serial scan only |
+| `numeric_pk_no_range_serial` | LOW | Single numeric PK but no usable MIN/MAX range — serial scan |
+| `non_numeric_pk_serial` | LOW | Single non-numeric PK — serial scan only |
+| `no_indexed_filter_columns` | MEDIUM | No cheap indexed filter columns found |
+| `none_charset_text_columns` | MEDIUM | One or more text columns use CHARACTER SET NONE |
 
 ### `firebird_last_query()`
 
