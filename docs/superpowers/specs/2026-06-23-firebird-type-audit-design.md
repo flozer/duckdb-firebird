@@ -45,7 +45,7 @@ Mesma família read-only das funções da Metadata Bridge 2.0 (`firebird_domains
 - Uma query `RDB$RELATION_FIELDS ⋈ RDB$FIELDS` por todas as tabelas de usuário (`RDB$SYSTEM_FLAG = 0`), trazendo `RDB$FIELD_TYPE`, `RDB$FIELD_SUB_TYPE`, `RDB$FIELD_PRECISION`, `RDB$FIELD_SCALE`, `RDB$FIELD_LENGTH`, `RDB$CHARACTER_SET_ID`.
 - Para cada coluna, classifica via a mesma lógica de `firebird_types.cpp` (a que produz o `LogicalType` projetado + detecta NONE / DECFLOAT / INT128 / TZ / BLOB-text). Se a coluna casa um dos 6 findings → emite linha; senão omite.
 - `firebird_type` montado como string fiel FB; `duckdb_type` = `LogicalType::ToString()` da projeção.
-- Catálogo já cacheado pelo ATTACH; **nenhum cursor de dados**, nenhum SQL na query do usuário. `ORDER BY` determinístico (table, column).
+- A query `RDB$` roda no Firebird via lease do pool (como as demais funções de metadata) — **não** é catálogo cacheado. Contrato: **não lê dados de negócio, não executa o SQL do usuário, só consulta catálogo Firebird** (tabelas de sistema `RDB$`). `ORDER BY` determinístico (table, column).
 
 ## Testes (determinísticos)
 
