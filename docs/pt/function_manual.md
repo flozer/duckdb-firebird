@@ -533,6 +533,192 @@ DETACH fb;
   teste, deve adicionar manualmente um `tests:` customizado no
   arquivo gerado ou usar `dbt-utils.unique_combination_of_columns`.
 
+## Nivel 3b - Metadata Bridge 2.0
+
+A partir da v0.7, a extensao popula views padrao do `information_schema` com
+dados de restricoes e fornece funcoes de catalogo adicionais para inspecao
+aprofundada de metadados do Firebird.
+
+### Views `information_schema` populadas
+
+Apos um `ATTACH ... (TYPE firebird)`, as seguintes views sao populadas:
+
+#### `information_schema.table_constraints`
+
+Expoe restricoes PK, UNIQUE e FK para todas as tabelas do usuario.
+
+```sql
+SELECT constraint_name, constraint_type, table_name
+FROM information_schema.table_constraints
+WHERE table_catalog = 'fb'
+ORDER BY table_name, constraint_type;
+```
+
+#### `information_schema.key_column_usage`
+
+Mapeia colunas que participam de restricoes PK, UNIQUE e FK.
+
+```sql
+SELECT constraint_name, table_name, column_name, ordinal_position
+FROM information_schema.key_column_usage
+WHERE table_catalog = 'fb'
+ORDER BY table_name, constraint_name, ordinal_position;
+```
+
+#### `information_schema.referential_constraints`
+
+Expoe restricoes FK com informacoes de referencia.
+
+**Nota**: as colunas `update_rule` e `delete_rule` sempre retornam
+`'NO ACTION'` por limitacao do DuckDB. Para obter as regras reais
+(`CASCADE`, `SET NULL`, etc.) use `firebird_foreign_keys` (descrito abaixo).
+
+```sql
+SELECT constraint_name, unique_constraint_name
+FROM information_schema.referential_constraints
+WHERE constraint_catalog = 'fb';
+```
+
+### `firebird_foreign_keys(catalog_name)`
+
+Lista todas as restricoes de chave estrangeira com regras de referencia reais
+do Firebird.
+
+Colunas de saida:
+
+| Coluna | Tipo | Descricao |
+|---|---|---|
+| `fk_schema` | VARCHAR | Sempre `'main'` |
+| `fk_table` | VARCHAR | Tabela que declara a FK |
+| `fk_constraint` | VARCHAR | Nome da restricao FK |
+| `ordinal_position` | INTEGER | Posicao da coluna na chave (0-based) |
+| `fk_column` | VARCHAR | Coluna na tabela filha |
+| `pk_table` | VARCHAR | Tabela referenciada |
+| `pk_constraint` | VARCHAR | Nome da restricao PK/UNIQUE referenciada |
+| `update_rule` | VARCHAR | Regra real do Firebird (`CASCADE`, `SET NULL`, `NO ACTION`, etc.) |
+| `delete_rule` | VARCHAR | Regra real do Firebird (`CASCADE`, `SET NULL`, `NO ACTION`, etc.) |
+
+```sql
+SELECT * FROM firebird_foreign_keys('fb');
+```
+
+**Nota**: `firebird_foreign_keys.ordinal_position` é 0-based (o `RDB$FIELD_POSITION` bruto do Firebird), enquanto `information_schema.key_column_usage.ordinal_position` é 1-based. Leve em conta a diferença de um ao juntar as duas superficies.
+
+### `firebird_indexes(catalog_name)`
+
+Lista todos os indices de usuario com seus segmentos.
+
+Colunas de saida:
+
+| Coluna | Tipo | Descricao |
+|---|---|---|
+| `table_schema` | VARCHAR | Sempre `'main'` |
+| `table_name` | VARCHAR | Tabela dona do indice |
+| `index_name` | VARCHAR | Nome do indice |
+| `is_unique` | BOOLEAN | `true` se o indice e unico |
+| `is_active` | BOOLEAN | `true` se o indice esta ativo |
+| `segment_position` | INTEGER | Posicao da coluna no indice (0-based) |
+| `column_name` | VARCHAR | Nome da coluna no segmento (`NULL` para indices de expressao) |
+| `expression_source` | VARCHAR | Expressao (so para indices de expressao, `NULL` caso contrario) |
+
+```sql
+SELECT * FROM firebird_indexes('fb');
+```
+
+### `firebird_generators(catalog_name)`
+
+Lista geradores/sequencias de usuario com valores inicial e atual.
+
+Colunas de saida:
+
+| Coluna | Tipo | Descricao |
+|---|---|---|
+| `generator_name` | VARCHAR | Nome do gerador |
+| `initial_value` | BIGINT | Valor inicial configurado |
+| `current_value` | BIGINT | Valor atual (lido via `GEN_ID(name, 0)`; `NULL` se sem privilegio). Lido por gerador individualmente (um round-trip cada) para preservar isolamento por gerador; em bancos com muitos geradores, isso implica N+1 round-trips. |
+
+```sql
+SELECT * FROM firebird_generators('fb');
+```
+
+### `firebird_domains(catalog_name)`
+
+Lista dominios de usuario com tipo, nullable, charset e restricoes.
+
+Colunas de saida:
+
+| Coluna | Tipo | Descricao |
+|---|---|---|
+| `domain_name` | VARCHAR | Nome do dominio |
+| `base_type` | VARCHAR | Tipo Firebird como string (ex.: `VARCHAR(100)`, `NUMERIC(10,2)`) |
+| `length` | INTEGER | Comprimento em bytes (para tipos de texto) |
+| `scale` | INTEGER | Escala decimal (valor absoluto) |
+| `is_nullable` | BOOLEAN | `true` se o dominio permite `NULL` |
+| `charset_name` | VARCHAR | Charset (so para tipos de texto) |
+| `check_source` | VARCHAR | Clausula `CHECK` do dominio (`NULL` se nao ha) |
+| `default_source` | VARCHAR | Clausula `DEFAULT` do dominio (`NULL` se nao ha) |
+
+```sql
+SELECT * FROM firebird_domains('fb');
+```
+
+**Nota**: para dominios `CHAR`/`VARCHAR`, o comprimento relatado é o comprimento em bytes declarado pelo Firebird (`RDB$FIELD_LENGTH`). Em charsets multibyte (ex.: UTF8) este é maior que o comprimento em caracteres (um `VARCHAR(10)` em UTF8 reporta `VARCHAR(40)`).
+
+### `firebird_computed_columns(catalog_name)`
+
+Lista colunas computadas (`COMPUTED BY`) de todas as tabelas de usuario.
+
+Colunas de saida:
+
+| Coluna | Tipo | Descricao |
+|---|---|---|
+| `table_schema` | VARCHAR | Sempre `'main'` |
+| `table_name` | VARCHAR | Tabela que contem a coluna |
+| `column_name` | VARCHAR | Nome da coluna computada |
+| `expression_source` | VARCHAR | Expressao `COMPUTED BY` |
+
+```sql
+SELECT * FROM firebird_computed_columns('fb');
+```
+
+### `firebird_dependencies(catalog_name)`
+
+Lista dependencias entre objetos do banco (tabelas, procedures, triggers, etc.).
+
+Colunas de saida:
+
+| Coluna | Tipo | Descricao |
+|---|---|---|
+| `object_name` | VARCHAR | Objeto dependente |
+| `object_type` | VARCHAR | Tipo legivel do objeto (ex.: `TABLE`, `TRIGGER`, `PROCEDURE`) |
+| `object_type_code` | INTEGER | Codigo `RDB$DEPENDENT_TYPE` bruto |
+| `depends_on_name` | VARCHAR | Objeto do qual depende |
+| `depends_on_type` | VARCHAR | Tipo legivel do objeto referenciado |
+| `depends_on_type_code` | INTEGER | Codigo `RDB$DEPENDED_ON_TYPE` bruto |
+| `field_name` | VARCHAR | Coluna especifica referenciada (`NULL` quando dependencia e de nivel de objeto) |
+
+```sql
+SELECT * FROM firebird_dependencies('fb');
+```
+
+### `firebird_comments(catalog_name)`
+
+Lista comentarios (`RDB$DESCRIPTION`) de tabelas, views e colunas de usuario.
+
+Colunas de saida:
+
+| Coluna | Tipo | Descricao |
+|---|---|---|
+| `object_schema` | VARCHAR | Sempre `'main'` |
+| `object_name` | VARCHAR | Nome da tabela ou view |
+| `object_type` | VARCHAR | `'TABLE'`, `'VIEW'` ou `'COLUMN'` |
+| `column_name` | VARCHAR | Nome da coluna (so para linhas de coluna; `NULL` para objeto) |
+| `comment` | VARCHAR | Texto do comentario |
+
+```sql
+SELECT * FROM firebird_comments('fb');
+```
+
 ## Nivel 4 - Diagnostico e observabilidade
 
 ### `firebird_profile_table(qualified_name)`

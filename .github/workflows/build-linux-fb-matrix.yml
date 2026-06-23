@@ -99,6 +99,12 @@ jobs:
           INSERT INTO EMPLOYEE VALUES (4, 'Diana Davis',     '600', 98000.25, DATE '2018-01-10', TRUE,  'Team lead');
           INSERT INTO EMPLOYEE VALUES (5, 'Erik Eklund',     '700', 71200.00, DATE '2021-06-30', TRUE,  NULL);
           COMMIT;
+          -- NAME_LEN computed column: keeps EMPLOYEE at 8 columns, matching the
+          -- canonical fixture (setup_test_firebird.sh / smoke_fixture.sql) that
+          -- firebird_scan.test (column_count) and firebird_attach.test
+          -- (information_schema.columns) assert against.
+          ALTER TABLE EMPLOYEE ADD NAME_LEN COMPUTED BY (CHAR_LENGTH(EMP_NAME));
+          COMMIT;
           CREATE TABLE FILE_STORAGE (
             FILE_ID  INTEGER NOT NULL PRIMARY KEY,
             NAME     VARCHAR(40) NOT NULL,

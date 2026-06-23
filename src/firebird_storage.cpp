@@ -39,9 +39,13 @@
 #include "duckdb/catalog/dependency_list.hpp"
 #include "duckdb/catalog/entry_lookup_info.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/printer.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parser/constraints/foreign_key_constraint.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
+#include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
@@ -229,6 +233,89 @@ public:
     void Alter(CatalogTransaction, AlterInfo &) override { Unsupported("ALTER"); }
 
 private:
+    // Holds the columns belonging to one PK or UNIQUE constraint.
+    struct UniqueKey {
+        std::string constraint_name;
+        bool        is_primary = false;
+        duckdb::vector<std::string> columns; // ordered by RDB$FIELD_POSITION
+    };
+
+    // Load every PRIMARY KEY and UNIQUE constraint for all user tables in one
+    // round-trip, returning a map from relation name -> list of UniqueKey.
+    static std::unordered_map<std::string, std::vector<UniqueKey>>
+    LoadUniqueConstraints(FirebirdConnection &conn) {
+        const std::string sql =
+            "SELECT TRIM(rc.RDB$RELATION_NAME), TRIM(rc.RDB$CONSTRAINT_NAME), "
+            "       TRIM(rc.RDB$CONSTRAINT_TYPE), TRIM(seg.RDB$FIELD_NAME), "
+            "       seg.RDB$FIELD_POSITION "
+            "  FROM RDB$RELATION_CONSTRAINTS rc "
+            "  JOIN RDB$INDEX_SEGMENTS seg ON seg.RDB$INDEX_NAME = rc.RDB$INDEX_NAME "
+            " WHERE rc.RDB$CONSTRAINT_TYPE IN ('PRIMARY KEY','UNIQUE') "
+            " ORDER BY rc.RDB$RELATION_NAME, rc.RDB$CONSTRAINT_NAME, seg.RDB$FIELD_POSITION";
+
+        std::unordered_map<std::string, std::vector<UniqueKey>> out;
+        auto cur = conn.OpenCursor(sql);
+        UniqueKey *active = nullptr;
+        std::string cur_rel, cur_con;
+        while (cur->Fetch()) {
+            std::string rel   = cur->GetText(0);
+            std::string con   = cur->GetText(1);
+            std::string ctype = cur->GetText(2);
+            if (rel != cur_rel || con != cur_con) {
+                out[rel].push_back({con, ctype == "PRIMARY KEY", {}});
+                active  = &out[rel].back();
+                cur_rel = rel;
+                cur_con = con;
+            }
+            active->columns.push_back(cur->GetText(3));
+        }
+        return out;
+    }
+
+    // One FK relationship from a child table to its referenced parent.
+    struct ForeignKey {
+        std::string constraint_name;
+        std::string pk_table;
+        duckdb::vector<std::string> fk_columns; // ordered by RDB$FIELD_POSITION
+        duckdb::vector<std::string> pk_columns; // same ordinal as fk_columns
+    };
+
+    // Load every FOREIGN KEY constraint for all user tables in one round-trip,
+    // returning a map from child relation name -> list of ForeignKey.
+    static std::unordered_map<std::string, std::vector<ForeignKey>>
+    LoadForeignKeys(FirebirdConnection &conn) {
+        const std::string sql =
+            "SELECT TRIM(rc.RDB$RELATION_NAME), TRIM(rc.RDB$CONSTRAINT_NAME), "
+            "       TRIM(uq.RDB$RELATION_NAME), TRIM(fkseg.RDB$FIELD_NAME), "
+            "       TRIM(uqseg.RDB$FIELD_NAME), fkseg.RDB$FIELD_POSITION "
+            "  FROM RDB$RELATION_CONSTRAINTS rc "
+            "  JOIN RDB$REF_CONSTRAINTS ref ON ref.RDB$CONSTRAINT_NAME = rc.RDB$CONSTRAINT_NAME "
+            "  JOIN RDB$RELATION_CONSTRAINTS uq ON uq.RDB$CONSTRAINT_NAME = ref.RDB$CONST_NAME_UQ "
+            "  JOIN RDB$INDEX_SEGMENTS fkseg ON fkseg.RDB$INDEX_NAME = rc.RDB$INDEX_NAME "
+            "  JOIN RDB$INDEX_SEGMENTS uqseg ON uqseg.RDB$INDEX_NAME = uq.RDB$INDEX_NAME "
+            "       AND uqseg.RDB$FIELD_POSITION = fkseg.RDB$FIELD_POSITION "
+            " WHERE rc.RDB$CONSTRAINT_TYPE = 'FOREIGN KEY' "
+            " ORDER BY rc.RDB$RELATION_NAME, rc.RDB$CONSTRAINT_NAME, fkseg.RDB$FIELD_POSITION";
+
+        std::unordered_map<std::string, std::vector<ForeignKey>> out;
+        auto cur = conn.OpenCursor(sql);
+        std::string cur_rel, cur_con;
+        ForeignKey *active = nullptr;
+        while (cur->Fetch()) {
+            std::string rel = cur->GetText(0);
+            std::string con = cur->GetText(1);
+            if (!active || rel != cur_rel || con != cur_con) {
+                out[rel].push_back(ForeignKey{con, cur->GetText(2), {}, {}});
+                active = &out[rel].back();
+                cur_rel = rel;
+                cur_con = con;
+            }
+            active->fk_columns.push_back(cur->GetText(3));
+            active->pk_columns.push_back(cur->GetText(4));
+        }
+        return out;
+    }
+
     void EnsureTablesLoaded() {
         std::lock_guard<std::mutex> g(load_lock_);
         if (loaded_) return;
@@ -239,6 +326,34 @@ private:
         auto conn_owned = pool_ ? pool_->Acquire()
                                 : make_uniq<FirebirdConnection>(conn_info_);
         FirebirdConnection &conn = *conn_owned;
+
+        // Load PRIMARY KEY and UNIQUE constraints once for all tables.
+        // A failure here leaves the map empty — constraints are simply not
+        // attached, which matches the existing fallback philosophy (an error
+        // in a metadata side-query must not break ATTACH).
+        std::unordered_map<std::string, std::vector<UniqueKey>> unique_keys;
+        try {
+            unique_keys = LoadUniqueConstraints(conn);
+        } catch (std::exception &e) {
+            // Leave unique_keys empty — PK/UNIQUE constraints will not appear
+            // in information_schema but the catalog is otherwise usable.
+            Printer::Print(StringUtil::Format(
+                "firebird: failed to load PK/UNIQUE constraints "
+                "(information_schema will be incomplete): %s", e.what()));
+        }
+
+        // Load FOREIGN KEY constraints. Same fallback: failure leaves the map
+        // empty and the catalog is still usable — only FK metadata is absent.
+        std::unordered_map<std::string, std::vector<ForeignKey>> fkeys;
+        try {
+            fkeys = LoadForeignKeys(conn);
+        } catch (std::exception &e) {
+            // Leave fkeys empty — FK constraints will simply not appear in
+            // information_schema but the catalog remains usable.
+            Printer::Print(StringUtil::Format(
+                "firebird: failed to load FK constraints "
+                "(information_schema will be incomplete): %s", e.what()));
+        }
 
         // Build + register one catalog entry from a resolved column list.
         // The binder asks the TableCatalogEntry for its full column list
@@ -260,6 +375,31 @@ private:
                 if (i < col_descs.size() && !col_descs[i].nullable) {
                     info.constraints.push_back(
                         make_uniq<NotNullConstraint>(LogicalIndex(i)));
+                }
+            }
+            // Attach PK / UNIQUE constraints so DuckDB derives
+            // information_schema.table_constraints and key_column_usage.
+            auto uk_it = unique_keys.find(table_name);
+            if (uk_it != unique_keys.end()) {
+                for (auto &key : uk_it->second) {
+                    info.constraints.push_back(
+                        make_uniq<UniqueConstraint>(key.columns, key.is_primary));
+                }
+            }
+            // Attach FOREIGN KEY constraints. DuckDB accepts
+            // ForeignKeyConstraint on read-only catalog entries as a
+            // declarative annotation; it surfaces FK rows in
+            // information_schema.table_constraints and key_column_usage
+            // without enforcing referential integrity.
+            auto fk_it = fkeys.find(table_name);
+            if (fk_it != fkeys.end()) {
+                for (auto &fk : fk_it->second) {
+                    ForeignKeyInfo fk_info;
+                    fk_info.type   = ForeignKeyType::FK_TYPE_FOREIGN_KEY_TABLE;
+                    fk_info.schema = FIREBIRD_MAIN_SCHEMA;
+                    fk_info.table  = fk.pk_table;
+                    info.constraints.push_back(make_uniq<ForeignKeyConstraint>(
+                        fk.pk_columns, fk.fk_columns, std::move(fk_info)));
                 }
             }
             auto entry = make_uniq<FirebirdTableEntry>(

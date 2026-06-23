@@ -33,8 +33,10 @@ ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird,
 query I
 SHOW TABLES FROM fb;
 ----
+DEPT
 EMPLOYEE
 FILE_STORAGE
+TCHILD
 TPK_COMPOSITE
 TQUOTES
 V_ACTIVE_EMP
@@ -59,6 +61,7 @@ SALARY	DECIMAL(18,2)
 HIRE_DATE	DATE
 ACTIVE	BOOLEAN
 NOTE	VARCHAR
+NAME_LEN	INTEGER
 
 # --- DESCRIBE works on views too ----------------------------------
 
@@ -83,8 +86,10 @@ SELECT table_catalog, table_schema, table_name, table_type
  WHERE table_catalog = 'fb'
  ORDER BY table_name;
 ----
+fb	main	DEPT	BASE TABLE
 fb	main	EMPLOYEE	BASE TABLE
 fb	main	FILE_STORAGE	BASE TABLE
+fb	main	TCHILD	BASE TABLE
 fb	main	TPK_COMPOSITE	BASE TABLE
 fb	main	TQUOTES	BASE TABLE
 fb	main	V_ACTIVE_EMP	BASE TABLE
@@ -108,6 +113,7 @@ SALARY	DECIMAL(18,2)	4	YES
 HIRE_DATE	DATE	5	YES
 ACTIVE	BOOLEAN	6	YES
 NOTE	VARCHAR	7	YES
+NAME_LEN	INTEGER	8	YES
 
 # `is_nullable` is sourced from
 # `COALESCE(rf.RDB$NULL_FLAG, f.RDB$NULL_FLAG, 0)`: the per-column
@@ -121,7 +127,7 @@ query I
 SELECT COUNT(*) FROM information_schema.columns
  WHERE table_catalog = 'fb';
 ----
-27
+33
 
 # --- Case-insensitive table lookup --------------------------------
 #
