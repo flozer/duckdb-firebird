@@ -9,4 +9,5 @@ TableFunction GetFirebirdDomainsFunction();
 TableFunction GetFirebirdComputedColumnsFunction();
 TableFunction GetFirebirdDependenciesFunction();
 TableFunction GetFirebirdCommentsFunction();
+TableFunction GetFirebirdTypeAuditFunction();
 } // namespace duckdb
