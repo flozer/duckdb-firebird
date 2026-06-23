@@ -47,7 +47,7 @@ firebird_health('<attach_alias>') -> 1 row
 | 11 | `next_transaction` | BIGINT | `MON$DATABASE.MON$NEXT_TRANSACTION` |
 | 12 | `oit_gap` | BIGINT | `next_transaction - oldest_transaction` (derived) |
 | 13 | `oat_gap` | BIGINT | `next_transaction - oldest_active` (derived) |
-| 14 | `attachments` | INTEGER | `COUNT(*) FROM MON$ATTACHMENTS` |
+| 14 | `attachments` | INTEGER | `COUNT(*) FROM MON$ATTACHMENTS` (attachments visible to the current user) |
 | 15 | `warnings` | LIST(VARCHAR) | rules below |
 
 Column-type accessor discipline (per the SMALLINT/INTEGER/BIGINT rule): the
@@ -73,7 +73,7 @@ so every warning is independently auditable.
 | `sweep_disabled` | `sweep_interval = 0` | automatic sweep off |
 | `forced_writes_off` | `forced_writes = false` | durability risk on crash |
 | `charset_none` | `default_charset = 'NONE'` | transcoding ambiguity (ties to none_encoding) |
-| `mon_unavailable` | MON$ query failed | see graceful-degradation below |
+| `mon_unavailable` | MON$ query threw an error | see graceful-degradation below — real query failure only, NOT partial visibility |
 
 Warning order is deterministic (the table order above), so tests can assert on
 the list content.
@@ -105,17 +105,31 @@ the list content.
 Single-row bespoke table function (like `firebird_profile_table`), not the
 multi-row metadata scaffold.
 
-## Graceful degradation (MON$ unavailable)
+## MON$ visibility and graceful degradation
 
-`MON$DATABASE`/`MON$ATTACHMENTS` require monitoring privilege (SYSDBA / DB owner
-/ user granted `RDB$ADMIN`). A least-privilege user may be denied. If the
-monitoring query (step 2) throws, catch it: leave all MON$-sourced columns
-(`ods_version`, `sql_dialect`, `page_size`, `forced_writes`, `sweep_interval`,
-the four counters, both gaps, `attachments`) NULL, still populate
-`engine_version` + `default_charset` from step 3, and emit the `mon_unavailable`
-warning. The function never errors out on privilege. (Same isolation philosophy
-as `firebird_generators` current-value reads.) Gap/sweep/forced-writes warnings
-are skipped when their inputs are NULL; `charset_none` still evaluates.
+Monitoring tables are readable by any attachment, but **filtered by
+privilege**: a non-privileged user sees its own attachment(s) and the database
+row, while a privileged user (SYSDBA / DB owner / `RDB$ADMIN`) sees the full
+picture. So:
+
+- `MON$DATABASE` returns one row for everyone — the database-level fields
+  (ODS, dialect, page size, forced writes, sweep, the transaction counters) are
+  the same regardless of privilege. No special handling needed.
+- `attachments` (`COUNT(*) FROM MON$ATTACHMENTS`) is **the count visible to the
+  current user**: a partial view (e.g. just the caller's own connections) under
+  limited privilege, the full count under monitoring privilege. This is a
+  faithful, non-failing result, **not** an error. It is documented as
+  "attachments visible to the current user" rather than implying an absolute
+  total. Limited visibility does NOT emit `mon_unavailable`.
+
+`mon_unavailable` is reserved for a **real failure of the monitoring query**
+(step 2 throws — e.g. an unexpected engine error). On that throw only: catch it,
+leave the MON$-sourced columns (`ods_version`, `sql_dialect`, `page_size`,
+`forced_writes`, `sweep_interval`, the four counters, both gaps, `attachments`)
+NULL, still populate `engine_version` + `default_charset` from step 3, and emit
+`mon_unavailable`. The function never errors out. (Same isolation philosophy as
+`firebird_generators` current-value reads.) Gap/sweep/forced-writes warnings are
+skipped when their inputs are NULL; `charset_none` still evaluates.
 
 ## Testing
 
