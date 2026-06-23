@@ -1249,6 +1249,95 @@ Codigos de finding:
   escala diferente de 0 mapeia de forma lossless para `DECIMAL` do DuckDB e
   nao e sinalizado.
 
+### `firebird_health(alias)`
+
+#### O que faz e como funciona
+
+Retorna uma unica linha com o diagnostico de saude de um banco Firebird
+acessivel por um alias ja anexado via `ATTACH ... (TYPE firebird)`. Le dados
+de `MON$DATABASE`, `MON$ATTACHMENTS`, `rdb$get_context('SYSTEM','ENGINE_VERSION')`
+e `RDB$DATABASE.RDB$CHARACTER_SET_NAME`. Operacao somente leitura.
+
+```sql
+ATTACH 'C:/dados/empresa.fdb' AS fb
+(TYPE firebird, user 'SYSDBA', password 'masterkey');
+
+SELECT *
+FROM firebird_health('fb');
+```
+
+Colunas de saida (15):
+
+| Coluna | Tipo | Descricao |
+| --- | --- | --- |
+| `engine_version` | VARCHAR | Versao do motor Firebird (ex.: `'5.0.1'`) |
+| `ods_version` | VARCHAR | Versao do ODS do arquivo de banco (ex.: `'13.1'`) |
+| `sql_dialect` | INTEGER | Dialeto SQL ativo do banco (normalmente `3`) |
+| `default_charset` | VARCHAR | Character set padrao do banco (ex.: `'UTF8'`) |
+| `page_size` | INTEGER | Tamanho de pagina em bytes (ex.: `8192`) |
+| `forced_writes` | BOOLEAN | `true` quando escrita forcada esta ligada |
+| `sweep_interval` | INTEGER | Intervalo de sweep configurado (transacoes) |
+| `oldest_transaction` | BIGINT | OIT — oldest interesting transaction |
+| `oldest_active` | BIGINT | OAT — oldest active transaction |
+| `oldest_snapshot` | BIGINT | OST — oldest snapshot transaction |
+| `next_transaction` | BIGINT | Proximo numero de transacao |
+| `oit_gap` | BIGINT | `next_transaction - oldest_transaction` |
+| `oat_gap` | BIGINT | `next_transaction - oldest_active` |
+| `attachments` | INTEGER | Numero de conexoes visiveis ao usuario atual |
+| `warnings` | LIST(VARCHAR) | Lista de avisos ativos (vazia quando tudo esta ok) |
+
+Avisos possiveis:
+
+| Codigo | Condicao de disparo |
+| --- | --- |
+| `oit_gap_high` | `oit_gap > 1.000.000` |
+| `oat_gap_high` | `oat_gap > 1.000.000` |
+| `sweep_disabled` | `sweep_interval = 0` |
+| `forced_writes_off` | `forced_writes = false` |
+| `charset_none` | `default_charset = 'NONE'` |
+| `mon_unavailable` | Falha real na consulta de monitoramento |
+
+#### Notas
+
+- **Limiar de gap `1.000.000`**: o valor `1000000` e um sinal conservador
+  padrao, **nao** um limite universal. E uma constante de compilacao
+  (`FB_HEALTH_GAP_THRESHOLD`); para ajustar e necessario recompilar a
+  extensao.
+- **`attachments` e a contagem visivel ao usuario atual**: sob privilegio
+  limitado a visibilidade das views `MON$` e parcial; sob privilegio de
+  monitoramento o total completo e retornado. O valor e sempre fiel ao que
+  o banco reporta para aquela credencial — nao e um erro.
+- **`mon_unavailable` so dispara em falha real**: visibilidade limitada
+  (menos anexoes visiveis) nao dispara este aviso. Quando a consulta
+  `MON$DATABASE`/`MON$ATTACHMENTS` lanca uma excecao, `mon_unavailable`
+  aparece em `warnings`, as colunas com origem em `MON$` ficam `NULL`,
+  e `engine_version` e `default_charset` continuam preenchidos.
+
+#### Para que serve
+
+- Verificar rapidamente o estado de saude de um banco Firebird em producao
+  sem precisar acessar o servidor diretamente.
+- Detectar gaps de transacao excessivos (indicativo de sweep atrasado ou
+  transacoes longas) e configuracoes de risco (`forced_writes` desligado,
+  charset `NONE`).
+- Monitorar o numero de conexoes ativas e a versao do motor.
+
+#### Uso no dia a dia
+
+Inspecionar a saude do banco:
+
+```sql
+SELECT engine_version, oit_gap, oat_gap, attachments, warnings
+FROM firebird_health('fb');
+```
+
+Verificar todos os campos de uma so vez:
+
+```sql
+SELECT *
+FROM firebird_health('fb');
+```
+
 ## Nivel 5 - Opcoes de sessao
 
 ### `SET firebird_query_log_size = N`

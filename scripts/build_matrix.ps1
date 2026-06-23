@@ -66,6 +66,7 @@ $testFixtureVar = @{
     'firebird_none_charset.test'       = 'FIREBIRD_NONE_DB'
     'firebird_explain_pushdown.test'   = 'FIREBIRD_TEST_DB'
     'firebird_type_audit.test'         = 'FIREBIRD_TEST_DB'
+    'firebird_health.test'             = 'FIREBIRD_TEST_DB'
 }
 
 function Invoke-Build([string]$buildDir) {
