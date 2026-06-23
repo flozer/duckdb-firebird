@@ -660,6 +660,12 @@ Warning codes:
 | `charset_none` | `default_charset = 'NONE'` |
 | `mon_unavailable` | Real monitoring-query failure |
 
+The first four codes (`oit_gap_high`, `oat_gap_high`, `sweep_disabled`,
+`forced_writes_off`) are evaluated only when the monitoring read succeeds; if
+`mon_unavailable` fires, they are suppressed because their inputs are `NULL`.
+`charset_none` is always evaluated (it derives from `default_charset`, which is
+read independently of `MON$`).
+
 Notes:
 
 - **The `1,000,000` gap threshold is a conservative default signal**, not a

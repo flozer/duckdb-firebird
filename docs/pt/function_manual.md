@@ -1297,6 +1297,12 @@ Avisos possiveis:
 | `charset_none` | `default_charset = 'NONE'` |
 | `mon_unavailable` | Falha real na consulta de monitoramento |
 
+Os quatro primeiros codigos (`oit_gap_high`, `oat_gap_high`, `sweep_disabled`,
+`forced_writes_off`) so sao avaliados quando a leitura de monitoramento tem
+sucesso; se `mon_unavailable` disparar, eles sao suprimidos porque suas
+entradas ficam `NULL`. `charset_none` e sempre avaliado (deriva de
+`default_charset`, lido de forma independente do `MON$`).
+
 #### Notas
 
 - **Limiar de gap `1.000.000`**: o valor `1000000` e um sinal conservador
