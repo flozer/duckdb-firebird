@@ -1197,6 +1197,58 @@ FROM firebird_pool_stats('fb');
 - **Sem campo de ultimo erro**: historico de erro de pool nao e exposto
   nesta versao.
 
+### `firebird_type_audit(catalog_name)`
+
+#### O que faz e como funciona
+
+Auditoria de fidelidade de conversao de tipos e charsets de um catalogo
+Firebird anexado. Apenas colunas que possuem ressalva sao emitidas; colunas
+cujo tipo Firebird mapeia para DuckDB de forma limpa e sem caveats semanticos
+sao omitidas. A funcao nunca le dados de negocio: consulta apenas tabelas de
+sistema do Firebird (`RDB$RELATION_FIELDS`, `RDB$FIELDS`) via lease de conexao
+do pool, e nunca executa o SQL do usuario.
+
+```sql
+SELECT * FROM firebird_type_audit('fb');
+```
+
+Colunas de saida (7):
+
+| Coluna | Tipo | Notas |
+| --- | --- | --- |
+| `table_schema` | VARCHAR | Sempre `'main'` (o ATTACH Firebird expoe um unico schema) |
+| `table_name` | VARCHAR | Nome da relacao Firebird |
+| `column_name` | VARCHAR | Nome do campo Firebird |
+| `firebird_type` | VARCHAR | Tipo Firebird conforme reportado (ex.: `DECFLOAT(16)`, `CHAR(10) CHARACTER SET NONE`) |
+| `duckdb_type` | VARCHAR | Tipo DuckDB projetado pela extensao (ex.: `VARCHAR`, `HUGEINT`) |
+| `finding` | VARCHAR | Codigo de finding — veja tabela abaixo |
+| `detail` | VARCHAR | Explicacao de uma frase sobre a ressalva |
+
+Codigos de finding:
+
+| Codigo | Significado |
+| --- | --- |
+| `decfloat_as_varchar` | DECFLOAT(16/34) projetado como VARCHAR via `CAST` server-side; semantica textual se aplica a comparacoes de filtro |
+| `int128` | INT128 nativo ou NUMERIC/DECIMAL(19-38) sem casa decimal projetado como HUGEINT (sem perda); algumas ferramentas BI nao suportam INT128 |
+| `time_tz` | TIME WITH TIME ZONE; ressalva de tratamento de offset de sessao e zone-id |
+| `timestamp_tz` | TIMESTAMP WITH TIME ZONE; ressalva de tratamento de offset de sessao e zone-id |
+| `none_charset` | CHAR/VARCHAR ou BLOB texto com CHARACTER SET NONE; decodificacao depende do `none_encoding` do scan (default documentado: `win1252`); a funcao nao le essa configuracao |
+| `blob_text` | BLOB texto (charset nao-NONE) projetado como VARCHAR; ressalva de charset e tamanho |
+
+#### Notas
+
+- `decfloat_as_varchar`, `int128`, `time_tz` e `timestamp_tz` exigem
+  Firebird 4 ou superior (tipos FB4+); nao aparecerao em catalogos FB3.
+- O comportamento de decodificacao de `none_charset` no momento do scan e
+  controlado pela opcao de sessao `none_encoding` (default `win1252`). Esta
+  funcao le o schema do catalogo, nao essa configuracao; portanto, o finding
+  e emitido sempre que o character set for NONE, independentemente do valor
+  de `none_encoding`.
+- `int128` sinaliza `INT128` nativo e `NUMERIC`/`DECIMAL` de precisao 19-38
+  com escala 0 (todos projetados como HUGEINT). `NUMERIC`/`DECIMAL` com
+  escala diferente de 0 mapeia de forma lossless para `DECIMAL` do DuckDB e
+  nao e sinalizado.
+
 ## Nivel 5 - Opcoes de sessao
 
 ### `SET firebird_query_log_size = N`

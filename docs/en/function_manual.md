@@ -565,6 +565,54 @@ Current limitations:
 - **No last-error field**: pool-level error history is not surfaced in this
   version.
 
+### `firebird_type_audit(catalog_name)`
+
+Findings-only audit of type/charset conversion fidelity for an attached
+Firebird catalog. Only columns that carry a caveat are emitted; columns
+whose Firebird type maps to DuckDB cleanly and without semantic caveats are
+omitted. The function never reads business data: it queries only Firebird
+system tables (`RDB$RELATION_FIELDS`, `RDB$FIELDS`) via a pooled
+connection lease, and it never executes the user's SQL.
+
+```sql
+SELECT * FROM firebird_type_audit('fb');
+```
+
+Output columns (7):
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `table_schema` | VARCHAR | Always `'main'` (Firebird ATTACH exposes one schema) |
+| `table_name` | VARCHAR | Firebird relation name |
+| `column_name` | VARCHAR | Firebird field name |
+| `firebird_type` | VARCHAR | Firebird type as reported (e.g. `DECFLOAT(16)`, `CHAR(10) CHARACTER SET NONE`) |
+| `duckdb_type` | VARCHAR | DuckDB type the extension projects (e.g. `VARCHAR`, `HUGEINT`) |
+| `finding` | VARCHAR | Finding code — see table below |
+| `detail` | VARCHAR | One-sentence explanation of the caveat |
+
+Finding codes:
+
+| Code | Meaning |
+| --- | --- |
+| `decfloat_as_varchar` | DECFLOAT(16/34) projected as VARCHAR via server-side `CAST`; text semantics apply to filter comparisons |
+| `int128` | Native INT128 or scale-0 NUMERIC/DECIMAL(19–38) projected as HUGEINT (lossless); some BI tools lack INT128 support |
+| `time_tz` | TIME WITH TIME ZONE; session offset / zone-id handling caveat |
+| `timestamp_tz` | TIMESTAMP WITH TIME ZONE; session offset / zone-id handling caveat |
+| `none_charset` | CHAR/VARCHAR or text BLOB with CHARACTER SET NONE; decoding depends on the scan's `none_encoding` (documented default `win1252`); the function does not read that setting |
+| `blob_text` | Text BLOB (non-NONE charset) projected as VARCHAR; charset and size caveat |
+
+Notes:
+
+- `decfloat_as_varchar`, `int128`, `time_tz`, and `timestamp_tz` require
+  Firebird 4 or later (FB4+ types); they will not appear against a FB3 catalog.
+- `none_charset` decoding behavior at scan time is controlled by the
+  `none_encoding` session option (default `win1252`). This function reads the
+  catalog schema, not that setting, so the finding is emitted whenever the
+  character set is NONE regardless of what `none_encoding` is configured to.
+- `int128` flags native `INT128` and scale-0 `NUMERIC`/`DECIMAL` with
+  precision 19–38 (all projected as HUGEINT). Scaled `NUMERIC`/`DECIMAL`
+  (scale ≠ 0) maps losslessly to DuckDB `DECIMAL` and is not flagged.
+
 ## Level 5 - Session options
 
 ### `SET firebird_query_log_size = N`
