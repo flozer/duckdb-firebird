@@ -19,6 +19,27 @@ struct PrimaryKeyInfo {
     int64_t max_value = 0;
 };
 
+// Cached descriptor built once at ATTACH from the already-loaded PK/UNIQUE
+// constraint map and column types — zero new Firebird I/O.
+struct PrimaryKeyDescriptor {
+    bool                        has_pk        = false;
+    duckdb::vector<std::string> columns;        // ordinal order
+    bool                        single_numeric = false; // 1 col AND numeric type
+};
+
+enum class PkRangeStrategy { SERIAL, PK_RANGE_PARTITIONABLE };
+
+struct PkRangeClassification {
+    bool            eligible;
+    std::string     column;   // "" when not single-col
+    std::string     reason;   // no primary key | composite PK | non-numeric PK | single numeric PK
+    PkRangeStrategy strategy;
+};
+
+// Pure classifier — derives one of 4 normalized reasons from a descriptor.
+// No I/O; safe to call in any context.
+PkRangeClassification ClassifyPkRange(const PrimaryKeyDescriptor &d);
+
 struct FirebirdBindData : public TableFunctionData {
     FirebirdConnectionInfo conn_info;
     std::string table_name;
@@ -30,6 +51,10 @@ struct FirebirdBindData : public TableFunctionData {
     // time to gate text-filter pushdown.
     duckdb::vector<FirebirdColumnDesc> column_descs;
     std::unique_ptr<PrimaryKeyInfo> pk;
+    // Full descriptor built at ATTACH time from the constraint map + column
+    // types (zero I/O). Carries has_pk / columns / single_numeric for
+    // ClassifyPkRange; populated by FirebirdTableEntry::GetScanFunction.
+    PrimaryKeyDescriptor pk_descriptor;
     idx_t partitions_override = 0;
     // Optional ROWS N hint pushed into every per-partition Firebird query.
     // 0 = unset (no limit). DuckDB's TableFunction API has no built-in

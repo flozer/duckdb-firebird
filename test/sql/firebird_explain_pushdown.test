@@ -1,0 +1,189 @@
+# name: test/sql/firebird_explain_pushdown.test
+# description: a-priori plan-only pushdown explainer
+# group: [firebird]
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+require-env ISC_PASSWORD
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird);
+
+# no firebird scan in plan -> zero rows
+query I
+SELECT COUNT(*) FROM firebird_explain_pushdown('SELECT 1');
+----
+0
+
+# read-only guard: DML rejected
+statement error
+SELECT * FROM firebird_explain_pushdown('UPDATE fb.main.EMPLOYEE SET EMP_NAME = ''x''');
+----
+only a single read-only SELECT/WITH...SELECT is allowed
+
+# direct firebird_scan rejected (would open a connection at bind)
+statement error
+SELECT * FROM firebird_explain_pushdown('SELECT * FROM firebird_scan(''${FIREBIRD_TEST_DB}'', ''EMPLOYEE'')');
+----
+direct firebird_scan(...) is not supported here
+
+# direct firebird_scan hidden in a UNION branch is also rejected
+statement error
+SELECT * FROM firebird_explain_pushdown('SELECT 1 UNION ALL SELECT EMP_ID FROM firebird_scan(''${FIREBIRD_TEST_DB}'', ''EMPLOYEE'')');
+----
+direct firebird_scan(...) is not supported here
+
+# simple equality pushed; remote_sql uses '?' not the literal 4
+query I
+SELECT scan_ordinal FROM firebird_explain_pushdown(
+  'SELECT EMP_ID FROM fb.main.EMPLOYEE WHERE EMP_ID = 4');
+----
+1
+
+query I
+SELECT len(pushed_filters) > 0 FROM firebird_explain_pushdown(
+  'SELECT EMP_ID FROM fb.main.EMPLOYEE WHERE EMP_ID = 4');
+----
+true
+
+# remote_sql contains a placeholder and NOT the literal value or a path
+query I
+SELECT remote_sql LIKE '%?%'
+   AND remote_sql NOT LIKE '%fbtest%'
+   AND remote_sql NOT LIKE '%= 4%'
+  FROM firebird_explain_pushdown(
+  'SELECT EMP_ID FROM fb.main.EMPLOYEE WHERE EMP_ID = 4');
+----
+true
+
+# projection prune
+query I
+SELECT projected_columns
+  FROM firebird_explain_pushdown('SELECT EMP_ID FROM fb.main.EMPLOYEE');
+----
+[EMP_ID]
+
+# SQL LIMIT is applied by DuckDB above the scan; NOT pushed to Firebird ROWS.
+# limit_pushed/offset_pushed/rows_clause are NULL for SQL LIMIT.
+query I
+SELECT limit_pushed IS NULL FROM firebird_explain_pushdown(
+  'SELECT * FROM fb.main.EMPLOYEE LIMIT 100');
+----
+true
+
+# PK-range classification: 4 normalized reasons
+# EMPLOYEE: EMP_ID INTEGER PK -> single numeric PK, eligible=true, pk-range-partitionable
+query III
+SELECT pk_range_reason, pk_range_eligible, scan_strategy
+  FROM firebird_explain_pushdown('SELECT * FROM fb.main.EMPLOYEE');
+----
+single numeric PK	true	pk-range-partitionable
+
+# DEPT: DEPT_NO VARCHAR(3) PK -> non-numeric PK, eligible=false, serial
+query III
+SELECT pk_range_reason, pk_range_eligible, scan_strategy
+  FROM firebird_explain_pushdown('SELECT * FROM fb.main.DEPT');
+----
+non-numeric PK	false	serial
+
+# TPK_COMPOSITE: composite PK -> composite PK, eligible=false, serial
+query III
+SELECT pk_range_reason, pk_range_eligible, scan_strategy
+  FROM firebird_explain_pushdown('SELECT * FROM fb.main.TPK_COMPOSITE');
+----
+composite PK	false	serial
+
+# TCHILD: no PK -> no primary key, eligible=false, serial
+query III
+SELECT pk_range_reason, pk_range_eligible, scan_strategy
+  FROM firebird_explain_pushdown('SELECT * FROM fb.main.TCHILD');
+----
+no primary key	false	serial
+
+# composite PK has no single PK column -> pk_range_column NULL
+query I
+SELECT pk_range_column IS NULL FROM firebird_explain_pushdown('SELECT * FROM fb.main.TPK_COMPOSITE');
+----
+true
+
+# Task 6: invariant — residual_filters and not_pushed_reasons always equal length
+# NOT IN on a numeric column: no NONE gating, but invariant must hold regardless.
+query I
+SELECT len(residual_filters) = len(not_pushed_reasons)
+  FROM firebird_explain_pushdown('SELECT * FROM fb.main.EMPLOYEE WHERE EMP_ID NOT IN (1,2,3)');
+----
+true
+
+# Task 6: NONE-gated complex filter surfaces in explain
+# A NOT IN over a CHARACTER SET NONE text column cannot be pushed to Firebird
+# (UTF-8 literal vs raw CP1252 bytes), so the scanner records it in
+# gated_complex_reasons. firebird_explain_pushdown must mirror that:
+# residual_filters contains 'complex_filter[none_gated]' and the parallel
+# not_pushed_reasons entry is 'NONE_CHARSET'.
+
+require-env FIREBIRD_NONE_DB
+
+statement ok
+ATTACH '${FIREBIRD_NONE_DB}' AS fbn (TYPE firebird);
+
+query I
+SELECT list_contains(residual_filters, 'complex_filter[none_gated]')
+  FROM firebird_explain_pushdown('SELECT * FROM fbn.main.TXT WHERE LABEL NOT IN (''a'',''b'')');
+----
+true
+
+query I
+SELECT list_contains(not_pushed_reasons, 'NONE_CHARSET')
+  FROM firebird_explain_pushdown('SELECT * FROM fbn.main.TXT WHERE LABEL NOT IN (''a'',''b'')');
+----
+true
+
+# Invariant holds for the NONE-gated case too
+query I
+SELECT len(residual_filters) = len(not_pushed_reasons)
+  FROM firebird_explain_pushdown('SELECT * FROM fbn.main.TXT WHERE LABEL NOT IN (''a'',''b'')');
+----
+true
+
+# Task 7: self-join — two scans of the same table, scan_ordinal must be distinct
+# DuckDB produces two LogicalGet nodes for a self-join (one per alias), so we
+# expect ordinals 1 and 2 with the same table_name.
+# NOTE: if DuckDB's optimizer deduplicates the self-join to a single LogicalGet
+# the expected output below would need to change to a single row — see report.
+query II
+SELECT scan_ordinal, table_name FROM firebird_explain_pushdown(
+  'SELECT a.EMP_ID FROM fb.main.EMPLOYEE a JOIN fb.main.EMPLOYEE b ON a.DEPT_NO=b.DEPT_NO')
+ORDER BY scan_ordinal;
+----
+1	EMPLOYEE
+2	EMPLOYEE
+
+# Task 7: valid WITH...SELECT — the CTE body is a Firebird scan; explain returns the scan
+query I
+SELECT table_name FROM firebird_explain_pushdown(
+  'WITH x AS (SELECT EMP_ID FROM fb.main.EMPLOYEE) SELECT * FROM x');
+----
+EMPLOYEE
+
+# Task 7: WITH...DELETE must be rejected by the statement-type guard
+statement error
+SELECT * FROM firebird_explain_pushdown(
+  'WITH x AS (SELECT 1) DELETE FROM fb.main.EMPLOYEE');
+----
+only a single read-only SELECT/WITH...SELECT is allowed
+
+# Task 8: no-cursor proof — explain never opens a Firebird cursor
+# firebird_explain_pushdown() calls ExtractPlan + walks the logical plan;
+# it never calls OpenCursor or executes the query against Firebird.
+# Because every test in this file uses firebird_explain_pushdown() exclusively
+# (no bare SELECT FROM fb.main.* that would actually run a scan), the session
+# telemetry has no EMPLOYEE entry. Asserting COUNT(*) == 0 is deterministic.
+statement ok
+SELECT * FROM firebird_explain_pushdown('SELECT * FROM fb.main.EMPLOYEE');
+
+query I
+SELECT COUNT(*) FROM firebird_last_query() WHERE remote_sql LIKE '%EMPLOYEE%';
+----
+0

@@ -989,6 +989,86 @@ FROM firebird_last_query()
 WHERE error_message <> '';
 ```
 
+### `firebird_explain_pushdown(sql)`
+
+#### O que faz e como funciona
+
+Retorna uma analise a priori, baseada apenas no plano logico, de o que um
+`SELECT` empurraria ao Firebird — **sem executar a query** e **sem abrir cursor
+de dados na query do usuario**. E o complemento de `firebird_last_query()`:
+explain e prospectivo (antes de qualquer execucao), enquanto
+`firebird_last_query()` e post-hoc (apos o ultimo scan real).
+
+Explain nunca abre cursor de DADOS na query do usuario e nunca envia o SQL da
+query ao Firebird. Em catalogo "frio" (primeira referencia a uma tabela), o
+bind via `ExtractPlan` pode carregar metadados de catalogo (schema) e rodar o
+probe de PK (MIN/MAX) — exatamente como o bind de qualquer query ATTACH — e
+isso fica memoizado. Nao ha cursor de dados da query nem envio do SQL do
+usuario.
+
+**Nota sobre `remote_sql`:** a coluna mostra o SELECT remoto base que o scanner
+enviaria; predicados complexos (LIKE-prefixo, NOT IN, BETWEEN) aparecem na
+lista `pushed_filters` em vez de inline no `remote_sql` — o mesmo split de
+telemetria usado por `firebird_last_query()`.
+
+Como explain nunca executa a query, nao deixa registro no telemetro de
+`firebird_last_query()`.
+
+#### Entrada aceita
+
+- Um unico `SELECT` referenciando tabelas Firebird via alias `ATTACH`
+  (ex.: `fb.main.EMPLOYEE`).
+- Um `WITH ... SELECT` (CTE) cujo corpo e um scan Firebird.
+
+Entrada rejeitada (levanta erro):
+
+- DML (`UPDATE`, `DELETE`, `INSERT`, `MERGE`).
+- Chamadas diretas a `firebird_scan(...)` — use a forma de alias `ATTACH`.
+- `WITH ... DELETE` ou outros CTEs nao-SELECT.
+
+#### Colunas de saida (14)
+
+| Coluna | Tipo | Notas |
+| --- | --- | --- |
+| `scan_ordinal` | BIGINT | Ordinal 1-based; distinto por no `LogicalGet`, inclusive self-joins |
+| `table_name` | VARCHAR | Nome da tabela Firebird (nunca a connection string) |
+| `remote_sql` | VARCHAR | SQL que seria enviado ao Firebird; valores de bind aparecem como `?` — sem literais, sem fragmentos de connection string |
+| `projected_columns` | VARCHAR[] | Colunas selecionadas do Firebird apos projection pruning |
+| `pushed_filters` | VARCHAR[] | Predicados que o scanner empurraria ao Firebird |
+| `residual_filters` | VARCHAR[] | Predicados que o DuckDB revalidaria acima do scan; sempre `len(residual_filters) == len(not_pushed_reasons)` |
+| `not_pushed_reasons` | VARCHAR[] | Uma razao coarse por entrada em `residual_filters`, mesma ordem; valores: `NONE_CHARSET`, `UNSUPPORTED_OP`, `ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING` |
+| `limit_pushed` | BIGINT | Valor do parametro nomeado `row_limit=` se seria empurrado para clausula `ROWS` do Firebird; `NULL` para `LIMIT` SQL (o DuckDB aplica `LIMIT` SQL acima do scan) |
+| `offset_pushed` | BIGINT | Valor do parametro nomeado `row_offset=` se empurrado; `NULL` caso contrario |
+| `rows_clause` | VARCHAR | Clausula `ROWS m TO n` do Firebird que seria emitida, ou `NULL` |
+| `pk_range_eligible` | BOOLEAN | `true` apenas para chave primaria de coluna unica numerica |
+| `pk_range_column` | VARCHAR | Nome dessa coluna PK, ou `NULL` quando nao elegivel (ex.: PK composta ou nao numerica) |
+| `pk_range_reason` | VARCHAR | Um de quatro valores normalizados: `single numeric PK`, `non-numeric PK`, `composite PK`, `no primary key` |
+| `scan_strategy` | VARCHAR | `pk-range-partitionable` quando `pk_range_eligible` for true; `serial` caso contrario |
+
+#### Invariantes
+
+- `len(residual_filters) == len(not_pushed_reasons)` sempre se mantém.
+- Um `NOT IN` em coluna texto `CHARACTER SET NONE` e registrado em
+  `residual_filters` como `complex_filter[none_gated]` com a entrada paralela
+  em `not_pushed_reasons` igual a `NONE_CHARSET`.
+- `limit_pushed` / `offset_pushed` / `rows_clause` sao `NULL` para `LIMIT`
+  SQL — apenas os parametros nomeados `row_limit=` / `row_offset=` do scanner
+  sao considerados para pushdown.
+- `pk_range_column` e `NULL` sempre que `pk_range_eligible` for `false`.
+
+#### Exemplo de uso
+
+```sql
+ATTACH 'C:/dados/empresa.fdb user=APP_READONLY password=secret'
+  AS fb (TYPE firebird);
+
+-- Verificar o que seria empurrado antes de executar de verdade:
+SELECT table_name, pushed_filters, residual_filters, not_pushed_reasons,
+       pk_range_eligible, scan_strategy
+FROM firebird_explain_pushdown(
+  'SELECT EMP_ID, EMP_NAME FROM fb.main.EMPLOYEE WHERE EMP_ID > 10');
+```
+
 ### `firebird_query_log()`
 
 #### O que faz e como funciona
