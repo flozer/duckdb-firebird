@@ -235,3 +235,16 @@ SELECT COUNT(*)
  WHERE p LIKE '%NOT IN%';
 ----
 0
+
+# firebird_health surfaces a deterministic charset_none warning for a
+# database whose default character set is NONE (independent of the
+# none_encoding ATTACH option, which does not change the stored default).
+
+statement ok
+ATTACH '${FIREBIRD_NONE_DB}' AS att (TYPE firebird, user 'SYSDBA', password 'masterkey', none_encoding 'win1252');
+
+query TT
+SELECT default_charset, list_contains(warnings, 'charset_none')
+FROM firebird_health('att');
+----
+NONE	true

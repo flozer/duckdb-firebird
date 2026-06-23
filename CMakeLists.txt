@@ -26,6 +26,7 @@ set(EXTENSION_SOURCES
     src/firebird_storage.cpp
     src/firebird_observability.cpp
     src/firebird_dbt_sources.cpp
+    src/firebird_health.cpp
     src/firebird_profile_table.cpp
     src/firebird_metadata_functions.cpp
     src/firebird_explain_pushdown.cpp

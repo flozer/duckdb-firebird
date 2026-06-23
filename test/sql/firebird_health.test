@@ -1,0 +1,57 @@
+# name: test/sql/firebird_health.test
+# description: firebird_health - single-row DB/server health diagnostic:
+#              factual metrics (version/ODS/dialect/charset/page/durability/
+#              sweep/transaction counters/attachments) + structured warnings.
+# group: [firebird]
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+require-env ISC_PASSWORD
+
+statement error
+SELECT * FROM firebird_health(NULL);
+----
+firebird_health(alias VARCHAR): alias is required
+
+statement error
+SELECT * FROM firebird_health('nope_does_not_exist_xyz');
+----
+no attached catalog named 'nope_does_not_exist_xyz'
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird);
+
+# Exactly one row.
+query I
+SELECT COUNT(*) FROM firebird_health('fb');
+----
+1
+
+# Factual shape/range checks (exact transaction numbers vary per session).
+query IIIIIII
+SELECT
+  CASE WHEN engine_version <> '' THEN 1 ELSE 0 END,
+  CASE WHEN regexp_matches(ods_version, '^[0-9]+\.[0-9]+$') THEN 1 ELSE 0 END,
+  CASE WHEN sql_dialect = 3 THEN 1 ELSE 0 END,
+  CASE WHEN page_size > 0 THEN 1 ELSE 0 END,
+  CASE WHEN next_transaction > 0 THEN 1 ELSE 0 END,
+  CASE WHEN oit_gap >= 0 AND oat_gap >= 0 THEN 1 ELSE 0 END,
+  CASE WHEN attachments >= 1 THEN 1 ELSE 0 END
+FROM firebird_health('fb');
+----
+1	1	1	1	1	1	1
+
+# Default charset of the UTF8 fixture, and no charset_none warning for it.
+query TT
+SELECT default_charset, list_contains(warnings, 'charset_none')
+FROM firebird_health('fb');
+----
+UTF8	false
+
+# warnings is a LIST(VARCHAR) (type-stable even when empty/non-empty).
+query T
+SELECT typeof(warnings) FROM firebird_health('fb');
+----
+VARCHAR[]

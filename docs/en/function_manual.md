@@ -613,6 +613,87 @@ Notes:
   precision 19–38 (all projected as HUGEINT). Scaled `NUMERIC`/`DECIMAL`
   (scale ≠ 0) maps losslessly to DuckDB `DECIMAL` and is not flagged.
 
+### `firebird_health(alias)`
+
+Returns a single row with a health diagnostic for a Firebird database
+reachable through an alias already attached via `ATTACH ... (TYPE firebird)`.
+Reads from `MON$DATABASE`, `MON$ATTACHMENTS`,
+`rdb$get_context('SYSTEM','ENGINE_VERSION')`, and
+`RDB$DATABASE.RDB$CHARACTER_SET_NAME`. Read-only operation.
+
+```sql
+ATTACH 'database=C:/data/company.fdb user=SYSDBA password=masterkey'
+  AS fb (TYPE firebird);
+
+SELECT *
+FROM firebird_health('fb');
+```
+
+Output columns (15):
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `engine_version` | VARCHAR | Firebird engine version (e.g. `'5.0.1'`) |
+| `ods_version` | VARCHAR | On-disk structure version of the database file (e.g. `'13.1'`) |
+| `sql_dialect` | INTEGER | Active SQL dialect of the database (normally `3`) |
+| `default_charset` | VARCHAR | Default character set of the database (e.g. `'UTF8'`) |
+| `page_size` | INTEGER | Page size in bytes (e.g. `8192`) |
+| `forced_writes` | BOOLEAN | `true` when forced writes are enabled |
+| `sweep_interval` | INTEGER | Configured sweep interval (transactions) |
+| `oldest_transaction` | BIGINT | OIT — oldest interesting transaction |
+| `oldest_active` | BIGINT | OAT — oldest active transaction |
+| `oldest_snapshot` | BIGINT | OST — oldest snapshot transaction |
+| `next_transaction` | BIGINT | Next transaction number |
+| `oit_gap` | BIGINT | `next_transaction - oldest_transaction` |
+| `oat_gap` | BIGINT | `next_transaction - oldest_active` |
+| `attachments` | INTEGER | Number of connections visible to the current user |
+| `warnings` | LIST(VARCHAR) | Active warning codes (empty when everything is healthy) |
+
+Warning codes:
+
+| Code | Trigger condition |
+| --- | --- |
+| `oit_gap_high` | `oit_gap > 1,000,000` |
+| `oat_gap_high` | `oat_gap > 1,000,000` |
+| `sweep_disabled` | `sweep_interval = 0` |
+| `forced_writes_off` | `forced_writes = false` |
+| `charset_none` | `default_charset = 'NONE'` |
+| `mon_unavailable` | Real monitoring-query failure |
+
+The first four codes (`oit_gap_high`, `oat_gap_high`, `sweep_disabled`,
+`forced_writes_off`) are evaluated only when the monitoring read succeeds; if
+`mon_unavailable` fires, they are suppressed because their inputs are `NULL`.
+`charset_none` is always evaluated (it derives from `default_charset`, which is
+read independently of `MON$`).
+
+Notes:
+
+- **The `1,000,000` gap threshold is a conservative default signal**, not a
+  universal limit. It is a compile-time constant (`FB_HEALTH_GAP_THRESHOLD`);
+  adjusting it requires recompiling the extension.
+- **`attachments` is the count visible to the current user**: under limited
+  privilege the `MON$` views expose only the current user's own connections;
+  under monitoring privilege the full server count is returned. The value
+  faithfully reflects what the database reports for that credential — it is
+  not an error condition.
+- **`mon_unavailable` fires only on a real monitoring-query failure**: limited
+  visibility (fewer attachments visible) does not trigger this warning. When
+  the `MON$DATABASE`/`MON$ATTACHMENTS` query raises an exception,
+  `mon_unavailable` appears in `warnings`, the `MON$`-sourced columns are
+  `NULL`, and `engine_version` and `default_charset` remain populated.
+
+Usage:
+
+```sql
+-- Quick health check
+SELECT engine_version, oit_gap, oat_gap, attachments, warnings
+FROM firebird_health('fb');
+
+-- Full diagnostic row
+SELECT *
+FROM firebird_health('fb');
+```
+
 ## Level 5 - Session options
 
 ### `SET firebird_query_log_size = N`
