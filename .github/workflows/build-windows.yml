@@ -56,7 +56,7 @@ jobs:
 
       - name: Cache Firebird SDK
         id: cache-fb-sdk
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}\firebird-sdk
           key: firebird-sdk-${{ env.FIREBIRD_SDK_URL }}
