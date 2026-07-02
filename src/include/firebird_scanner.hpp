@@ -40,6 +40,14 @@ struct PkRangeClassification {
 // No I/O; safe to call in any context.
 PkRangeClassification ClassifyPkRange(const PrimaryKeyDescriptor &d);
 
+// Single source of truth for scan-parallelism sizing: given a PK's
+// [min_v, max_v] range, returns how many partitions the scanner will
+// actually use. Pure/numeric — no Firebird I/O, safe to call from
+// anywhere (firebird_profile_table's advisory recommendation and
+// firebird_explain_pushdown's planned_partitions column both call this
+// so they can never diverge from the scanner's real behavior).
+idx_t PickPartitionCount(int64_t min_v, int64_t max_v);
+
 struct FirebirdBindData : public TableFunctionData {
     FirebirdConnectionInfo conn_info;
     std::string table_name;
@@ -110,6 +118,18 @@ struct FirebirdBindData : public TableFunctionData {
     // the warning + influences pushdown safety (text-filter literals
     // are UTF-8 in DuckDB and may not round-trip against NONE bytes).
     bool db_charset_none = false;
+    // View-shape signals for the ROWS-pagination safety decision (see
+    // firebird_scanner.cpp's OpenNextPartitionCursor). Populated at bind
+    // time only when the target has no usable single-column numeric PK —
+    // computing this for every scan would be wasted I/O when the PK path
+    // already gives a safe, cheap ORDER BY column.
+    bool is_view = false;
+    // Meaningful only when is_view is true: no JOIN / GROUP BY / aggregate
+    // detected AND the source was inspectable. A simple pass-through view
+    // safely inherits its base table's RDB$DB_KEY (verified empirically);
+    // a heavy or uninspectable view does not (RDB$DB_KEY silently returns
+    // SQL NULL for a self-JOIN + GROUP BY view — not an error).
+    bool is_view_simple_for_pagination = false;
 };
 
 // --- discovery + probe helpers ---------------------------------------------

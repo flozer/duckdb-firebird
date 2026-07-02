@@ -187,3 +187,67 @@ query I
 SELECT COUNT(*) FROM firebird_last_query() WHERE remote_sql LIKE '%EMPLOYEE%';
 ----
 0
+
+# ---------------------------------------------------------------------------
+#  Smart Scan Planning Report additions: view_heavy, view_heavy_reasons,
+#  charset_pushdown_blocked, planned_partitions.
+# ---------------------------------------------------------------------------
+
+# Base table target: view_heavy is NULL (not a view), charset_pushdown_blocked
+# is false (EMPLOYEE has no CHARACTER SET NONE columns), planned_partitions
+# reflects the real PickPartitionCount for EMPLOYEE's tiny PK range (= 1).
+
+query TTT
+SELECT view_heavy, charset_pushdown_blocked, planned_partitions
+  FROM firebird_explain_pushdown(
+    'SELECT * FROM fb.main.EMPLOYEE WHERE EMP_ID IS NOT NULL');
+----
+NULL	false	1
+
+# Simple view target (no JOIN/GROUP BY/aggregate): view_heavy=false,
+# view_heavy_reasons is empty.
+
+query TT
+SELECT view_heavy, len(view_heavy_reasons)
+  FROM firebird_explain_pushdown(
+    'SELECT * FROM fb.main.V_ACTIVE_EMP WHERE EMP_ID IS NOT NULL');
+----
+false	0
+
+# Filterless simple view target (V_ALL_EMP: `SELECT EMP_ID, EMP_NAME FROM
+# EMPLOYEE`, no WHERE/JOIN/GROUP BY/aggregate in its OWN definition):
+# view_heavy=false (not heavy), but view_heavy_reasons is NON-empty — the
+# "no WHERE filter" note is independent of the heaviness flags. This is
+# the exact case the function manuals call out; without this test the
+# "reasons can be non-empty while view_heavy=false" claim was undertested.
+
+query TT
+SELECT view_heavy, list_contains(view_heavy_reasons,
+       'view has no WHERE filter in its definition')
+  FROM firebird_explain_pushdown('SELECT * FROM fb.main.V_ALL_EMP');
+----
+false	true
+
+# Heavy view target (self-JOIN + GROUP BY): view_heavy=true with reasons.
+
+query T
+SELECT view_heavy FROM firebird_explain_pushdown(
+    'SELECT * FROM fb.main.V_DEPT_HEADCOUNT');
+----
+true
+
+query T
+SELECT len(view_heavy_reasons) > 0 FROM firebird_explain_pushdown(
+    'SELECT * FROM fb.main.V_DEPT_HEADCOUNT');
+----
+true
+
+# charset_pushdown_blocked=true: fbn.main.TXT.LABEL is CHARACTER SET NONE
+# (already ATTACHed above as `fbn`), and the NOT IN filter on it is the same
+# NONE-gated complex filter exercised by the Task 6 cases above.
+
+query I
+SELECT charset_pushdown_blocked FROM firebird_explain_pushdown(
+    'SELECT * FROM fbn.main.TXT WHERE LABEL NOT IN (''a'',''b'')');
+----
+true

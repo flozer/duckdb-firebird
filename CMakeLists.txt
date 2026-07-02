@@ -29,6 +29,7 @@ set(EXTENSION_SOURCES
     src/firebird_health.cpp
     src/firebird_profile_table.cpp
     src/firebird_index_profile.cpp
+    src/firebird_view_analysis.cpp
     src/firebird_metadata_functions.cpp
     src/firebird_explain_pushdown.cpp
 )

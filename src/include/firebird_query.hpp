@@ -55,7 +55,15 @@ public:
                         const std::string               &extra_predicate = {},
                         const std::vector<FirebirdColumnDesc> *column_descs = nullptr,
                         NoneEncoding                     none_encoding = NoneEncoding::WIN1252,
-                        optional_idx                     offset = optional_idx());
+                        optional_idx                     offset = optional_idx(),
+                        // Server-side ORDER BY column emitted alongside a
+                        // ROWS clause, required whenever `limit` is valid.
+                        // A ROWS clause without ORDER BY is non-deterministic
+                        // across pages. Callers that determined no safe
+                        // order exists must pass an invalid `limit` instead
+                        // of an empty string here (see firebird_scanner.cpp's
+                        // pagination decision order).
+                        const std::string               &pagination_order_by = {});
 };
 
 } // namespace duckdb
