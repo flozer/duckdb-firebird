@@ -315,5 +315,69 @@ WHERE blob LIKE '%SYSDBA%'
 ----
 0
 
+# ---------------------------------------------------------------------------
+#  Structured alerts (v0.8): alerts is 1:1 with warnings, carries a stable
+#  code + LOW/MEDIUM/HIGH severity, message identical to the warnings text.
+# ---------------------------------------------------------------------------
+
+# alerts column exists and is LIST(STRUCT(code,severity,message)).
+query T
+SELECT typeof(alerts) FROM firebird_profile_table('fb.main.V_ACTIVE_EMP');
+----
+STRUCT(code VARCHAR, severity VARCHAR, message VARCHAR)[]
+
+# Invariant: same length as warnings.
+query T
+SELECT len(alerts) = len(warnings) FROM firebird_profile_table('fb.main.V_ACTIVE_EMP');
+----
+true
+
+# Invariant: alerts[i].message == warnings[i], element-by-element (zipped UNNEST).
+query I
+SELECT COUNT(*) FROM (
+  SELECT UNNEST(warnings) AS w,
+         UNNEST(list_transform(alerts, a -> a.message)) AS m
+  FROM firebird_profile_table('fb.main.V_ACTIVE_EMP')
+) t
+WHERE w IS DISTINCT FROM m;
+----
+0
+
+# Severity domain: every alert severity is LOW/MEDIUM/HIGH.
+query I
+SELECT COUNT(*) FROM (
+  SELECT UNNEST(alerts) AS a FROM firebird_profile_table('fb.main.V_ACTIVE_EMP')
+) t
+WHERE a.severity NOT IN ('LOW', 'MEDIUM', 'HIGH');
+----
+0
+
+# Deterministic HIGH alert: a view raises view_no_scan_lever / HIGH.
+query TT
+SELECT a.code, a.severity FROM (
+  SELECT UNNEST(alerts) AS a FROM firebird_profile_table('fb.main.V_ACTIVE_EMP')
+) t
+WHERE a.code = 'view_no_scan_lever';
+----
+view_no_scan_lever	HIGH
+
+# Deterministic LOW alert: a composite PK raises composite_pk_serial / LOW.
+query TT
+SELECT a.code, a.severity FROM (
+  SELECT UNNEST(alerts) AS a FROM firebird_profile_table('fb.main.TPK_COMPOSITE')
+) t
+WHERE a.code = 'composite_pk_serial';
+----
+composite_pk_serial	LOW
+
+# A table with a single numeric PK raises no view/no-PK HIGH alerts.
+query I
+SELECT COUNT(*) FROM (
+  SELECT UNNEST(alerts) AS a FROM firebird_profile_table('fb.main.EMPLOYEE')
+) t
+WHERE a.code IN ('no_primary_key', 'view_no_scan_lever');
+----
+0
+
 statement ok
 DETACH fb;

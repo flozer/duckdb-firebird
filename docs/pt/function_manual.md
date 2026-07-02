@@ -754,7 +754,8 @@ Colunas de saida:
 - `filter_candidates`: colunas indexadas cujo tipo recebe pushdown barato.
 - `full_scan_risk`: `LOW`, `MEDIUM` ou `HIGH`.
 - `recommended_partitions`: valor `partitions=N` apenas como recomendacao.
-- `warnings`: lista de ressalvas explicitas.
+- `warnings`: lista de ressalvas explicitas (strings legíveis por humanos).
+- `alerts`: forma estruturada de `warnings`: `LIST(STRUCT(code VARCHAR, severity VARCHAR, message VARCHAR))`.
 
 Como funciona internamente:
 
@@ -861,6 +862,43 @@ FROM firebird_profile_table('fb.main.TABENTRADASAIDA');
   ser lida, emite `view definition not inspected`.
 - Nome qualificado nao suporta identificadores com aspas/pontos embutidos
   nesta versao.
+
+#### Coluna `alerts` — catalogo estruturado de avisos
+
+`alerts` e a forma legivel por maquina de `warnings`. As duas colunas sao
+produzidas a partir da mesma lista interna de alertas, portanto sao
+**1:1 e na mesma ordem**: `alerts[i].message == warnings[i]` para todo indice `i`.
+
+Cada elemento de `alerts` e um `STRUCT(code VARCHAR, severity VARCHAR, message VARCHAR)`:
+
+- `code` — identificador estavel (veja catalogo abaixo); contrato de API publica.
+- `severity` — um dos valores `LOW`, `MEDIUM` ou `HIGH`, reutilizando o
+  vocabulario de `full_scan_risk`: `LOW` = consultivo/informativo, `MEDIUM` =
+  degradado mas funcional, `HIGH` = risco operacional real.
+- `message` — a mesma string legivel por humanos que aparece em `warnings`.
+
+**Contrato de codigos estaveis:** os codigos de alerta sao API publica. Uma vez
+publicado, um codigo nunca e reutilizado para uma condicao diferente e seu
+significado nunca muda. Novas condicoes sempre recebem novos codigos.
+
+Catalogo de codigos de alerta:
+
+| Codigo | Severidade | Significado |
+| --- | --- | --- |
+| `view_no_scan_lever` | HIGH | Objeto e uma VIEW: sem PK/indice/alavanca de particao |
+| `view_definition_not_inspected` | MEDIUM | Fonte da view ilegivel; forma desconhecida |
+| `view_contains_join` | HIGH | Definicao da view contem JOIN |
+| `view_contains_aggregation` | HIGH | Definicao da view tem GROUP BY ou funcao de agregacao |
+| `view_no_filter` | MEDIUM | Definicao da view nao tem filtro WHERE |
+| `partition_advisory` | LOW | Particoes recomendadas (derivadas da faixa de PK) sao consultivas |
+| `server_parallelism_caveat` | LOW | Caveat de paralelismo server-side (Firebird 5) quando `partitions > 1` |
+| `pk_range_small_serial` | LOW | Faixa MIN/MAX da PK e pequena — scan serial recomendado |
+| `no_primary_key` | HIGH | Sem chave primaria — apenas full scan, nao particionavel por faixa |
+| `composite_pk_serial` | LOW | PK composta — apenas scan serial |
+| `numeric_pk_no_range_serial` | LOW | PK numerica de coluna unica sem faixa MIN/MAX utilizavel — scan serial |
+| `non_numeric_pk_serial` | LOW | PK nao-numerica de coluna unica — apenas scan serial |
+| `no_indexed_filter_columns` | MEDIUM | Nenhuma coluna de filtro indexada barata encontrada |
+| `none_charset_text_columns` | MEDIUM | Uma ou mais colunas texto usam CHARACTER SET NONE |
 
 ### `firebird_last_query()`
 
