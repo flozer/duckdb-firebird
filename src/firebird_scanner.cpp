@@ -562,28 +562,81 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
                                    bind->column_names, bind->column_types);
     }
 
-    // View-shape lookup for the ROWS-pagination safety decision. Only
-    // worth the extra round trip when there is no single-column numeric
-    // PK to fall back on for ordering — that path is already safe and
-    // cheap, so we don't pay this cost for the common case. Also gated on
-    // `paging`: is_view/is_view_simple_for_pagination are consumed ONLY by
-    // OpenNextPartitionCursor's pagination decision below, so a plain
-    // (non-paginated) scan of a PK-less table/view must not pay this extra
-    // round trip for a value it will never use.
-    if (!bind->pk && paging) {
-        std::string upper = bind->table_name;
-        for (auto &c : upper) {
-            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-        }
+    // View-type check: cheap, single indexed RDB$RELATIONS lookup — now
+    // run UNCONDITIONALLY (not gated on paging) because it also drives
+    // the type/descriptor reconciliation below (#33), which matters for
+    // ANY view scan, not just paginated ones. The (much more expensive)
+    // AnalyzeViewSource text-parse below stays gated to the pagination
+    // case only — it is not needed for the reconciliation fix.
+    std::string upper_for_view_check = bind->table_name;
+    for (auto &c : upper_for_view_check) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    {
         std::string object_type;
-        if (LookupObjectType(conn, upper, object_type)) {
+        if (LookupObjectType(conn, upper_for_view_check, object_type)) {
             bind->is_view = (object_type == "VIEW");
-            if (bind->is_view) {
-                ViewAnalysis va = AnalyzeViewSource(conn, upper);
-                bind->is_view_simple_for_pagination =
-                    va.inspected && !va.has_join && !va.has_group_by &&
-                    !va.has_aggregate;
+        }
+    }
+
+    // Pagination-safety view-shape analysis (Smart Scan Planning Report) —
+    // still gated to the paginated, PK-less case only; expensive
+    // (RDB$VIEW_SOURCE text parse), and its result is consumed ONLY by
+    // OpenNextPartitionCursor's pagination decision.
+    if (bind->is_view && !bind->pk && paging) {
+        ViewAnalysis va = AnalyzeViewSource(conn, upper_for_view_check);
+        bind->is_view_simple_for_pagination =
+            va.inspected && !va.has_join && !va.has_group_by &&
+            !va.has_aggregate;
+    }
+
+    // Type/descriptor reconciliation (#33): a view's column metadata is
+    // frozen in RDB$FIELDS at CREATE VIEW time and can legitimately
+    // disagree with what Firebird's live DSQL compiler produces for the
+    // identical expression today (confirmed root cause: SUM() over a
+    // NUMERIC(10,2) column promotes to BIGINT-backed NUMERIC(18,2) at
+    // runtime, while the view's frozen catalog metadata claims
+    // INT128-backed DECIMAL(38,2) — allocating the DuckDB Vector from the
+    // stale wide type while the fetch writes the narrow real type crashes
+    // DuckDB's own Vector::VerifyVectorType assertion). Reconcile BOTH
+    // column_types (drives Vector allocation via return_types below) AND
+    // column_descs (drives FirebirdAppendValue's fetch-time accessor
+    // width) from a live, execute-free Prepare against the exact
+    // projected column list — never from the catalog alone. Only the
+    // character_set_id stays catalog-sourced (XSQLDA cannot supply it for
+    // BLOB columns; LoadTableSchema already reads it from RDB$FIELDS).
+    //
+    // Best-effort: if the live describe fails for any reason, keep the
+    // catalog-derived types (today's behavior, unchanged) rather than
+    // hard-failing the bind — no worse than the pre-fix baseline.
+    if (bind->is_view) {
+        try {
+            std::ostringstream probe_sql;
+            probe_sql << "SELECT ";
+            for (idx_t i = 0; i < bind->column_names.size(); ++i) {
+                if (i) probe_sql << ", ";
+                probe_sql << QuoteIdent(bind->column_names[i]);
             }
+            probe_sql << " FROM " << QuoteIdent(bind->table_name);
+
+            FirebirdStatement probe(conn, probe_sql.str(),
+                                    FirebirdStatement::PrepareOnlyTag{});
+            const auto &live_cols = probe.columns();
+            if (live_cols.size() == bind->column_descs.size()) {
+                for (idx_t i = 0; i < live_cols.size(); ++i) {
+                    // Preserve the catalog-sourced character_set_id —
+                    // XSQLDA cannot supply it for BLOB columns (that slot
+                    // carries the blob subtype instead).
+                    FirebirdColumnDesc reconciled = live_cols[i];
+                    reconciled.character_set_id =
+                        bind->column_descs[i].character_set_id;
+                    bind->column_descs[i] = reconciled;
+                    bind->column_types[i] = FirebirdToDuckDBType(reconciled);
+                }
+            }
+        } catch (...) {
+            // Live describe failed — fall back to the catalog-derived
+            // types already in bind->column_types/column_descs.
         }
     }
 
