@@ -623,6 +623,14 @@ FirebirdStatement::FirebirdStatement(FirebirdConnection &conn,
     FirebirdConnection::Check(status, "isc_dsql_execute (with params):\n" + sql);
 }
 
+FirebirdStatement::FirebirdStatement(FirebirdConnection &conn,
+                                     const std::string &sql,
+                                     PrepareOnlyTag)
+    : conn_(conn) {
+    Prepare(sql);
+    // Deliberately no isc_dsql_execute call — describe-only.
+}
+
 FirebirdStatement::~FirebirdStatement() {
     if (stmt_) {
         ISC_STATUS s[20] = {};
