@@ -20,7 +20,8 @@ namespace duckdb {
 // exactly ONE synthetic row instead of zero rows, so the "no indexes at
 // all" signal is never silently lost to the per-index grain:
 //   - index_name IS NULL marks that synthetic row (never a real index)
-//   - every other index-scoped column is NULL on that row
+//   - columns is an empty list []; every other index-scoped column is a
+//     typed SQL NULL on that row
 //   - alerts carries {code: 'no_indexes_on_table', severity: 'HIGH', ...}
 //
 // Columns:

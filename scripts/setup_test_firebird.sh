@@ -144,7 +144,8 @@ COMMIT;
 -- Apostrophe fixture — TQUOTES exercises the prepared-statement bind path
 -- (firebird_bind_params.test): string filters must parametrise so embedded
 -- apostrophes can't break the SQL. Mirrors scripts/smoke_fixture.sql; also
--- counted by firebird_metadata.test (11 tables / 33 columns) and ordered by
+-- counted by firebird_metadata.test (13 tables / 39 columns, after the
+-- TIDX_INACTIVE / TNO_INDEX fixtures below) and ordered by
 -- firebird_dbt_sources.test (DEPT -> EMPLOYEE -> FILE_STORAGE -> TCHILD ->
 -- TPK_COMPOSITE -> TQUOTES -> V_ACTIVE_EMP).
 CREATE TABLE TQUOTES (
