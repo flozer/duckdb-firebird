@@ -68,6 +68,35 @@ Supported named parameters include:
 Use this when you need one direct table scan without attaching the whole
 database catalog.
 
+#### Pagination determinism (`RDB$DB_KEY`)
+
+When paginating (`row_limit`/`row_offset`) against a table or view with no
+usable single-column numeric primary key, `firebird_scan` orders by
+`RDB$DB_KEY` so that multiple pages read from the same query see a stable,
+deterministic boundary. (Previously `ROWS` was pushed with no `ORDER BY` at
+all, so page boundaries were not deterministic — this was a bug, now fixed.)
+
+`RDB$DB_KEY` is a **physical row-pagination stabilizer valid only for the
+duration of one scan/transaction**. It is NOT a business ordering contract,
+is NOT stable across transactions or after row updates, and is NEVER used
+for range partitioning, incremental/watermark logic, or recommended as a
+key anywhere else in this extension.
+
+When a usable single-column numeric primary key exists, it is used for the
+`ORDER BY` instead of `RDB$DB_KEY` — preferred, since it is a real,
+meaningful column rather than a physical stabilizer.
+
+For a heavy view (one with a JOIN, `GROUP BY`, or an aggregate function) or
+a view whose definition could not be read, `RDB$DB_KEY` is unsafe — Firebird
+silently returns it as SQL `NULL` for such views rather than erroring, which
+is why this decision is made statically, at bind time from the view's
+shape, rather than detected at runtime. In that case `firebird_scan` does
+not push `ROWS` to Firebird at all; it applies `row_limit`/`row_offset`
+locally instead, so the requested slice is still correctly honored, just
+without the server-side pushdown optimization. See `firebird_explain_pushdown`'s
+`view_heavy` / `view_heavy_reasons` columns below to check this ahead of
+time.
+
 ## Level 2 - Catalog discovery
 
 ### `firebird_tables(connection_string)`
@@ -365,6 +394,12 @@ how `firebird_scan` runs; nothing is parallelized automatically and there is
 no promise of a performance gain. It only tells you what `partitions=N` you
 *could* try.
 
+As of this version, `recommended_partitions` is computed by the exact same
+`PickPartitionCount` function that `firebird_scan` itself calls at scan
+time. Previously these were two separate, differently-calibrated formulas,
+so a profile's recommendation and a real scan's chosen partition count
+could disagree; they no longer can.
+
 It is derived only from the single-column numeric primary key's `MIN`/`MAX`
 range width (no row count, no `COUNT(*)`, no full scan):
 
@@ -578,7 +613,7 @@ Rejected input (raises an error):
 - Direct `firebird_scan(...)` calls — use the `ATTACH` alias form instead.
 - `WITH ... DELETE` or other non-SELECT CTE statements.
 
-#### Output columns (14)
+#### Output columns (18)
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -596,6 +631,10 @@ Rejected input (raises an error):
 | `pk_range_column` | VARCHAR | Name of that PK column, or `NULL` when not eligible (e.g. composite or non-numeric PK) |
 | `pk_range_reason` | VARCHAR | One of four normalized values: `single numeric PK`, `non-numeric PK`, `composite PK`, `no primary key` |
 | `scan_strategy` | VARCHAR | `pk-range-partitionable` when `pk_range_eligible` is true; `serial` otherwise |
+| `view_heavy` | BOOLEAN | `NULL` when the scan target is a base table; for a view, `true` if it has a JOIN, `GROUP BY`, an aggregate function, or an unreadable/uninspectable definition, `false` for a simple pass-through view |
+| `view_heavy_reasons` | VARCHAR[] | Why `view_heavy` is `true` (e.g. `view contains a JOIN`, `view contains aggregation`, `view definition not inspected`, or a reason noting `ROWS` pagination was skipped for this view); empty when `view_heavy` is `false` or `NULL` |
+| `charset_pushdown_blocked` | BOOLEAN | `true` when any entry in `not_pushed_reasons` is `NONE_CHARSET` — a pure synthesis of that already-existing signal, no new detection |
+| `planned_partitions` | BIGINT | The exact partition count `firebird_scan` would use for this table's PK range, computed by the same `PickPartitionCount` function the scanner itself calls; `NULL` when `pk_range_eligible` is `false` |
 
 #### Invariants
 
@@ -607,6 +646,22 @@ Rejected input (raises an error):
   `LIMIT` — only the `row_limit=` / `row_offset=` named parameters of the
   scanner are considered for pushdown.
 - `pk_range_column` is `NULL` whenever `pk_range_eligible` is `false`.
+- `planned_partitions` is `NULL` whenever `pk_range_eligible` is `false`.
+
+#### Notes on `view_heavy`, `charset_pushdown_blocked`, and `planned_partitions`
+
+- `planned_partitions` is the exact value `firebird_scan` would use for this
+  table's PK range — computed by the same `PickPartitionCount` function, not
+  a separate estimate.
+- `charset_pushdown_blocked` is a boolean synthesis of `not_pushed_reasons`
+  containing `NONE_CHARSET` — a convenience flag over an already-existing
+  signal, not new detection.
+- `view_heavy` / `view_heavy_reasons`: when the scan target is a view with a
+  JOIN, `GROUP BY`, aggregate function, or an unreadable definition,
+  `view_heavy = true` and `view_heavy_reasons` explains why. This is also
+  why `remote_sql` may show no `ROWS` clause even when `row_limit`/
+  `row_offset` were requested against that view — see the `RDB$DB_KEY` note
+  in the `firebird_scan` section above.
 
 #### Usage example
 
