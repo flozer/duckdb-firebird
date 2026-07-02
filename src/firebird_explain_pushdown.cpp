@@ -305,6 +305,15 @@ static void WalkPlan(LogicalOperator &op,
             // Capture-only Build — serial WHERE, no PK bounds, no extra
             // predicate string (extra_predicates are appended below as
             // pushed_filters telemetry, exactly as the scanner does).
+            //
+            // pagination_order_by defaults to "RDB$DB_KEY" defensively: today
+            // real_limit is provably never valid here (this function rejects
+            // direct firebird_scan(...) input and limit_pushdown is
+            // unsupported, so no named-param limit can reach this bind), so
+            // Build's internal ORDER-BY-with-ROWS invariant never actually
+            // exercises this value. If that ever changes, a display-only
+            // RDB$DB_KEY default is strictly safer than relying solely on a
+            // release-compiled-out D_ASSERT to catch the gap.
             auto result = FirebirdQueryBuilder::Build(
                 bd.table_name,
                 bd.column_names,
@@ -315,7 +324,8 @@ static void WalkPlan(LogicalOperator &op,
                 /*extra_predicate=*/"",
                 &bd.column_descs,
                 bd.none_encoding,
-                real_offset);
+                real_offset,
+                /*pagination_order_by=*/"RDB$DB_KEY");
 
             ExplainRow r;
             r.scan_ordinal = next_ordinal++;
