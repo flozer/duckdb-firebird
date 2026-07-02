@@ -120,10 +120,59 @@ partition cursor:
    pass-through view inherits the base table's `RDB$DB_KEY` (tested against
    `V_ACTIVE_EMP`/`V_ALL_EMP`).
 4. **No such PK, target is a *heavy* view** (join/aggregate present, or the
-   source could not be inspected): **do not push `ROWS`/`LIMIT`/`OFFSET` at
-   all** for this scan. DuckDB applies `LIMIT`/`OFFSET` client-side against
-   the full remote fetch. Correct, just less efficient for a case that is
-   already flagged elsewhere.
+   source could not be inspected): **do not push `ROWS` to Firebird** for
+   this scan.
+
+### Critical correctness distinction: two different limit mechanisms
+
+`firebird_scan` does **not** register `limit_pushdown` with DuckDB
+(confirmed: `firebird_scanner.cpp:1510-1527` sets `projection_pushdown` /
+`filter_pushdown` / `supports_pushdown_type`, but no limit-pushdown field).
+This means there are two independent mechanisms, and case 4 must treat them
+differently:
+
+- **A plain SQL `LIMIT`/`OFFSET` clause** (`SELECT * FROM
+  firebird_scan(...) LIMIT 10`) is never pushed into the scanner at all
+  today — DuckDB's own `LIMIT` operator trims rows *after* the table
+  function returns them, unconditionally, regardless of this change. Safe,
+  unaffected either way.
+- **The scanner's own named parameters** `row_limit`/`row_offset`
+  (`firebird_scanner.cpp:456-464,1504-1505`) are the ONLY way
+  `bind.limit_override`/`bind.offset_override` get populated, and today
+  the ONLY mechanism enforcing that slice is the `ROWS`/`ROWS m TO n`
+  clause pushed to Firebird (confirmed: `paging` forces `partitions=1`,
+  §4's `Build()` call is the sole consumer of `limit_override`/
+  `offset_override`, `firebird_scanner.cpp:502-517,696-706`). **If case 4
+  simply stops emitting `ROWS`, `firebird_scan(..., row_limit:=10)`
+  against a heavy view would silently return every row instead of 10 — a
+  correctness regression, not a performance one.**
+
+**Resolution (Fernando's explicit preference): local slicing in the
+scanner.** When case 4 applies AND `row_limit`/`row_offset` were requested,
+`Build()` is called with `limit_override`/`offset_override` cleared (no
+`ROWS` clause emitted — the full result streams back), and
+`FirebirdScanFunction`'s fetch loop (`firebird_scanner.cpp:876-895`)
+performs the slice itself:
+
+- A new bind-time flag (e.g. `bind.local_slice_required`) is set only for
+  this case (heavy view + no safe order + paging requested).
+- Two new `FirebirdLocalState` counters (e.g. `rows_skipped`,
+  `rows_emitted`), initialized to 0, persist across
+  `FirebirdScanFunction` calls for the life of the scan (it is already a
+  `LocalTableFunctionState`, `firebird_scanner.cpp:78-107`).
+- In the fetch loop, right after `local.cursor->Fetch()` succeeds and
+  before appending the row into `local.fetch_chunk`: if
+  `rows_skipped < offset_override`, increment `rows_skipped` and skip this
+  row (do not append, do not advance `row`); else if
+  `rows_emitted >= limit_override`, stop pulling entirely (`local.cursor
+  .reset(); break;` out of the fetch loop — this scan is done); else
+  append normally and increment `rows_emitted`.
+- When `local_slice_required` is false (every other case), this logic is
+  fully inert — zero behavior change to the existing fast path.
+
+Read-only, correct, and only less efficient than server-side `ROWS` in the
+one narrow case (paging against a heavy, unordered view) where server-side
+pagination was never safe to begin with.
 
 Case 4 is a **static, bind-time** decision, not a runtime probe-and-catch:
 empirically, `SELECT RDB$DB_KEY FROM V_DEPT_HEADCOUNT` (self-JOIN +
@@ -184,13 +233,25 @@ PK — a call to `AnalyzeViewSource`, storing `is_view` and `is_view_simple`
 - New case: a simple view (`V_ACTIVE_EMP`) paginated with `ROWS`, asserting
   `remote_sql` DOES contain `ORDER BY RDB$DB_KEY` and a `ROWS` clause (case
   3 exercised).
+- **Critical correctness case**: `firebird_scan('fb.main.V_DEPT_HEADCOUNT',
+  row_limit := N, row_offset := M)` (the named-parameter path, NOT a plain
+  SQL `LIMIT`) against the heavy view, with N/M chosen against the fixture's
+  known row count. Assert the returned row count is exactly N (or the
+  remainder if fewer rows exist past the offset) — proving the local-slice
+  fallback in `FirebirdScanFunction` actually bounds the result, not just
+  that `remote_sql` omits `ROWS`. This is the regression this fix exists to
+  prevent: without local slicing, this exact call would silently return
+  every row in the view instead of N.
 
 ## Files
 
 - `src/firebird_scanner.hpp` / `.cpp` — un-`static` `PickPartitionCount`;
   `FirebirdScanBind` gains view-shape lookup (calling the new shared
-  header); `FirebirdBindData` gains `is_view`/`is_view_simple`-equivalent
-  fields.
+  header); `FirebirdBindData` gains `is_view`/`is_view_simple`/
+  `local_slice_required`-equivalent fields; `FirebirdLocalState` gains
+  `rows_skipped`/`rows_emitted` counters; `FirebirdScanFunction`'s fetch
+  loop gains the skip/cap logic (§4), inert when
+  `local_slice_required=false`.
 - `src/firebird_query.hpp` / `.cpp` — `FirebirdQueryBuilder::Build` gains an
   order-by/pagination-eligibility parameter; ROWS emission gated by the
   decision order in §4.
