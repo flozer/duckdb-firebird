@@ -13,6 +13,7 @@
 #include "firebird_explain_pushdown.hpp"
 #include "firebird_scanner.hpp"
 #include "firebird_query.hpp"
+#include "firebird_view_analysis.hpp" // LookupObjectType, ViewAnalysis, AnalyzeViewSource
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -82,6 +83,12 @@ struct ExplainRow {
     std::string  pk_range_column;
     std::string  pk_range_reason;
     std::string  scan_strategy;
+    bool         view_heavy_valid = false;
+    bool         view_heavy       = false;
+    std::vector<std::string> view_heavy_reasons;
+    bool         charset_pushdown_blocked = false;
+    bool         planned_partitions_valid = false;
+    int64_t      planned_partitions       = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -207,7 +214,8 @@ ExplainPushdownBind(ClientContext &,
             "instead.");
     }
 
-    // --- Schema: 14 columns ---
+    // --- Schema: 18 columns (14 original + 4 Task 3 additions: view_heavy,
+    // view_heavy_reasons, charset_pushdown_blocked, planned_partitions) ---
     names = {
         "scan_ordinal",
         "table_name",
@@ -223,6 +231,10 @@ ExplainPushdownBind(ClientContext &,
         "pk_range_column",
         "pk_range_reason",
         "scan_strategy",
+        "view_heavy",
+        "view_heavy_reasons",
+        "charset_pushdown_blocked",
+        "planned_partitions",
     };
     return_types = {
         LogicalType::BIGINT,
@@ -239,6 +251,10 @@ ExplainPushdownBind(ClientContext &,
         LogicalType::VARCHAR,
         LogicalType::VARCHAR,
         LogicalType::VARCHAR,
+        LogicalType::BOOLEAN,
+        LogicalType::LIST(LogicalType::VARCHAR),
+        LogicalType::BOOLEAN,
+        LogicalType::BIGINT,
     };
 
     auto data = make_uniq<ExplainPushdownBindData>();
@@ -385,6 +401,76 @@ static void WalkPlan(LogicalOperator &op,
                         : "serial";
             }
 
+            // planned_partitions: the REAL count PickPartitionCount would
+            // pick for this table's PK range, zero additional I/O — bd.pk
+            // is already populated (lazily, memoized) by
+            // FirebirdTableEntry::GetScanFunction at ATTACH-bind time, the
+            // same round trip a real scan already pays.
+            if (bd.pk) {
+                r.planned_partitions_valid = true;
+                r.planned_partitions = static_cast<int64_t>(
+                    PickPartitionCount(bd.pk->min_value, bd.pk->max_value));
+            }
+
+            // charset_pushdown_blocked: pure synthesis of the already-
+            // computed not_pushed_reasons — no new detection logic.
+            r.charset_pushdown_blocked =
+                std::find(r.not_pushed_reasons.begin(),
+                          r.not_pushed_reasons.end(),
+                          "NONE_CHARSET") != r.not_pushed_reasons.end();
+
+            // view_heavy / view_heavy_reasons: this is the one genuinely
+            // new I/O in this function — reading RDB$RELATIONS /
+            // RDB$VIEW_SOURCE requires a live connection, which capture-
+            // only pushdown telemetry never needed before. Opened
+            // directly from the cached conn_info (same pattern
+            // FirebirdScanBind itself uses), scoped to this one lookup.
+            //
+            // Semantics (design doc §3): view_heavy is NULL for a base
+            // table (view_heavy_valid stays false — not just "false for a
+            // view that happens to be light"), and true/false only among
+            // views, classifying whether the view is *heavy* (join or
+            // aggregation) rather than merely "is this a view". A view
+            // whose source can't be inspected is conservatively treated
+            // as heavy, matching firebird_profile_table's existing
+            // "treat as potentially heavy" stance for the same signal.
+            {
+                FirebirdConnection conn(bd.conn_info);
+                std::string upper = bd.table_name;
+                for (auto &c : upper) {
+                    c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                }
+                std::string object_type;
+                if (LookupObjectType(conn, upper, object_type) &&
+                    object_type == "VIEW") {
+                    r.view_heavy_valid = true;
+                    ViewAnalysis va = AnalyzeViewSource(conn, upper);
+                    if (!va.inspected) {
+                        r.view_heavy = true;
+                        r.view_heavy_reasons.push_back(
+                            "view definition not inspected "
+                            "(RDB$VIEW_SOURCE unavailable or unreadable)");
+                    } else {
+                        r.view_heavy = va.has_join || va.has_group_by ||
+                                       va.has_aggregate;
+                        if (va.has_join) {
+                            r.view_heavy_reasons.push_back(
+                                "view contains a JOIN");
+                        }
+                        if (va.has_group_by || va.has_aggregate) {
+                            r.view_heavy_reasons.push_back(
+                                "view contains aggregation "
+                                "(GROUP BY or aggregate functions)");
+                        }
+                        if (!va.has_where) {
+                            r.view_heavy_reasons.push_back(
+                                "view has no WHERE filter in its "
+                                "definition");
+                        }
+                    }
+                }
+            }
+
             rows.push_back(std::move(r));
         }
     }
@@ -460,6 +546,14 @@ static void ExplainPushdownFunction(ClientContext &,
             : Value(r.pk_range_column));
         output.data[12].SetValue(row, Value(r.pk_range_reason));
         output.data[13].SetValue(row, Value(r.scan_strategy));
+        output.data[14].SetValue(row, r.view_heavy_valid
+            ? Value::BOOLEAN(r.view_heavy)
+            : Value(LogicalType::BOOLEAN));
+        output.data[15].SetValue(row, make_varchar_list(r.view_heavy_reasons));
+        output.data[16].SetValue(row, Value::BOOLEAN(r.charset_pushdown_blocked));
+        output.data[17].SetValue(row, r.planned_partitions_valid
+            ? Value::BIGINT(r.planned_partitions)
+            : Value(LogicalType::BIGINT));
         ++row;
     }
     output.SetCardinality(row);
