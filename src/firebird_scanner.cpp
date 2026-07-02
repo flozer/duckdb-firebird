@@ -841,8 +841,14 @@ static bool OpenNextPartitionCursor(ClientContext &ctx,
             rec.residual_filters.push_back("complex_filter[none_gated]");
             rec.not_pushed_reasons.push_back(reason);
         }
-        rec.limit_pushed  = bind.limit_override;
-        rec.offset_pushed = bind.offset_override;
+        // Use limit_to_push/offset_to_push, not bind.limit_override/
+        // offset_override directly: in the local-slice case (heavy view,
+        // no safe ORDER BY) those are reset to invalid above and the
+        // requested slice is enforced client-side instead — telemetry
+        // must reflect what was actually pushed to Firebird, not what
+        // was merely requested.
+        rec.limit_pushed  = limit_to_push;
+        rec.offset_pushed = offset_to_push;
         rec.partitions    = static_cast<int32_t>(gstate.partitions.size());
         rec.parallel_scan = rec.partitions > 1;
         rec.captured_at   = Timestamp::GetCurrentTimestamp();
