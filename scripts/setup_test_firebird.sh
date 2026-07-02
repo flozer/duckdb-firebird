@@ -144,7 +144,8 @@ COMMIT;
 -- Apostrophe fixture — TQUOTES exercises the prepared-statement bind path
 -- (firebird_bind_params.test): string filters must parametrise so embedded
 -- apostrophes can't break the SQL. Mirrors scripts/smoke_fixture.sql; also
--- counted by firebird_metadata.test (11 tables / 33 columns) and ordered by
+-- counted by firebird_metadata.test (13 tables / 39 columns, after the
+-- TIDX_INACTIVE / TNO_INDEX fixtures below) and ordered by
 -- firebird_dbt_sources.test (DEPT -> EMPLOYEE -> FILE_STORAGE -> TCHILD ->
 -- TPK_COMPOSITE -> TQUOTES -> V_ACTIVE_EMP).
 CREATE TABLE TQUOTES (
@@ -212,6 +213,33 @@ CREATE TABLE TCHILD (
     CONSTRAINT FK_TCHILD_TPK FOREIGN KEY (PARENT_A, PARENT_B)
         REFERENCES TPK_COMPOSITE (A, B) ON UPDATE NO ACTION ON DELETE CASCADE
 );
+COMMIT;
+
+-- Zero-index fixture: no PK, no unique constraint, no FK, no explicit
+-- index. Exercises firebird_index_profile()'s synthetic "no indexes" row,
+-- the no_indexes_on_table alert, and unindexed_filter_candidates.
+CREATE TABLE TNO_INDEX (
+    CODE  VARCHAR(10),
+    QTY   INTEGER,
+    NOTE  VARCHAR(20)
+);
+INSERT INTO TNO_INDEX VALUES ('A1', 10, 'first');
+INSERT INTO TNO_INDEX VALUES ('B2', 20, 'second');
+COMMIT;
+
+-- Inactive-index fixture: a PK (so this table is NOT a zero-index case)
+-- plus one secondary index later disabled. Exercises the index_inactive
+-- alert, and confirms unindexed_filter_candidates excludes a column
+-- covered by an index even when that index is inactive.
+CREATE TABLE TIDX_INACTIVE (
+    ID    INTEGER NOT NULL PRIMARY KEY,
+    QTY   INTEGER,
+    NOTE  VARCHAR(20)
+);
+INSERT INTO TIDX_INACTIVE VALUES (1, 5, 'x');
+COMMIT;
+CREATE INDEX IDX_TIDX_INACTIVE_QTY ON TIDX_INACTIVE (QTY);
+ALTER INDEX IDX_TIDX_INACTIVE_QTY INACTIVE;
 COMMIT;
 EOF
 

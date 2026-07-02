@@ -151,7 +151,7 @@ query I
 SELECT (length(yaml) - length(replace(yaml, '- not_null', ''))) / length('- not_null')
   FROM t_dbt_yaml;
 ----
-4
+5.0
 
 # Composite PK: TPK_COMPOSITE must list A, B, LABEL and emit zero tests
 # blocks under its table.

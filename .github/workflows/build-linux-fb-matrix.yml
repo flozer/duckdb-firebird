@@ -148,6 +148,7 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_scan.test
           ./build/release/test/unittest test/sql/firebird_attach.test
           ./build/release/test/unittest test/sql/firebird_health.test
+          ./build/release/test/unittest test/sql/firebird_index_profile.test
 
       - name: FB4+ live type smoke (INT128 / DECIMAL(38) / TIMESTAMP_TZ)
         if: matrix.fb_major != '3'
