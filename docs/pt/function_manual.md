@@ -146,6 +146,21 @@ corretamente, apenas sem a otimizacao de pushdown server-side. Veja as
 colunas `view_heavy` / `view_heavy_reasons` de `firebird_explain_pushdown`
 mais abaixo para checar isso com antecedencia.
 
+#### Reconciliacao de tipo de coluna em views
+
+Quando o alvo do scan e uma view, os tipos de coluna sao reconciliados
+contra o layout de colunas descrito em tempo real pelo Firebird, em vez de
+confiar apenas nos metadados de catalogo da view (tanto o tipo DuckDB da
+coluna quanto o descritor interno de fetch sao corrigidos juntos). O tipo
+de uma coluna computada/agregada de uma view (ex.: um `SUM()` sobre uma
+coluna `NUMERIC`) e congelado no momento do `CREATE VIEW` e pode
+legitimamente discordar do que o compilador SQL do Firebird produz hoje
+para a mesma expressao — sem essa reconciliacao, essa divergencia podia
+derrubar o scan (um bug real, corrigido como issue #33). Scans de tabela
+base nao sao afetados (a largura de armazenamento de uma tabela nao pode
+discordar do proprio metadado de catalogo) e nao pagam custo adicional
+por essa reconciliacao.
+
 #### Para que serve
 
 - Consultar Firebird legado sem exportacao previa.
@@ -1655,6 +1670,29 @@ Lido no `ATTACH`. Mudanca posterior nao reconfigura pool existente.
   consultas.
 
 ## Notas de mapeamento de tipos
+
+### Politica de tratamento de tipos
+
+A regra que esta extensao segue para todo tipo Firebird que ela expoe: se
+o DuckDB tem um equivalente sem perda, usa esse equivalente; se nao tem,
+expoe o valor como `VARCHAR` sem perda (nunca truncando para caber) ou
+falha explicitamente (nunca substituindo silenciosamente por um valor
+errado). Nada e truncado, arredondado ou retornado incorreto sem um erro
+visivel ou uma ressalva ja documentada. Isso e uma descricao da politica
+que este codigo ja segue para seus casos de tipo dificil existentes —
+`DECFLOAT` como `VARCHAR` abaixo, os modos explicitos de `none_encoding`
+de `CHARACTER SET NONE` (veja o guia de uso) — nao a afirmacao de um novo
+mecanismo automatico que a verifica em todo lugar.
+
+Duas excecoes conhecidas e rastreadas a essa politica existem hoje:
+
+- `TIME WITH TIME ZONE` atualmente descarta a zona/offset original na
+  leitura; ja sinalizado pelo finding `time_tz` de `firebird_type_audit`
+  acima.
+- `BLOB` de texto multi-segmento pode ser truncado por um defeito no loop
+  de segmentos de `ReadBlob`, rastreado como issue #35 — uma causa raiz
+  separada da divergencia de tipo de coluna em view corrigida como issue
+  #33 acima.
 
 ### `DECFLOAT(16)` / `DECFLOAT(34)`
 
