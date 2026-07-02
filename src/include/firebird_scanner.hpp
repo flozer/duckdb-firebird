@@ -118,6 +118,18 @@ struct FirebirdBindData : public TableFunctionData {
     // the warning + influences pushdown safety (text-filter literals
     // are UTF-8 in DuckDB and may not round-trip against NONE bytes).
     bool db_charset_none = false;
+    // View-shape signals for the ROWS-pagination safety decision (see
+    // firebird_scanner.cpp's OpenNextPartitionCursor). Populated at bind
+    // time only when the target has no usable single-column numeric PK —
+    // computing this for every scan would be wasted I/O when the PK path
+    // already gives a safe, cheap ORDER BY column.
+    bool is_view = false;
+    // Meaningful only when is_view is true: no JOIN / GROUP BY / aggregate
+    // detected AND the source was inspectable. A simple pass-through view
+    // safely inherits its base table's RDB$DB_KEY (verified empirically);
+    // a heavy or uninspectable view does not (RDB$DB_KEY silently returns
+    // SQL NULL for a self-JOIN + GROUP BY view — not an error).
+    bool is_view_simple_for_pagination = false;
 };
 
 // --- discovery + probe helpers ---------------------------------------------

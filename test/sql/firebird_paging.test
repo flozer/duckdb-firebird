@@ -118,3 +118,148 @@ SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE',
 ----
 2
 4
+
+# ---------------------------------------------------------------------------
+#  Smart Scan Planning Report: ROWS pagination must always pair with a
+#  server-side ORDER BY, using a decision order:
+#    1. single-column numeric PK -> ORDER BY <pk> ASC
+#    2. base table, no such PK -> ORDER BY RDB$DB_KEY
+#    3. simple view (no join/group-by/aggregate), no such PK -> ORDER BY RDB$DB_KEY
+#    4. heavy view / uninspectable source -> do NOT push ROWS; slice locally
+# ---------------------------------------------------------------------------
+
+require-env ISC_PASSWORD
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird);
+
+# Case 1: table with a single-column numeric PK (EMPLOYEE, EMP_ID INTEGER) ->
+# ORDER BY "EMP_ID" ASC must be pushed alongside ROWS. This also proves the
+# PK probe now runs even when paging forces partitions_override=1 — it used
+# to be skipped whenever partitions_override==1, which paging always forces,
+# silently making the PK-first decision unreachable (fixed in this task).
+
+statement ok
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE', row_limit=2);
+
+query T
+SELECT remote_sql LIKE '%ORDER BY "EMP_ID" ASC%' AND remote_sql LIKE '%ROWS%'
+  FROM firebird_last_query();
+----
+true
+
+# Case 2: PK-less base table (TNO_INDEX, from the firebird_index_profile
+# item — zero index, zero PK). Two ROWS windows must not overlap: the same
+# row must not appear on both pages (proves RDB$DB_KEY ordering is stable
+# across pages within one scan).
+
+statement ok
+CREATE OR REPLACE TABLE t_page1 AS
+SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'TNO_INDEX',
+                            row_limit=1, row_offset=0);
+
+statement ok
+CREATE OR REPLACE TABLE t_page2 AS
+SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'TNO_INDEX',
+                            row_limit=1, row_offset=1);
+
+query I
+SELECT COUNT(*) FROM (SELECT * FROM t_page1 INTERSECT SELECT * FROM t_page2);
+----
+0
+
+query T
+SELECT remote_sql LIKE '%ORDER BY RDB$DB_KEY%' AND remote_sql LIKE '%ROWS%'
+  FROM firebird_last_query();
+----
+true
+
+# Case 3: simple view (V_ACTIVE_EMP: `SELECT EMP_ID, EMP_NAME, DEPT_NO FROM
+# EMPLOYEE WHERE ACTIVE = TRUE` — WHERE-only, no JOIN/GROUP BY/aggregate),
+# no PK exposed through the view scan path -> ORDER BY RDB$DB_KEY must be
+# pushed alongside ROWS.
+#
+# Deviation from the design brief's literal Case 3: firebird_explain_pushdown's
+# own capture-only Build() call only reflects the real row_limit=/row_offset=
+# named-parameter pushdown (bd.limit_override/bd.offset_override), and
+# explain_pushdown explicitly rejects direct firebird_scan(...) calls in its
+# input SQL (see firebird_explain_pushdown.test's "direct firebird_scan(...)
+# is not supported here" case) — so there is no query text that reaches
+# WalkPlan with a named-param limit set, and remote_sql there can never
+# contain a ROWS clause regardless of this task's fix. Verified instead via
+# firebird_last_query(), which captures the real remote_sql of an actually-
+# executed firebird_scan() call — a strictly stronger check than a capture-
+# only re-derivation would have been anyway.
+
+statement ok
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'V_ACTIVE_EMP', row_limit=1);
+
+query T
+SELECT remote_sql LIKE '%ORDER BY RDB$DB_KEY%' AND remote_sql LIKE '%ROWS%'
+  FROM firebird_last_query();
+----
+true
+
+# Correctness: exactly 1 row returned, not all 4 (V_ACTIVE_EMP has 4 active
+# rows in the fixture, verified live) -- proves the pushed ROWS clause is
+# actually enforced server-side for this case, not just present in the SQL.
+
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'V_ACTIVE_EMP', row_limit=1);
+----
+1
+
+# Case 4a: heavy view (V_DEPT_HEADCOUNT) — no ROWS clause should ever
+# appear in remote_sql for this target, regardless of any limit context.
+
+query T
+SELECT remote_sql NOT LIKE '%ROWS%' FROM firebird_explain_pushdown(
+    'SELECT * FROM fb.main.V_DEPT_HEADCOUNT') LIMIT 1;
+----
+true
+
+# Case 4b (CRITICAL correctness): row_limit/row_offset against the heavy
+# view via the actual scanner (not explain_pushdown) — the local-slice
+# fallback must bound the result to exactly N rows, never "everything".
+# V_DEPT_HEADCOUNT groups EMPLOYEE by DEPT_NO; the fixture has exactly 3
+# distinct DEPT_NO groups (verified live: `SELECT COUNT(*) FROM
+# V_DEPT_HEADCOUNT` = 3), so row_limit=2 must return exactly 2 rows, not
+# all 3 — a coincidental full-return would not prove the fix.
+#
+# Projected to DEPT_NO, HEADCOUNT only (dropping TOTAL_SALARY, a
+# NUMERIC(38,2) expression column): scanning that column via firebird_scan()
+# hits a pre-existing, unrelated bug (`INTERNAL Error: Expected vector of
+# type INT64, but found vector of type INT128`) reproducible even on a
+# plain SELECT * with no row_limit at all — confirmed out of scope for this
+# task (firebird_types.cpp / FirebirdAppendValue decimal-width handling,
+# not touched by any file in Task 4's scope). Flagged in the implementer
+# report for separate follow-up.
+
+statement ok
+CREATE OR REPLACE TABLE t_heavy_sliced AS
+SELECT DEPT_NO, HEADCOUNT FROM firebird_scan('${FIREBIRD_TEST_DB}', 'V_DEPT_HEADCOUNT',
+                            row_limit=2);
+
+query I
+SELECT COUNT(*) FROM t_heavy_sliced;
+----
+2
+
+# Case 4b corollary: confirms the mechanism — no ROWS clause was pushed to
+# Firebird at all for the local-slice fallback; the slice happened
+# client-side in the fetch loop instead.
+
+query T
+SELECT remote_sql NOT LIKE '%ROWS%' FROM firebird_last_query();
+----
+true
+
+# Case 4b, offset exercised too: local slicing must also honor row_offset
+# (not just row_limit) — proves the rows_skipped counter in the fetch loop,
+# not only the rows_emitted cap.
+
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'V_DEPT_HEADCOUNT',
+                                    row_limit=1, row_offset=1);
+----
+1

@@ -23,6 +23,7 @@
 #include "firebird_observability.hpp"
 #include "firebird_query.hpp"
 #include "firebird_types.hpp"
+#include "firebird_view_analysis.hpp" // LookupObjectType, ViewAnalysis, AnalyzeViewSource
 
 #include "duckdb/common/types/timestamp.hpp"
 
@@ -95,6 +96,17 @@ struct FirebirdLocalState : public LocalTableFunctionState {
     // firebird_scan() path (no pool), true when AcquireWithInfo handed
     // back a recycled idle connection.
     bool connection_reused = false;
+    // Local-slice fallback (Smart Scan Planning Report, case 4): set by
+    // OpenNextPartitionCursor when no safe ORDER BY exists for a ROWS
+    // push, so this local state must enforce row_limit/row_offset itself
+    // by skipping/capping rows as they're fetched. Inert (both false/
+    // unset) for every other case — zero behavior change to the existing
+    // fast path.
+    bool needs_local_slice = false;
+    optional_idx slice_limit;
+    optional_idx slice_offset;
+    idx_t rows_skipped = 0;
+    idx_t rows_emitted  = 0;
 
     ~FirebirdLocalState() override {
         // Order matters: the cursor has to be torn down before the
@@ -538,11 +550,41 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
                     bind->none_encoding);
 
     // PK probe is only worth its three RDB$ round-trips if we might actually
-    // parallelize. If the caller forced partitions=1 we skip it entirely;
-    // also keeps interactive small-table queries fast on remote servers.
-    if (bind->partitions_override != 1) {
+    // parallelize, OR if we're paging and need a safe, cheap ORDER BY
+    // column for ROWS pushdown (Smart Scan Planning Report's pagination
+    // decision order prefers the PK over RDB$DB_KEY when one exists). A
+    // paginated request is typically a one-off/interactive query, not a
+    // hot loop, so the extra round trip is a deliberate, acceptable cost
+    // here — `paging` is the same local computed above from
+    // limit_override/offset_override.
+    if (bind->partitions_override != 1 || paging) {
         bind->pk = ProbePrimaryKey(conn, bind->table_name,
                                    bind->column_names, bind->column_types);
+    }
+
+    // View-shape lookup for the ROWS-pagination safety decision. Only
+    // worth the extra round trip when there is no single-column numeric
+    // PK to fall back on for ordering — that path is already safe and
+    // cheap, so we don't pay this cost for the common case. Also gated on
+    // `paging`: is_view/is_view_simple_for_pagination are consumed ONLY by
+    // OpenNextPartitionCursor's pagination decision below, so a plain
+    // (non-paginated) scan of a PK-less table/view must not pay this extra
+    // round trip for a value it will never use.
+    if (!bind->pk && paging) {
+        std::string upper = bind->table_name;
+        for (auto &c : upper) {
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+        std::string object_type;
+        if (LookupObjectType(conn, upper, object_type)) {
+            bind->is_view = (object_type == "VIEW");
+            if (bind->is_view) {
+                ViewAnalysis va = AnalyzeViewSource(conn, upper);
+                bind->is_view_simple_for_pagination =
+                    va.inspected && !va.has_join && !va.has_group_by &&
+                    !va.has_aggregate;
+            }
+        }
     }
 
     return_types = bind->column_types;
@@ -693,17 +735,52 @@ static bool OpenNextPartitionCursor(ClientContext &ctx,
         for (auto &p : ep.params) extra_params.push_back(p);
     }
 
+    // Pagination decision order (Smart Scan Planning Report): a ROWS
+    // clause is only pushed when a safe, deterministic server-side
+    // ORDER BY is available. `local.needs_local_slice` tells the fetch
+    // loop below whether it must enforce row_limit/row_offset itself
+    // because Build() below will NOT push ROWS for this partition.
+    std::string pagination_order_by;
+    optional_idx limit_to_push    = bind.limit_override;
+    optional_idx offset_to_push   = bind.offset_override;
+    local.needs_local_slice = false;
+    if (bind.limit_override.IsValid()) {
+        if (bind.pk) {
+            // Case 1: single-column numeric PK.
+            pagination_order_by = QuoteIdent(bind.pk->column) + " ASC";
+        } else if (!bind.is_view) {
+            // Case 2: base table, no such PK.
+            pagination_order_by = "RDB$DB_KEY";
+        } else if (bind.is_view_simple_for_pagination) {
+            // Case 3: simple view, no such PK.
+            pagination_order_by = "RDB$DB_KEY";
+        } else {
+            // Case 4: heavy view or uninspectable source — RDB$DB_KEY is
+            // not safe here (a self-JOIN + GROUP BY view returns it as
+            // SQL NULL, silently, not an error). Do not push ROWS; the
+            // fetch loop enforces the slice locally instead.
+            limit_to_push  = optional_idx();
+            offset_to_push = optional_idx();
+            local.needs_local_slice = true;
+            local.slice_limit  = bind.limit_override;
+            local.slice_offset = bind.offset_override.IsValid()
+                ? bind.offset_override
+                : optional_idx(static_cast<idx_t>(0));
+        }
+    }
+
     auto query = FirebirdQueryBuilder::Build(
         bind.table_name,
         bind.column_names,
         bind.column_types,
         gstate.column_ids,
         gstate.filters,
-        bind.limit_override,
+        limit_to_push,
         combined,
         &bind.column_descs,
         bind.none_encoding,
-        bind.offset_override);
+        offset_to_push,
+        pagination_order_by);
 
     // Append extra-predicate params to the builder's params, preserving
     // positional order. The Firebird wire protocol resolves `?` slots
@@ -886,12 +963,31 @@ static void FirebirdScanFunction(ClientContext &ctx,
                 local.cursor.reset();
                 continue;
             }
+            // Local-slice fallback (case 4 of the pagination decision
+            // order): no ROWS clause was pushed for this scan, so
+            // row_limit/row_offset must be enforced here instead of
+            // silently returning every row.
+            if (local.needs_local_slice) {
+                if (local.slice_offset.IsValid() &&
+                    local.rows_skipped < local.slice_offset.GetIndex()) {
+                    ++local.rows_skipped;
+                    continue;
+                }
+                if (local.slice_limit.IsValid() &&
+                    local.rows_emitted >= local.slice_limit.GetIndex()) {
+                    local.cursor.reset();
+                    break;
+                }
+            }
             for (idx_t c = 0; c < n_fetch_cols; ++c) {
                 FirebirdAppendValue(*local.cursor, c,
                                     local.fetch_chunk.data[c], row,
                                     bind.none_encoding);
             }
             ++row;
+            if (local.needs_local_slice) {
+                ++local.rows_emitted;
+            }
         }
     } catch (const std::exception &e) {
         GetObservabilityState(ctx)->SetError(

@@ -250,7 +250,8 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
     const std::string               &extra_predicate,
     const std::vector<FirebirdColumnDesc> *column_descs,
     NoneEncoding                     none_encoding,
-    optional_idx                     offset) {
+    optional_idx                     offset,
+    const std::string               &pagination_order_by) {
 
     Result r;
     std::ostringstream sql;
@@ -386,7 +387,16 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
     // inclusive) for offset+limit. We never emit offset without limit —
     // FirebirdScanBind rejects that combination at bind time so the caller
     // sees an actionable error instead of an over-fetch.
+    //
+    // A ROWS clause is only deterministic across pages when paired with a
+    // server-side ORDER BY. The caller (firebird_scanner.cpp) is
+    // responsible for determining a safe order column BEFORE calling
+    // Build with a valid `limit` — pagination_order_by must be non-empty
+    // whenever `limit` is valid. If no safe order exists, the caller must
+    // not set `limit` at all here (it applies the slice locally instead).
     if (limit.IsValid()) {
+        D_ASSERT(!pagination_order_by.empty());
+        sql << " ORDER BY " << pagination_order_by;
         if (offset.IsValid()) {
             const idx_t start = offset.GetIndex() + 1;       // 1-based
             const idx_t end   = offset.GetIndex() + limit.GetIndex();
