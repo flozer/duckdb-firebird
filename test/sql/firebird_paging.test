@@ -254,6 +254,17 @@ SELECT remote_sql NOT LIKE '%ROWS%' FROM firebird_last_query();
 ----
 true
 
+# Case 4b telemetry: limit_pushed/offset_pushed must reflect what was
+# ACTUALLY pushed to Firebird (nothing, in this local-slice case), not
+# what row_limit requested — a self-contradictory report (remote_sql with
+# no ROWS clause, but limit_pushed=2) would mislead exactly the
+# "why wasn't my limit pushed?" diagnosis this telemetry exists for.
+
+query T
+SELECT limit_pushed IS NULL FROM firebird_last_query();
+----
+true
+
 # Case 4b, offset exercised too: local slicing must also honor row_offset
 # (not just row_limit) — proves the rows_skipped counter in the fetch loop,
 # not only the rows_emitted cap.
