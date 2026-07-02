@@ -581,7 +581,7 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
 //   range >= 4M rows  → min(range / 2M, hardware_concurrency)
 static constexpr int64_t MIN_ROWS_PER_PARTITION = 2'000'000;
 
-static idx_t PickPartitionCount(int64_t min_v, int64_t max_v) {
+idx_t PickPartitionCount(int64_t min_v, int64_t max_v) {
     int64_t range = max_v - min_v + 1;
     if (range < MIN_ROWS_PER_PARTITION * 2) return 1;       // not worth the overhead
     auto hw = static_cast<int64_t>(std::thread::hardware_concurrency());

@@ -40,6 +40,14 @@ struct PkRangeClassification {
 // No I/O; safe to call in any context.
 PkRangeClassification ClassifyPkRange(const PrimaryKeyDescriptor &d);
 
+// Single source of truth for scan-parallelism sizing: given a PK's
+// [min_v, max_v] range, returns how many partitions the scanner will
+// actually use. Pure/numeric — no Firebird I/O, safe to call from
+// anywhere (firebird_profile_table's advisory recommendation and
+// firebird_explain_pushdown's planned_partitions column both call this
+// so they can never diverge from the scanner's real behavior).
+idx_t PickPartitionCount(int64_t min_v, int64_t max_v);
+
 struct FirebirdBindData : public TableFunctionData {
     FirebirdConnectionInfo conn_info;
     std::string table_name;

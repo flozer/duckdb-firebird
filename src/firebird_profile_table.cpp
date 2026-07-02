@@ -597,22 +597,15 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
         }
     } else if (pk) {
         // Single-column numeric PK with a usable MIN/MAX range — the only
-        // safe parallelism lever the scanner supports. The recommendation
-        // is advisory and conservative: it scales partition count by the PK
-        // *range width* (not row count, which we deliberately do not probe —
-        // no COUNT(*) / full scan in the analyzer) and caps at a small
-        // ceiling so we never suggest runaway parallelism against an OLTP
-        // server. Ceiling stays at 8 (matches the scanner's own auto path).
-        const int64_t span = pk->max_value - pk->min_value;
-        int32_t parts = 1;
-        if (span >= 1000000) {
-            parts = 8;
-        } else if (span >= 100000) {
-            parts = 4;
-        } else if (span >= 10000) {
-            parts = 2;
-        }
-        p.recommended_partitions = parts;
+        // safe parallelism lever the scanner supports. recommended_partitions
+        // is now computed by the SAME PickPartitionCount the scanner itself
+        // uses at scan time (firebird_scanner.hpp), so this recommendation
+        // can never diverge from what a real scan would actually do. It
+        // remains advisory in spirit (row count is never probed — no
+        // COUNT(*) / full scan in the analyzer), but the number itself is
+        // now the scanner's real answer, not a separate estimate.
+        const idx_t parts = PickPartitionCount(pk->min_value, pk->max_value);
+        p.recommended_partitions = static_cast<int32_t>(parts);
         p.full_scan_risk = (parts > 1) ? "MEDIUM" : "LOW";
         if (parts > 1) {
             AddAlert(p, "partition_advisory", "LOW",
@@ -634,14 +627,16 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
                 "starting with partitions=1 or benchmark before combining "
                 "server-side and client-side parallelism.");
         } else {
-            // PK is numeric with a real but narrow range (span < 10000):
-            // ProbePrimaryKey accepted it, but partitioning would not pay
-            // off. Be explicit so the caller does not wonder why a numeric
-            // PK still recommends serial.
+            // PK is numeric with a real range, but below the scanner's own
+            // partitioning threshold (PickPartitionCount's minimum-rows-per-
+            // partition floor) — the same function that decides this at
+            // scan time returned 1. Be explicit so the caller does not
+            // wonder why a numeric PK still recommends serial.
             AddAlert(p, "pk_range_small_serial", "LOW",
-                "Primary key range is small (PK MIN/MAX span < 10000): "
-                "serial scan recommended; partitioning would add overhead "
-                "without meaningful parallelism.");
+                "Primary key range is small relative to the scanner's "
+                "partitioning threshold: serial scan recommended; "
+                "partitioning would add overhead without meaningful "
+                "parallelism.");
         }
     } else {
         // No view, but also no usable parallel lever: composite /
