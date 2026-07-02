@@ -214,6 +214,20 @@ SELECT view_heavy, len(view_heavy_reasons)
 ----
 false	0
 
+# Filterless simple view target (V_ALL_EMP: `SELECT EMP_ID, EMP_NAME FROM
+# EMPLOYEE`, no WHERE/JOIN/GROUP BY/aggregate in its OWN definition):
+# view_heavy=false (not heavy), but view_heavy_reasons is NON-empty — the
+# "no WHERE filter" note is independent of the heaviness flags. This is
+# the exact case the function manuals call out; without this test the
+# "reasons can be non-empty while view_heavy=false" claim was undertested.
+
+query TT
+SELECT view_heavy, list_contains(view_heavy_reasons,
+       'view has no WHERE filter in its definition')
+  FROM firebird_explain_pushdown('SELECT * FROM fb.main.V_ALL_EMP');
+----
+false	true
+
 # Heavy view target (self-JOIN + GROUP BY): view_heavy=true with reasons.
 
 query T

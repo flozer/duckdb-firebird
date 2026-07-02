@@ -115,7 +115,8 @@ FROM t_prof_emp;
 ----
 true
 
-# Risk + recommended partitions: tiny table (PK span < 10000) -> LOW, serial.
+# Risk + recommended partitions: tiny table (PK range well under
+# PickPartitionCount's partitioning floor) -> LOW, serial.
 
 query TI
 SELECT full_scan_risk, recommended_partitions

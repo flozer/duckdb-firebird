@@ -416,6 +416,14 @@ static void WalkPlan(LogicalOperator &op,
             // is already populated (lazily, memoized) by
             // FirebirdTableEntry::GetScanFunction at ATTACH-bind time, the
             // same round trip a real scan already pays.
+            //
+            // Gated on bd.pk (not pk_range_eligible, computed just above
+            // from bd.pk_descriptor): the two fields are derived
+            // independently but both encode "single-column numeric PK",
+            // so planned_partitions is NULL exactly when pk_range_eligible
+            // is false. If either classifier's definition of "usable PK"
+            // ever diverges from the other, this documented invariant
+            // breaks silently — keep them in sync.
             if (bd.pk) {
                 r.planned_partitions_valid = true;
                 r.planned_partitions = static_cast<int64_t>(
