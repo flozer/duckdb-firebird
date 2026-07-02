@@ -37,6 +37,8 @@ DEPT
 EMPLOYEE
 FILE_STORAGE
 TCHILD
+TIDX_INACTIVE
+TNO_INDEX
 TPK_COMPOSITE
 TQUOTES
 V_ACTIVE_EMP
@@ -90,6 +92,8 @@ fb	main	DEPT	BASE TABLE
 fb	main	EMPLOYEE	BASE TABLE
 fb	main	FILE_STORAGE	BASE TABLE
 fb	main	TCHILD	BASE TABLE
+fb	main	TIDX_INACTIVE	BASE TABLE
+fb	main	TNO_INDEX	BASE TABLE
 fb	main	TPK_COMPOSITE	BASE TABLE
 fb	main	TQUOTES	BASE TABLE
 fb	main	V_ACTIVE_EMP	BASE TABLE
@@ -127,7 +131,7 @@ query I
 SELECT COUNT(*) FROM information_schema.columns
  WHERE table_catalog = 'fb';
 ----
-33
+39
 
 # --- Case-insensitive table lookup --------------------------------
 #
