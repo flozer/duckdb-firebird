@@ -632,7 +632,7 @@ Rejected input (raises an error):
 | `pk_range_reason` | VARCHAR | One of four normalized values: `single numeric PK`, `non-numeric PK`, `composite PK`, `no primary key` |
 | `scan_strategy` | VARCHAR | `pk-range-partitionable` when `pk_range_eligible` is true; `serial` otherwise |
 | `view_heavy` | BOOLEAN | `NULL` when the scan target is a base table; for a view, `true` if it has a JOIN, `GROUP BY`, an aggregate function, or an unreadable/uninspectable definition, `false` for a simple pass-through view |
-| `view_heavy_reasons` | VARCHAR[] | Why `view_heavy` is `true` (e.g. `view contains a JOIN`, `view contains aggregation`, `view definition not inspected`, or a reason noting `ROWS` pagination was skipped for this view); empty when `view_heavy` is `false` or `NULL` |
+| `view_heavy_reasons` | VARCHAR[] | Factual notes about the view's shape: `view contains a JOIN`, `view contains aggregation (GROUP BY or aggregate functions)`, `view definition not inspected (RDB$VIEW_SOURCE unavailable or unreadable)`, `view has no WHERE filter in its definition`. The last one can appear even when `view_heavy` is `false` (a filterless-but-simple view is not "heavy", but the observation is still useful) — do not assume this list is empty whenever `view_heavy` is `false`. Empty (and `view_heavy` is `NULL`) when the target is a base table. |
 | `charset_pushdown_blocked` | BOOLEAN | `true` when any entry in `not_pushed_reasons` is `NONE_CHARSET` — a pure synthesis of that already-existing signal, no new detection |
 | `planned_partitions` | BIGINT | The exact partition count `firebird_scan` would use for this table's PK range, computed by the same `PickPartitionCount` function the scanner itself calls; `NULL` when `pk_range_eligible` is `false` |
 
@@ -661,7 +661,10 @@ Rejected input (raises an error):
   `view_heavy = true` and `view_heavy_reasons` explains why. This is also
   why `remote_sql` may show no `ROWS` clause even when `row_limit`/
   `row_offset` were requested against that view — see the `RDB$DB_KEY` note
-  in the `firebird_scan` section above.
+  in the `firebird_scan` section above. `view_heavy_reasons` can carry a
+  `view has no WHERE filter in its definition` note independently of
+  `view_heavy` — a simple, filterless view is still reported as `view_heavy
+  = false`, but the missing-`WHERE` observation is surfaced anyway.
 
 #### Usage example
 

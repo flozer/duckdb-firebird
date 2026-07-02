@@ -1202,7 +1202,7 @@ Entrada rejeitada (levanta erro):
 | `pk_range_reason` | VARCHAR | Um de quatro valores normalizados: `single numeric PK`, `non-numeric PK`, `composite PK`, `no primary key` |
 | `scan_strategy` | VARCHAR | `pk-range-partitionable` quando `pk_range_eligible` for true; `serial` caso contrario |
 | `view_heavy` | BOOLEAN | `NULL` quando o alvo do scan e uma tabela base; para uma view, `true` se ela tem `JOIN`, `GROUP BY`, funcao de agregacao, ou definicao ilegivel/nao-inspecionavel, `false` para uma view simples de passagem |
-| `view_heavy_reasons` | VARCHAR[] | Por que `view_heavy` e `true` (ex.: `view contains a JOIN`, `view contains aggregation`, `view definition not inspected`, ou uma razao indicando que a paginacao `ROWS` foi pulada para essa view); vazio quando `view_heavy` e `false` ou `NULL` |
+| `view_heavy_reasons` | VARCHAR[] | Notas factuais sobre a forma da view: `view contains a JOIN`, `view contains aggregation (GROUP BY or aggregate functions)`, `view definition not inspected (RDB$VIEW_SOURCE unavailable or unreadable)`, `view has no WHERE filter in its definition`. Esta ultima pode aparecer mesmo quando `view_heavy` e `false` (uma view simples sem filtro nao e "pesada", mas a observacao ainda e util) — nao assuma que a lista fica vazia sempre que `view_heavy` e `false`. Vazio (e `view_heavy` e `NULL`) quando o alvo e uma tabela base. |
 | `charset_pushdown_blocked` | BOOLEAN | `true` quando qualquer entrada em `not_pushed_reasons` e `NONE_CHARSET` — uma sintese pura de um sinal ja existente, sem deteccao nova |
 | `planned_partitions` | BIGINT | O numero exato de particoes que o `firebird_scan` usaria para a faixa de PK desta tabela, calculado pela mesma funcao `PickPartitionCount` que o scanner chama; `NULL` quando `pk_range_eligible` e `false` |
 
@@ -1231,7 +1231,11 @@ Entrada rejeitada (levanta erro):
   `view_heavy = true` e `view_heavy_reasons` explica por que. Isso tambem
   explica por que `remote_sql` pode nao mostrar clausula `ROWS` mesmo
   quando `row_limit`/`row_offset` foram pedidos contra essa view — veja a
-  nota sobre `RDB$DB_KEY` na secao `firebird_scan` acima.
+  nota sobre `RDB$DB_KEY` na secao `firebird_scan` acima. `view_heavy_reasons`
+  pode carregar a nota `view has no WHERE filter in its definition`
+  independentemente de `view_heavy` — uma view simples sem filtro ainda e
+  reportada com `view_heavy = false`, mas a observacao de filtro ausente
+  aparece de qualquer forma.
 
 #### Exemplo de uso
 
