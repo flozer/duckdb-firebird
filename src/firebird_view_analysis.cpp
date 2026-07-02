@@ -1,5 +1,6 @@
 #include "firebird_view_analysis.hpp"
 
+#include <cctype>
 #include <string>
 
 namespace duckdb {
