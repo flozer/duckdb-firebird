@@ -447,6 +447,78 @@ Alert code catalog:
 | `no_indexed_filter_columns` | MEDIUM | No cheap indexed filter columns found |
 | `none_charset_text_columns` | MEDIUM | One or more text columns use CHARACTER SET NONE |
 
+### `firebird_index_profile(qualified_name)`
+
+Returns **one row per existing index** for a Firebird table reachable
+through an attached catalog. The argument is a qualified name in the same
+form as `firebird_profile_table`: `catalog.schema.table` (the schema part is
+accepted only as `main`, and may be omitted).
+
+```sql
+ATTACH 'database=C:/data/erp.fdb user=APP_READONLY password=secret'
+  AS fb (TYPE firebird);
+
+SELECT *
+FROM firebird_index_profile('fb.main.CUSTOMER');
+```
+
+**Per-index grain:** a table with zero indexes still emits exactly **one
+synthetic row** — never zero rows. On that row, `index_name IS NULL` marks
+the absence of any index, `columns` is an empty list `[]`, and the remaining
+index-scoped columns (`is_unique`, `is_active`, `is_primary_key`,
+`is_foreign_key`, `selectivity`) are `NULL`. The synthetic row always carries
+the `no_indexes_on_table` alert (`HIGH` severity) in `alerts`.
+
+Output columns (9):
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `index_name` | VARCHAR | Index name; `NULL` on the synthetic "no index" row |
+| `columns` | LIST(VARCHAR) | Index columns in segment order; `[]` on the synthetic row |
+| `is_unique` | BOOLEAN | Whether the index is unique; `NULL` on the synthetic row |
+| `is_active` | BOOLEAN | Whether the index is active (`RDB$INDICES.RDB$INDEX_INACTIVE = 0`); `NULL` on the synthetic row |
+| `is_primary_key` | BOOLEAN | Whether the index backs the table's primary key; `NULL` on the synthetic row |
+| `is_foreign_key` | BOOLEAN | Whether the index backs a foreign key; `NULL` on the synthetic row |
+| `selectivity` | DOUBLE | Raw value from `RDB$STATISTICS`; `NULL` when never computed; `NULL` on the synthetic row |
+| `alerts` | LIST(STRUCT(code VARCHAR, severity VARCHAR, message VARCHAR)) | Alerts for this index (or the "no index" alert on the synthetic row) |
+| `unindexed_filter_candidates` | LIST(VARCHAR) | Table columns not covered by any index segment (active or inactive); repeated on every row |
+
+Alert code catalog:
+
+| Code | Severity | Condition |
+| --- | --- | --- |
+| `no_indexes_on_table` | HIGH | Table has no indexes at all — drives the synthetic row |
+| `index_inactive` | MEDIUM | `is_active = false` for that index |
+| `missing_statistics` | LOW | `RDB$STATISTICS IS NULL` for that index |
+
+Notes:
+
+- `selectivity` is a **raw**, uninterpreted value: a **lower** value tends to
+  indicate a **more selective** index. `NULL` means the statistic was never
+  computed — it does **not** mean "stale". There is **no numeric threshold**
+  in this version: no low-selectivity alert exists (this avoids turning the
+  function into an opaque advisor).
+- `unindexed_filter_candidates` excludes any column covered by **any** index
+  segment, including an **inactive** index's segments — that inactivity
+  signal arrives separately via the `index_inactive` alert on that index's
+  own row, not by omission from this list.
+
+Use it to:
+
+- See, index by index, what exists, whether it's active, whether it has
+  computed statistics, and whether it backs a PK/FK.
+- Quickly confirm whether a table has ended up with no indexes at all.
+- Find filter-candidate columns that currently have no index coverage at all.
+
+```sql
+SELECT index_name, columns, is_unique, is_active, selectivity
+FROM firebird_index_profile('fb.main.CUSTOMER');
+
+-- Filter-candidate columns with no index coverage:
+SELECT DISTINCT unindexed_filter_candidates
+FROM firebird_index_profile('fb.main.CUSTOMER');
+```
+
 ### `firebird_last_query()`
 
 Returns telemetry for the most recent Firebird query captured by the

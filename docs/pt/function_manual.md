@@ -900,6 +900,89 @@ Catalogo de codigos de alerta:
 | `no_indexed_filter_columns` | MEDIUM | Nenhuma coluna de filtro indexada barata encontrada |
 | `none_charset_text_columns` | MEDIUM | Uma ou mais colunas texto usam CHARACTER SET NONE |
 
+### `firebird_index_profile(qualified_name)`
+
+#### O que faz e como funciona
+
+Retorna **uma linha por indice existente** de uma tabela Firebird acessivel
+por um catalogo ja anexado via `ATTACH ... (TYPE firebird)`. O argumento e um
+nome qualificado no mesmo formato de `firebird_profile_table`:
+`catalog.schema.table` (schema so aceito como `main`, e pode ser omitido).
+
+```sql
+ATTACH 'C:/dados/empresa.fdb' AS fb
+(TYPE firebird, user 'APP_READONLY', password 'secret');
+
+SELECT *
+FROM firebird_index_profile('fb.main.CLIENTES');
+```
+
+**Grao por indice:** uma tabela sem nenhum indice ainda assim emite
+exatamente **uma linha sintetica** — nunca zero linhas. Nessa linha,
+`index_name IS NULL` marca a ausencia de indice, `columns` vem como lista
+vazia `[]`, e as demais colunas especificas de indice (`is_unique`,
+`is_active`, `is_primary_key`, `is_foreign_key`, `selectivity`) ficam `NULL`.
+A linha sintetica sempre carrega o alerta `no_indexes_on_table` (severidade
+`HIGH`) em `alerts`.
+
+Colunas de saida (9):
+
+| Coluna | Tipo | Descricao |
+| --- | --- | --- |
+| `index_name` | VARCHAR | Nome do indice; `NULL` na linha sintetica de "sem indice" |
+| `columns` | LIST(VARCHAR) | Colunas do indice, na ordem dos segmentos; `[]` na linha sintetica |
+| `is_unique` | BOOLEAN | Indice unico; `NULL` na linha sintetica |
+| `is_active` | BOOLEAN | Indice ativo (`RDB$INDICES.RDB$INDEX_INACTIVE = 0`); `NULL` na linha sintetica |
+| `is_primary_key` | BOOLEAN | Indice suporta a chave primaria da tabela; `NULL` na linha sintetica |
+| `is_foreign_key` | BOOLEAN | Indice suporta uma chave estrangeira; `NULL` na linha sintetica |
+| `selectivity` | DOUBLE | Valor bruto de `RDB$STATISTICS`; `NULL` quando nunca calculado; `NULL` na linha sintetica |
+| `alerts` | LIST(STRUCT(code VARCHAR, severity VARCHAR, message VARCHAR)) | Alertas desse indice (ou o alerta de "sem indice" na linha sintetica) |
+| `unindexed_filter_candidates` | LIST(VARCHAR) | Colunas da tabela nao cobertas por nenhum segmento de indice (de nenhum indice, ativo ou inativo); repetida em toda linha |
+
+Catalogo de codigos de alerta:
+
+| Codigo | Severidade | Condicao |
+| --- | --- | --- |
+| `no_indexes_on_table` | HIGH | Tabela sem nenhum indice — dispara a linha sintetica |
+| `index_inactive` | MEDIUM | `is_active = false` para esse indice |
+| `missing_statistics` | LOW | `RDB$STATISTICS IS NULL` para esse indice |
+
+#### Notas
+
+- `selectivity` e um valor **bruto**, sem interpretacao: um valor **menor**
+  tende a indicar indice **mais seletivo**. `NULL` significa que a
+  estatistica nunca foi calculada — **nao** significa "desatualizada".
+  **Sem limiar numerico** nesta versao: nao existe alerta de baixa
+  seletividade (evita a funcao virar um advisor opaco).
+- `unindexed_filter_candidates` exclui qualquer coluna coberta por
+  **qualquer** segmento de indice, inclusive de indice **inativo** — esse
+  sinal de inatividade chega separadamente pelo alerta `index_inactive` na
+  propria linha daquele indice, nao pela omissao da lista.
+
+#### Para que serve
+
+- Ver, indice por indice, quais existem, se estao ativos, se tem estatistica
+  calculada, e se suportam PK/FK.
+- Confirmar rapidamente se uma tabela ficou sem nenhum indice.
+- Descobrir colunas candidatas a filtro que hoje nao tem nenhuma cobertura de
+  indice.
+
+#### Uso no dia a dia
+
+Perfilar os indices de uma tabela:
+
+```sql
+SELECT index_name, columns, is_unique, is_active, selectivity
+FROM firebird_index_profile('fb.main.CLIENTES');
+```
+
+Ver candidatas a filtro sem cobertura de indice:
+
+```sql
+SELECT DISTINCT unindexed_filter_candidates
+FROM firebird_index_profile('fb.main.CLIENTES');
+```
+
 ### `firebird_last_query()`
 
 #### O que faz e como funciona
