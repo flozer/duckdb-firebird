@@ -292,7 +292,8 @@ duckdb::vector<FirebirdTableSchema> LoadAllTableSchemas(
         "       COALESCE(f.RDB$FIELD_SCALE, 0), "
         "       COALESCE(f.RDB$FIELD_LENGTH, 0), "
         "       COALESCE(f.RDB$CHARACTER_SET_ID, -1), "
-        "       COALESCE(rf.RDB$NULL_FLAG, f.RDB$NULL_FLAG, 0) "
+        "       COALESCE(rf.RDB$NULL_FLAG, f.RDB$NULL_FLAG, 0), "
+        "       r.RDB$VIEW_BLR IS NOT NULL "
         "  FROM RDB$RELATION_FIELDS rf "
         "  JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE "
         "  JOIN RDB$RELATIONS r ON r.RDB$RELATION_NAME = rf.RDB$RELATION_NAME "
@@ -314,6 +315,7 @@ duckdb::vector<FirebirdTableSchema> LoadAllTableSchemas(
         if (!current || current->table_name != rel) {
             FirebirdTableSchema ts;
             ts.table_name = rel;
+            ts.is_view = cursor->GetBool(8);
             result.push_back(std::move(ts));
             current = &result.back();
         }

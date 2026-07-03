@@ -123,50 +123,14 @@ public:
         data->pool = pool_;
         data->pk_descriptor = pk_descriptor_; // cached at ATTACH, zero I/O
 
-        // PK probe + view type/descriptor reconciliation (#33) — both
-        // lazy + memoised under the same lock. The first scan against a
-        // table pays the round trips; subsequent scans reuse the cached
-        // results for free. Both share one connection acquisition from
-        // the pool so we don't pay the connect cost twice.
-        //
-        // The reconciliation matters here too, not just in the
-        // standalone firebird_scan(...) bind path (FirebirdScanBind):
-        // GetScanFunction builds FirebirdBindData directly from cached
-        // catalog metadata and DuckDB uses it verbatim (this class's own
-        // top comment: "the planner ... never re-invokes the bind
-        // callback"), so a view target reached only through ATTACH
-        // (fb.main.SOME_VIEW) would otherwise still hit the exact #33
-        // crash even after FirebirdScanBind's fix, since that bind path
-        // is never called for ATTACH-resolved tables/views.
-        //
-        // CRITICAL: patching bind_data's column_types/column_descs alone
-        // is NOT sufficient for the ATTACH path, unlike the standalone
-        // firebird_scan(...) path. DuckDB's planner
-        // (bind_basetableref.cpp, CatalogType::TABLE_ENTRY case) builds
-        // the LogicalGet's return_types — the Vector types the REST OF
-        // THE QUERY PLAN downstream commits to — from
-        // `table.GetColumns().Logical()`, i.e. THIS catalog entry's own
-        // persistent `columns` list (baked in once at ATTACH time by
-        // FirebirdSchemaEntry::EnsureTablesLoaded), NOT from the
-        // FunctionData this method returns. bind_data->column_types only
-        // feeds the scanner's internal scratch chunk
-        // (firebird_scanner.cpp's `fetch_chunk`, built from
-        // `bind.column_types[cid]`) — reconciling only that, while
-        // `columns` stays at the stale wide catalog type, trades the
-        // hard crash for SILENT DATA CORRUPTION: the narrower fetch_chunk
-        // vector gets Reference()'d straight into the output chunk, so
-        // downstream code that trusts the wide return_types
-        // misinterprets the narrower bytes (verified live: BIGINT bytes
-        // reinterpreted as HUGEINT produced a garbage
-        // "1313408178048120075825702.25" instead of a real payroll sum,
-        // with no error at all). Mutating `columns` here — via
-        // GetColumnMutable(...).SetType(...) — runs synchronously before
-        // bind_basetableref.cpp reads table.GetColumns() right after this
-        // call returns (same bind, same thread), so it actually lands in
-        // return_types. It only runs once per view (guarded by the same
-        // pk_loaded_ latch), so it doesn't reintroduce the N+1
-        // RDB$RELATION_FIELDS-per-table cost EnsureTablesLoaded's batch
-        // path exists to avoid.
+        // View column types/descriptors are already correct here — they
+        // were reconciled in FirebirdSchemaEntry::EnsureTablesLoaded's
+        // add_entry lambda, against local mutable copies, BEFORE this
+        // (shared, published) TableCatalogEntry was ever constructed. So
+        // this method only has to serve the PK-probe cache: lazy +
+        // memoised under pk_lock_, the first scan against a table pays
+        // the round trip, subsequent scans (and concurrent scans, once
+        // the lock is released) reuse the cached result for free.
         {
             std::lock_guard<std::mutex> g(pk_lock_);
             if (!pk_loaded_) {
@@ -174,31 +138,11 @@ public:
                                   : make_uniq<FirebirdConnection>(conn_info_);
                 pk_cache_ = ProbePrimaryKey(*conn, name,
                                             data->column_names, data->column_types);
-                reconciled_column_types_ = cached_column_types_;
-                reconciled_column_descs_ = cached_column_descs_;
-                is_view_cache_ = ReconcileViewColumnTypes(
-                    *conn, name, cached_column_names_,
-                    reconciled_column_types_, reconciled_column_descs_);
                 if (pool_) pool_->Release(std::move(conn));
                 pk_loaded_ = true;
-                view_reconcile_done_ = true;
-
-                if (is_view_cache_) {
-                    for (idx_t i = 0; i < reconciled_column_types_.size(); ++i) {
-                        if (i < cached_column_types_.size() &&
-                            reconciled_column_types_[i] != cached_column_types_[i]) {
-                            columns.GetColumnMutable(LogicalIndex(i))
-                                .SetType(reconciled_column_types_[i]);
-                        }
-                    }
-                }
             }
             if (pk_cache_) {
                 data->pk = make_uniq<PrimaryKeyInfo>(*pk_cache_);
-            }
-            if (is_view_cache_) {
-                data->column_types = reconciled_column_types_;
-                data->column_descs = reconciled_column_descs_;
             }
         }
 
@@ -218,10 +162,6 @@ private:
     std::mutex pk_lock_;
     bool pk_loaded_ = false;
     std::unique_ptr<PrimaryKeyInfo> pk_cache_;
-    bool view_reconcile_done_ = false;
-    bool is_view_cache_ = false;
-    duckdb::vector<LogicalType> reconciled_column_types_;
-    duckdb::vector<FirebirdColumnDesc> reconciled_column_descs_;
 };
 
 // ---------------------------------------------------------------------------
@@ -433,9 +373,25 @@ private:
         // per-table fallback below.
         auto add_entry = [&](const std::string &table_name,
                              const duckdb::vector<std::string> &col_names,
-                             const duckdb::vector<LogicalType> &col_types,
-                             duckdb::vector<FirebirdColumnDesc> col_descs) {
+                             duckdb::vector<LogicalType> col_types,
+                             duckdb::vector<FirebirdColumnDesc> col_descs,
+                             bool is_view) {
             if (col_names.empty()) return;
+            // View column types/descs must be finalized BEFORE the entry is
+            // built and published — FirebirdTableEntry instances are shared
+            // across every connection, so mutating a published entry's
+            // columns later (as GetScanFunction used to do) is a data race
+            // against concurrent readers (DESCRIBE, information_schema,
+            // catalog introspection) that access GetColumns() without going
+            // through GetScanFunction first. Reconciling here, on local
+            // mutable copies, means info.columns (and therefore
+            // cached_column_types_, mirrored from it in the
+            // FirebirdTableEntry constructor) are correct at construction
+            // time — nothing downstream needs to mutate a shared entry.
+            if (is_view) {
+                ReconcileViewColumnTypes(conn, table_name, col_names,
+                                         col_types, col_descs);
+            }
             CreateTableInfo info(catalog.GetName(), this->name, table_name);
             for (size_t i = 0; i < col_names.size(); ++i) {
                 info.columns.AddColumn(ColumnDefinition(col_names[i], col_types[i]));
@@ -522,7 +478,7 @@ private:
             auto schemas = LoadAllTableSchemas(conn, none_encoding_);
             for (auto &ts : schemas) {
                 add_entry(ts.table_name, ts.names, ts.types,
-                          std::move(ts.descs));
+                          std::move(ts.descs), ts.is_view);
             }
             batch_ok = true;
         } catch (std::exception &e) {
@@ -545,14 +501,19 @@ private:
             // firebird_scan('SELECT * FROM MON$…') and don't belong in a
             // user-facing catalog.
             std::vector<std::string> table_names;
+            std::vector<bool> table_is_view;
             try {
                 auto cur = conn.OpenCursor(
-                    "SELECT TRIM(r.RDB$RELATION_NAME) "
+                    "SELECT TRIM(r.RDB$RELATION_NAME), "
+                    "       r.RDB$VIEW_BLR IS NOT NULL "
                     "  FROM RDB$RELATIONS r "
                     " WHERE r.RDB$SYSTEM_FLAG = 0 "
                     "   AND (r.RDB$RELATION_TYPE IS NULL OR r.RDB$RELATION_TYPE <> 3) "
                     " ORDER BY r.RDB$RELATION_NAME");
-                while (cur->Fetch()) table_names.push_back(cur->GetText(0));
+                while (cur->Fetch()) {
+                    table_names.push_back(cur->GetText(0));
+                    table_is_view.push_back(cur->GetBool(1));
+                }
             } catch (std::exception &e) {
                 // The fallback's own discovery query failed too — a genuine
                 // connection / credential / permission problem, not a
@@ -567,7 +528,8 @@ private:
             // One RDB$RELATION_FIELDS round-trip per table. Individual table
             // failures are downgraded to a skip so a single bad relation
             // doesn't poison the whole ATTACH.
-            for (auto &table_name : table_names) {
+            for (size_t ti = 0; ti < table_names.size(); ++ti) {
+                const auto &table_name = table_names[ti];
                 try {
                     duckdb::vector<std::string> col_names;
                     duckdb::vector<LogicalType> col_types;
@@ -576,7 +538,7 @@ private:
                                     col_names, col_types, col_descs,
                                     none_encoding_);
                     add_entry(table_name, col_names, col_types,
-                              std::move(col_descs));
+                              std::move(col_descs), table_is_view[ti]);
                 } catch (std::exception &) {
                     // Skip — table will simply not appear in fb.main.
                 }
