@@ -101,7 +101,16 @@ When it is:
    `return_types`, i.e. Vector allocation) and `column_descs` (feeds
    `FirebirdAppendValue`'s fetch-time accessor choice) must be derived
    from the SAME live XSQLDA source, together, for every column of a view
-   target.
+   target. (Correction from final review: the crash itself is prevented
+   specifically by reconciling `column_types` — it drives DuckDB's
+   `return_types`/Vector allocation. `column_descs` does not
+   independently drive the fetch-time accessor width the way this
+   paragraph originally implied — the actual fetch reads accessor width
+   from the live fetch cursor's own re-described XSQLDA, not from
+   `bind.column_descs`. Reconciling `column_descs` is still correct and
+   kept: it keeps pushdown-gating and `character_set_id` consistent with
+   the real wire type. But it is not, on its own, what prevents the
+   `Vector::VerifyVectorType` assertion.)
 3. Only the `character_set_id` (which XSQLDA cannot supply for text/BLOB
    columns) still comes from the catalog read — matching
    `OpenNextPartitionCursor`'s existing per-cursor precedent of trusting

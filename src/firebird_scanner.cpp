@@ -562,82 +562,41 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
                                    bind->column_names, bind->column_types);
     }
 
-    // View-type check: cheap, single indexed RDB$RELATIONS lookup — now
-    // run UNCONDITIONALLY (not gated on paging) because it also drives
-    // the type/descriptor reconciliation below (#33), which matters for
-    // ANY view scan, not just paginated ones. The (much more expensive)
-    // AnalyzeViewSource text-parse below stays gated to the pagination
-    // case only — it is not needed for the reconciliation fix.
-    std::string upper_for_view_check = bind->table_name;
-    for (auto &c : upper_for_view_check) {
-        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    }
-    {
-        std::string object_type;
-        if (LookupObjectType(conn, upper_for_view_check, object_type)) {
-            bind->is_view = (object_type == "VIEW");
-        }
-    }
+    // View-type check + type/descriptor reconciliation (#33): a view's
+    // column metadata is frozen in RDB$FIELDS at CREATE VIEW time and can
+    // legitimately disagree with what Firebird's live DSQL compiler
+    // produces for the identical expression today (confirmed root cause:
+    // SUM() over a NUMERIC(10,2) column promotes to BIGINT-backed
+    // NUMERIC(18,2) at runtime, while the view's frozen catalog metadata
+    // claims INT128-backed DECIMAL(38,2) — allocating the DuckDB Vector
+    // from the stale wide type crashes DuckDB's own
+    // Vector::VerifyVectorType assertion once the fetch tries to write
+    // the narrow real type into it). ReconcileViewColumnTypes (shared
+    // with the ATTACH path's FirebirdTableEntry::GetScanFunction, in
+    // firebird_storage.cpp) corrects column_types (the field that
+    // actually prevents the crash — it drives return_types/Vector
+    // allocation below) and column_descs (kept consistent with the real
+    // wire type for charset/pushdown-gating purposes) together from a
+    // live, execute-free Prepare — never from the catalog alone. Also
+    // returns whether the target is a view, reused below instead of a
+    // second LookupObjectType call.
+    bind->is_view = ReconcileViewColumnTypes(
+        conn, bind->table_name, bind->column_names,
+        bind->column_types, bind->column_descs);
 
     // Pagination-safety view-shape analysis (Smart Scan Planning Report) —
     // still gated to the paginated, PK-less case only; expensive
     // (RDB$VIEW_SOURCE text parse), and its result is consumed ONLY by
     // OpenNextPartitionCursor's pagination decision.
     if (bind->is_view && !bind->pk && paging) {
-        ViewAnalysis va = AnalyzeViewSource(conn, upper_for_view_check);
+        std::string upper_for_pagination_check = bind->table_name;
+        for (auto &c : upper_for_pagination_check) {
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+        ViewAnalysis va = AnalyzeViewSource(conn, upper_for_pagination_check);
         bind->is_view_simple_for_pagination =
             va.inspected && !va.has_join && !va.has_group_by &&
             !va.has_aggregate;
-    }
-
-    // Type/descriptor reconciliation (#33): a view's column metadata is
-    // frozen in RDB$FIELDS at CREATE VIEW time and can legitimately
-    // disagree with what Firebird's live DSQL compiler produces for the
-    // identical expression today (confirmed root cause: SUM() over a
-    // NUMERIC(10,2) column promotes to BIGINT-backed NUMERIC(18,2) at
-    // runtime, while the view's frozen catalog metadata claims
-    // INT128-backed DECIMAL(38,2) — allocating the DuckDB Vector from the
-    // stale wide type while the fetch writes the narrow real type crashes
-    // DuckDB's own Vector::VerifyVectorType assertion). Reconcile BOTH
-    // column_types (drives Vector allocation via return_types below) AND
-    // column_descs (drives FirebirdAppendValue's fetch-time accessor
-    // width) from a live, execute-free Prepare against the exact
-    // projected column list — never from the catalog alone. Only the
-    // character_set_id stays catalog-sourced (XSQLDA cannot supply it for
-    // BLOB columns; LoadTableSchema already reads it from RDB$FIELDS).
-    //
-    // Best-effort: if the live describe fails for any reason, keep the
-    // catalog-derived types (today's behavior, unchanged) rather than
-    // hard-failing the bind — no worse than the pre-fix baseline.
-    if (bind->is_view) {
-        try {
-            std::ostringstream probe_sql;
-            probe_sql << "SELECT ";
-            for (idx_t i = 0; i < bind->column_names.size(); ++i) {
-                if (i) probe_sql << ", ";
-                probe_sql << QuoteIdent(bind->column_names[i]);
-            }
-            probe_sql << " FROM " << QuoteIdent(bind->table_name);
-
-            FirebirdStatement probe(conn, probe_sql.str(),
-                                    FirebirdStatement::PrepareOnlyTag{});
-            const auto &live_cols = probe.columns();
-            if (live_cols.size() == bind->column_descs.size()) {
-                for (idx_t i = 0; i < live_cols.size(); ++i) {
-                    // Preserve the catalog-sourced character_set_id —
-                    // XSQLDA cannot supply it for BLOB columns (that slot
-                    // carries the blob subtype instead).
-                    FirebirdColumnDesc reconciled = live_cols[i];
-                    reconciled.character_set_id =
-                        bind->column_descs[i].character_set_id;
-                    bind->column_descs[i] = reconciled;
-                    bind->column_types[i] = FirebirdToDuckDBType(reconciled);
-                }
-            }
-        } catch (...) {
-            // Live describe failed — fall back to the catalog-derived
-            // types already in bind->column_types/column_descs.
-        }
     }
 
     return_types = bind->column_types;

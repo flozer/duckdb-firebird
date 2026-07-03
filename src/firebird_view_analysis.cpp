@@ -1,5 +1,9 @@
 #include "firebird_view_analysis.hpp"
 
+#include "firebird_types.hpp" // FirebirdToDuckDBType, QuoteIdent
+
+#include <sstream>
+
 #include <cctype>
 #include <string>
 
@@ -179,6 +183,56 @@ ViewAnalysis AnalyzeViewSource(FirebirdConnection &conn,
                        contains("AVG (") || contains("MIN (") ||
                        contains("MAX (") || contains("LIST (");
     return va;
+}
+
+bool ReconcileViewColumnTypes(FirebirdConnection &conn,
+                              const std::string &table_name,
+                              const duckdb::vector<std::string> &column_names,
+                              duckdb::vector<LogicalType> &column_types,
+                              duckdb::vector<FirebirdColumnDesc> &column_descs) {
+    std::string upper = table_name;
+    for (auto &c : upper) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+
+    std::string object_type;
+    if (!LookupObjectType(conn, upper, object_type)) {
+        return false;
+    }
+    const bool is_view = (object_type == "VIEW");
+    if (!is_view) {
+        return false;
+    }
+
+    try {
+        std::ostringstream probe_sql;
+        probe_sql << "SELECT ";
+        for (idx_t i = 0; i < column_names.size(); ++i) {
+            if (i) probe_sql << ", ";
+            probe_sql << QuoteIdent(column_names[i]);
+        }
+        probe_sql << " FROM " << QuoteIdent(table_name);
+
+        FirebirdStatement probe(conn, probe_sql.str(),
+                                FirebirdStatement::PrepareOnlyTag{});
+        const auto &live_cols = probe.columns();
+        if (live_cols.size() == column_descs.size()) {
+            for (idx_t i = 0; i < live_cols.size(); ++i) {
+                // Preserve the catalog-sourced character_set_id — XSQLDA
+                // cannot supply it for BLOB columns (that slot carries
+                // the blob subtype instead).
+                FirebirdColumnDesc reconciled = live_cols[i];
+                reconciled.character_set_id = column_descs[i].character_set_id;
+                column_descs[i] = reconciled;
+                column_types[i] = FirebirdToDuckDBType(reconciled);
+            }
+        }
+    } catch (...) {
+        // Live describe failed — fall back to the catalog-derived types
+        // already in column_types/column_descs.
+    }
+
+    return true;
 }
 
 } // namespace duckdb

@@ -170,6 +170,62 @@ SELECT EMP_ID, EMP_NAME, DEPT_NO FROM fb.main.V_ACTIVE_EMP ORDER BY EMP_ID;
 4	Diana Davis	600
 5	Erik Eklund	700
 
+# ---------------------------------------------------------------------------
+#  Type Lossless Hardening (#33), ATTACH path: the standalone
+#  firebird_scan(...) call path and the ATTACH-resolved fb.main.TABLE path
+#  bind through two DIFFERENT code paths (FirebirdScanBind vs
+#  FirebirdTableEntry::GetScanFunction) -- a fix in only one does not cover
+#  the other. This is the exact repro form from the original bug report.
+#
+#  A typeof()-only check is not sufficient here: DuckDB's planner derives
+#  the whole query's Vector types (LogicalGet::return_types) from the
+#  catalog entry's OWN persistent column list (TableCatalogEntry::columns),
+#  not from the scan's FunctionData alone -- so reconciling only the bind
+#  data (the way the standalone firebird_scan(...) fix does) is NOT enough
+#  for the ATTACH path: it silently corrupts values instead of crashing
+#  (narrower fetched bytes get Reference()'d into the output chunk and are
+#  reinterpreted downstream at the stale wider catalog type -- confirmed
+#  live during development: a bind-data-only fix produced no crash but
+#  printed "1313408178048120075825702.25" instead of a real payroll sum).
+#  The value cross-check below (same fan-out math as firebird_scan.test)
+#  proves the actual DATA survives correctly, not just that the reported
+#  type looks right.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT typeof(TOTAL_SALARY) = 'DECIMAL(18,2)'
+  FROM fb.main.V_DEPT_HEADCOUNT LIMIT 1;
+----
+true
+
+# Independent value cross-check: V_DEPT_HEADCOUNT is a self-join (EMPLOYEE e
+# JOIN EMPLOYEE m ON m.DEPT_NO = e.DEPT_NO, GROUP BY e.DEPT_NO -- see
+# scripts/setup_test_firebird.sh), so each department's TOTAL_SALARY is
+# headcount * sum(salary) for that department. This reproduces that
+# fan-out directly from EMPLOYEE (never touching the view's own frozen
+# catalog type), proving the reconciled VALUE is exactly right, not just
+# "didn't crash".
+query I
+SELECT SUM(TOTAL_SALARY) = (
+    SELECT SUM(cnt * total)
+      FROM (SELECT COUNT(*) AS cnt, SUM(SALARY) AS total
+              FROM fb.main.EMPLOYEE
+             GROUP BY DEPT_NO)
+  )
+  FROM fb.main.V_DEPT_HEADCOUNT;
+----
+true
+
+# Run a DIFFERENTLY-SHAPED query (column subset + WHERE filter, not
+# SELECT *) against the SAME memoized catalog entry, to prove the
+# once-per-entry reconciliation (guarded by the pk_loaded_ latch in
+# FirebirdTableEntry::GetScanFunction) is correct for any future query
+# shape against this view, not just the one that happened to run first.
+query I
+SELECT TOTAL_SALARY FROM fb.main.V_DEPT_HEADCOUNT WHERE DEPT_NO = '600';
+----
+766502.25
+
 # Materialized-view pattern via CTAS — once cached locally, queries are
 # free of Firebird round-trips.
 statement ok
