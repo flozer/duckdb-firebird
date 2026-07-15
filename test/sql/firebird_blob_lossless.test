@@ -1,0 +1,69 @@
+# name: test/sql/firebird_blob_lossless.test
+# description: ReadBlob must not drop segments after the first (issue #35)
+# group: [firebird]
+#
+# isc_get_segment's rc == 0 means "this call's segment completed without
+# truncation" -- it says nothing about whether more segments remain.
+# isc_segstr_eof is the only real end-of-blob signal. TBLOB_MULTISEG
+# (scripts/mkblob_fixture.cpp) is written via 51 genuinely separate
+# 80-byte isc_put_segment calls per column -- a plain SQL literal INSERT
+# does not create multiple physical segments regardless of declared
+# SEGMENT SIZE, so this is the only fixture that actually exercises the
+# bug. NOTE = 'START-NOTE-' + 4000x'N' + '-END-NOTE' (4020 bytes).
+# DATA = 'START-DATA-' + 4000x'D' + '-END-DATA' (4020 bytes, BLOB SUB_TYPE 0).
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+require-env ISC_PASSWORD
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird);
+
+# --- text BLOB (SUB_TYPE 1), multi-segment -----------------------------
+
+query I
+SELECT length(NOTE) FROM fb.main.TBLOB_MULTISEG WHERE ID = 1;
+----
+4020
+
+query I
+SELECT md5(NOTE) FROM fb.main.TBLOB_MULTISEG WHERE ID = 1;
+----
+8b0ecc5b1da53e0cd50a096b6c61884f
+
+query I
+SELECT starts_with(NOTE, 'START-NOTE-') AND ends_with(NOTE, '-END-NOTE')
+  FROM fb.main.TBLOB_MULTISEG WHERE ID = 1;
+----
+true
+
+# --- binary BLOB (SUB_TYPE 0), multi-segment ---------------------------
+# Validated as opaque bytes (checksum + partial hex), never as text.
+
+query I
+SELECT octet_length(DATA) FROM fb.main.TBLOB_MULTISEG WHERE ID = 1;
+----
+4020
+
+query I
+SELECT md5(DATA) FROM fb.main.TBLOB_MULTISEG WHERE ID = 1;
+----
+5a5473ca6ca300831ce18ee4066a6741
+
+query II
+SELECT hex(DATA[1:11]), hex(DATA[-9:]) FROM fb.main.TBLOB_MULTISEG WHERE ID = 1;
+----
+53544152542D444154412D	2D454E442D44415441
+
+# --- single-segment BLOB regression guard ------------------------------
+# FILE_STORAGE.PAYLOAD (short, single-segment) must be unaffected by the
+# fix -- these values are already asserted in firebird_scan.test; this
+# is an explicit same-fixture guard living alongside the multi-segment
+# cases so a future reader sees both side by side.
+
+query I
+SELECT octet_length(PAYLOAD) FROM fb.main.FILE_STORAGE WHERE FILE_ID = 3;
+----
+5

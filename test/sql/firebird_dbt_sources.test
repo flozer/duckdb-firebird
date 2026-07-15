@@ -74,8 +74,11 @@ true
 
 # ---------------------------------------------------------------------------
 #  Table ordering: tables appear alphabetically by RDB$RELATION_NAME.
-#  DEPT -> EMPLOYEE -> FILE_STORAGE -> TCHILD -> TPK_COMPOSITE -> TQUOTES
-#  -> V_ACTIVE_EMP.
+#  DEPT -> EMPLOYEE -> FILE_STORAGE -> TBLOB_MULTISEG -> TCHILD ->
+#  TPK_COMPOSITE -> TQUOTES -> V_ACTIVE_EMP. (Comment only -- the
+#  assertions below are pairwise instr() < checks between the named
+#  tables, not an exhaustive list, so TBLOB_MULTISEG's presence doesn't
+#  need its own assertion here.)
 # ---------------------------------------------------------------------------
 
 query T
@@ -151,7 +154,7 @@ query I
 SELECT (length(yaml) - length(replace(yaml, '- not_null', ''))) / length('- not_null')
   FROM t_dbt_yaml;
 ----
-5.0
+6.0
 
 # Composite PK: TPK_COMPOSITE must list A, B, LABEL and emit zero tests
 # blocks under its table.

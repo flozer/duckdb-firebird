@@ -22,6 +22,7 @@ SELECT table_name, constraint_type, COUNT(*)
 DEPT	PRIMARY KEY	1
 EMPLOYEE	PRIMARY KEY	1
 FILE_STORAGE	PRIMARY KEY	1
+TBLOB_MULTISEG	PRIMARY KEY	1
 TIDX_INACTIVE	PRIMARY KEY	1
 TPK_COMPOSITE	PRIMARY KEY	1
 TQUOTES	PRIMARY KEY	1
@@ -138,3 +139,18 @@ query I
 SELECT LENGTH(comment) FROM firebird_comments('fb') WHERE object_name='DEPT' AND object_type='TABLE';
 ----
 4100
+
+# The LENGTH check above passes even with issue #35's bug present: this
+# specific comment happens to be stored as a single Firebird segment
+# (a plain COMMENT ON ... IS '...' statement doesn't create multiple
+# physical segments -- see scripts/mkblob_fixture.cpp's header comment),
+# so it never could have caught the bug despite being written to. This
+# assertion doesn't change that (still not a multi-segment repro -- see
+# firebird_blob_lossless.test for the real one), but locks down the
+# exact tail of the comment so a future accidental truncation to
+# anything shorter than the true value is still caught here too.
+query I
+SELECT ends_with(comment, '_COMMENT_TEST_DEPT_L')
+  FROM firebird_comments('fb') WHERE object_name='DEPT' AND object_type='TABLE';
+----
+true
