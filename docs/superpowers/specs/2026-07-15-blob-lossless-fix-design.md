@@ -83,12 +83,49 @@ CREATE TABLE TBLOB_MULTISEG (
 );
 ```
 
-`SEGMENT SIZE 80` is set explicitly rather than relying on Firebird's
-unspecified default — the default has actually varied across engine
-versions/builds, and this bug must reproduce deterministically on every
-supported Firebird version, not "whenever the default happens to be
-small." At 80 bytes/segment, a content string of a few KB forces dozens
-of segments through the exact `isc_get_segment` loop under test.
+**Correction, confirmed empirically before writing the plan**: a plain
+`INSERT ... VALUES ('...')` SQL literal does **not** make Firebird
+actually split the value into multiple physical segments, regardless of
+the column's declared `SEGMENT SIZE` — verified directly: a 20,020-byte
+literal (2.4× the client's 8192-byte read buffer, 250× the declared
+80-byte segment size) round-tripped correctly through the *current,
+unfixed* `ReadBlob`, because the engine stored the whole literal as one
+segment. `SEGMENT SIZE` in DDL only advises a low-level writer calling
+`isc_put_segment` directly about a *suggested* chunk size — it does not
+retroactively chunk a value the DSQL engine received as a single string.
+The existing DEPT long-comment fixture (`COMMENT ON TABLE DEPT IS
+'...'`, ~4100 chars) has the identical property, which is *why* it never
+actually could have caught this bug despite the code comment claiming
+that was its purpose — it was always stored as one segment too.
+
+The only way to author a genuinely multi-segment BLOB (and so the only
+way to actually exercise the buggy loop) is to write it through
+`isc_put_segment` directly, one chunk at a time — confirmed empirically:
+the same 4,020-byte content, written as 51 explicit 80-byte
+`isc_put_segment` calls instead of one literal, reproduced the bug
+exactly (read back as 80 bytes — segment 1 only) against the current
+code, and read back correctly (4,020 bytes, correct `md5`, both markers
+present) after the fix.
+
+`scripts/mkblob_fixture.cpp` is a new, small, throwaway helper — compiled
+with the *same* toolchain already used to build the extension itself
+(`cl.exe` via `vcvars64.bat` on Windows, `g++` already installed by the
+Linux CI workflow), using only `ibase.h`/`fbclient` (already a build
+dependency for headers) — no new dependency. It attaches to the already-
+provisioned test database, opens `TBLOB_MULTISEG`'s row via
+`isc_create_blob2`, writes the content in a loop of `isc_put_segment`
+calls (mirroring the confirmed-working verification helper), and updates
+the row via a plain parameterized `UPDATE ... SET col = ?`. `scripts/
+setup_test_firebird.sh` compiles and runs it once, right after creating
+`TBLOB_MULTISEG` and inserting its row (empty/placeholder BLOBs from a
+plain `INSERT`, then overwritten by the helper) — idempotent and
+deterministic: same content, same segment boundaries, every run.
+
+`SEGMENT SIZE 80` stays in the DDL as documentation/intent (and because
+`isc_create_blob2`/`isc_put_segment` do still respect it as a chunk-size
+ceiling when writing through the low-level API, which is exactly the
+path this fixture now uses) — it was never wrong to declare, only
+insufficient on its own without a matching low-level writer.
 
 Content, for both the text and binary column, is built from three
 distinguishable markers so a test can prove the *whole* BLOB survived,
@@ -111,24 +148,24 @@ hardcoded into the test as the expected values — so the test asserts
 byte-for-byte correctness, not merely "didn't crash" or "length looks
 plausible."
 
-Concretely, both columns are populated with a literal string built the
-same way the existing DEPT comment fixture already does it — a fixed
-marker, followed by a many-times-repeated literal chunk written directly
-in the SQL text (no server-side string-repeat function, for portability
-across FB3/4/5), followed by a distinct closing marker:
+Concretely, both columns get the same shape of content, written via
+`mkblob_fixture.cpp`'s `isc_put_segment` loop rather than a SQL literal
+(per the correction above):
 
-```
-NOTE: 'START-NOTE-' || 'MID' repeated ~1300x (>4000 chars total) || '-END-NOTE'
-DATA: 'START-DATA-' || 'MID' repeated ~1300x (>4000 chars total) || '-END-DATA'
+```text
+NOTE: "START-NOTE-" + 4000x 'N' + "-END-NOTE"   (4020 bytes, 51 real 80-byte segments)
+DATA: "START-DATA-" + 4000x 'D' + "-END-DATA"   (4020 bytes, 51 real 80-byte segments)
 ```
 
-(`DATA` is still a `BLOB SUB_TYPE 0` column — using a printable literal
-for its content is only about what's easy to author and diff in the SQL
-fixture file; the TEST validates it as opaque bytes via `md5()`/length,
-never by string-comparing it as text, which is the actual point of
-having a separate binary case.) The exact literal, its length, and its
-`md5()` value are fixed at fixture-authoring time and hardcoded into the
-test file alongside it.
+(`DATA` is still a `BLOB SUB_TYPE 0` column — using a printable fill
+byte for its content is only about what's easy to author/diff/verify by
+eye; the TEST validates it as opaque bytes via `md5()`/length, never by
+string-comparing it as text, which is the actual point of having a
+separate binary case.) The exact content, its length, and its `md5()`
+value are fixed once the fixture is provisioned and hardcoded into the
+test file — captured by running the fixture and reading its values back
+(via a temporarily-applied fix, so the captured values are the *correct*
+ones — see Tests below), not hand-computed.
 
 ## Tests
 
