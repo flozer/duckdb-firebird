@@ -908,13 +908,15 @@ already follows for its existing hard-type cases — `DECFLOAT` as `VARCHAR`
 below, `CHARACTER SET NONE`'s explicit `none_encoding` modes (see the usage
 guide) — not a claim of a new automated check that enforces it everywhere.
 
-Two known, tracked exceptions to this policy exist today:
+One known, tracked exception to this policy exists today:
 
 - `TIME WITH TIME ZONE` currently discards the original zone/offset on
   read; already flagged by `firebird_type_audit`'s `time_tz` finding above.
-- Multi-segment `BLOB` text can be truncated by a segment-loop defect in
-  `ReadBlob`, tracked as issue #35 — a separate root cause from the view
-  column-type mismatch fixed as issue #33 above.
+
+(Issue #35 — multi-segment `BLOB` truncated by a segment-loop defect in
+`ReadBlob` — is fixed; `ReadBlob` now keeps reading segments until
+`isc_segstr_eof`, the only real end-of-blob signal, instead of
+incorrectly stopping on the first `rc == 0`.)
 
 ### `DECFLOAT(16)` / `DECFLOAT(34)`
 

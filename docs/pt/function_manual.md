@@ -1684,15 +1684,16 @@ que este codigo ja segue para seus casos de tipo dificil existentes —
 de `CHARACTER SET NONE` (veja o guia de uso) — nao a afirmacao de um novo
 mecanismo automatico que a verifica em todo lugar.
 
-Duas excecoes conhecidas e rastreadas a essa politica existem hoje:
+Uma excecao conhecida e rastreada a essa politica existe hoje:
 
 - `TIME WITH TIME ZONE` atualmente descarta a zona/offset original na
   leitura; ja sinalizado pelo finding `time_tz` de `firebird_type_audit`
   acima.
-- `BLOB` de texto multi-segmento pode ser truncado por um defeito no loop
-  de segmentos de `ReadBlob`, rastreado como issue #35 — uma causa raiz
-  separada da divergencia de tipo de coluna em view corrigida como issue
-  #33 acima.
+
+(Issue #35 — BLOB multi-segmento truncado por um defeito no loop de
+segmentos de `ReadBlob` — foi corrigida; `ReadBlob` agora continua lendo
+segmentos ate `isc_segstr_eof`, o unico sinal real de fim de BLOB, em
+vez de parar erroneamente no primeiro `rc == 0`.)
 
 ### `DECFLOAT(16)` / `DECFLOAT(34)`
 
