@@ -119,6 +119,19 @@ jobs:
               SELECT EMP_ID, EMP_NAME, DEPT_NO
                 FROM EMPLOYEE WHERE ACTIVE = TRUE;
           COMMIT;
+          -- Kept in sync with scripts/setup_test_firebird.sh — these two
+          -- views are exercised by firebird_scan.test and
+          -- firebird_attach.test's #33 view-type-reconciliation regression
+          -- cases, both of which run in this workflow.
+          CREATE OR ALTER VIEW V_ALL_EMP (EMP_ID, EMP_NAME) AS
+              SELECT EMP_ID, EMP_NAME FROM EMPLOYEE;
+          COMMIT;
+          CREATE OR ALTER VIEW V_DEPT_HEADCOUNT (DEPT_NO, HEADCOUNT, TOTAL_SALARY) AS
+              SELECT e.DEPT_NO, COUNT(*), SUM(e.SALARY)
+                FROM EMPLOYEE e
+                JOIN EMPLOYEE m ON m.DEPT_NO = e.DEPT_NO
+               GROUP BY e.DEPT_NO;
+          COMMIT;
           SQL
 
           if [ "${{ matrix.fb_major }}" != "3" ]; then
