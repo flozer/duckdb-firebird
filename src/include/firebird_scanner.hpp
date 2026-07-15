@@ -156,6 +156,7 @@ void LoadTableSchema(FirebirdConnection &conn,
 // out_names / out_types / out_descs triple that LoadTableSchema fills.
 struct FirebirdTableSchema {
     std::string table_name;
+    bool is_view = false;
     duckdb::vector<std::string> names;
     duckdb::vector<LogicalType> types;
     duckdb::vector<FirebirdColumnDesc> descs;

@@ -97,6 +97,20 @@ without the server-side pushdown optimization. See `firebird_explain_pushdown`'s
 `view_heavy` / `view_heavy_reasons` columns below to check this ahead of
 time.
 
+#### View column type reconciliation
+
+When the scan target is a view, column types are reconciled against
+Firebird's live, runtime-described column layout rather than trusted from
+the view's catalog metadata alone (both the DuckDB column type and the
+internal fetch descriptor are corrected together). A view's
+computed/aggregate column type (e.g. a `SUM()` over a `NUMERIC` column) is
+frozen at `CREATE VIEW` time and can legitimately disagree with what
+Firebird's live SQL compiler produces for the identical expression today —
+without this reconciliation, that mismatch could crash the scan (a real
+bug, fixed as issue #33). Base-table scans are unaffected (a table's
+storage width cannot disagree with its own catalog metadata) and pay no
+added cost from this reconciliation.
+
 ## Level 2 - Catalog discovery
 
 ### `firebird_tables(connection_string)`
@@ -881,6 +895,26 @@ Controls the maximum number of idle connections kept by the pool.
 Controls how long idle pooled connections may remain reusable.
 
 ## Type mapping notes
+
+### Type handling policy
+
+The rule this extension follows for every Firebird type it surfaces: if
+DuckDB has a lossless equivalent, use it; if not, expose the value as a
+lossless `VARCHAR` (never truncate it to fit) or fail explicitly (never
+silently substitute a wrong value). Nothing is truncated, rounded, or
+returned incorrect without either a visible error or an explicit, already
+documented caveat. This is a description of the policy this codebase
+already follows for its existing hard-type cases — `DECFLOAT` as `VARCHAR`
+below, `CHARACTER SET NONE`'s explicit `none_encoding` modes (see the usage
+guide) — not a claim of a new automated check that enforces it everywhere.
+
+Two known, tracked exceptions to this policy exist today:
+
+- `TIME WITH TIME ZONE` currently discards the original zone/offset on
+  read; already flagged by `firebird_type_audit`'s `time_tz` finding above.
+- Multi-segment `BLOB` text can be truncated by a segment-loop defect in
+  `ReadBlob`, tracked as issue #35 — a separate root cause from the view
+  column-type mismatch fixed as issue #33 above.
 
 ### `DECFLOAT(16)` / `DECFLOAT(34)`
 

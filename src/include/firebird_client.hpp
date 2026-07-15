@@ -103,6 +103,19 @@ public:
     // SQL — fewer or extra parameters is a programming error.
     FirebirdStatement(FirebirdConnection &conn, const std::string &sql,
                       const std::vector<Value> &params);
+
+    // Prepares and describes `sql` WITHOUT executing it — no cursor is
+    // opened, no rows are ever fetchable from an instance constructed
+    // this way. Used to cheaply learn the ACTUAL runtime column layout
+    // (via XSQLDA) for a query whose static catalog metadata might be
+    // stale (e.g. a view's computed/aggregate column, whose type was
+    // frozen at CREATE VIEW time and can legitimately disagree with
+    // what Firebird's live DSQL compiler produces for the identical
+    // expression today). Call .columns() to read the described layout.
+    struct PrepareOnlyTag {};
+    FirebirdStatement(FirebirdConnection &conn, const std::string &sql,
+                      PrepareOnlyTag);
+
     ~FirebirdStatement();
 
     FirebirdStatement(const FirebirdStatement &) = delete;

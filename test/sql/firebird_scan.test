@@ -286,3 +286,42 @@ statement error
 SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'DOES_NOT_EXIST') LIMIT 1;
 ----
 firebird_scan: table 'DOES_NOT_EXIST'
+
+# ---------------------------------------------------------------------------
+#  Type Lossless Hardening (#33): a view's computed/aggregate column can
+#  have a catalog-frozen type (set at CREATE VIEW time) that disagrees
+#  with Firebird's live runtime type for the identical expression today.
+#  V_DEPT_HEADCOUNT's TOTAL_SALARY (SUM(EMPLOYEE.SALARY), SALARY is
+#  NUMERIC(10,2)) is catalogued as INT128-backed DECIMAL(38,2), but
+#  Firebird's live SUM() promotion produces BIGINT-backed NUMERIC(18,2).
+#  Before the fix: "INTERNAL Error: Expected vector of type INT64, but
+#  found vector of type INT128". This must not just avoid crashing — the
+#  value AND the reconciled DuckDB type must both be correct.
+# ---------------------------------------------------------------------------
+
+statement ok
+SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'V_DEPT_HEADCOUNT');
+
+query I
+SELECT typeof(TOTAL_SALARY) = 'DECIMAL(18,2)'
+  FROM firebird_scan('${FIREBIRD_TEST_DB}', 'V_DEPT_HEADCOUNT') LIMIT 1;
+----
+true
+
+# V_DEPT_HEADCOUNT is defined as a self-join (EMPLOYEE e JOIN EMPLOYEE m
+# ON m.DEPT_NO = e.DEPT_NO, GROUP BY e.DEPT_NO — see
+# scripts/setup_test_firebird.sh), so each department's TOTAL_SALARY is
+# headcount * sum(salary) for that department, not a plain sum(salary).
+# The independent check below reproduces that fan-out directly from
+# EMPLOYEE (never touching the view), so it proves the reconciled value
+# is exactly right, not just "didn't crash".
+query I
+SELECT SUM(TOTAL_SALARY) = (
+    SELECT SUM(cnt * total)
+      FROM (SELECT COUNT(*) AS cnt, SUM(SALARY) AS total
+              FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+             GROUP BY DEPT_NO)
+  )
+  FROM firebird_scan('${FIREBIRD_TEST_DB}', 'V_DEPT_HEADCOUNT');
+----
+true

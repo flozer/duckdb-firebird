@@ -292,7 +292,8 @@ duckdb::vector<FirebirdTableSchema> LoadAllTableSchemas(
         "       COALESCE(f.RDB$FIELD_SCALE, 0), "
         "       COALESCE(f.RDB$FIELD_LENGTH, 0), "
         "       COALESCE(f.RDB$CHARACTER_SET_ID, -1), "
-        "       COALESCE(rf.RDB$NULL_FLAG, f.RDB$NULL_FLAG, 0) "
+        "       COALESCE(rf.RDB$NULL_FLAG, f.RDB$NULL_FLAG, 0), "
+        "       r.RDB$VIEW_BLR IS NOT NULL "
         "  FROM RDB$RELATION_FIELDS rf "
         "  JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE "
         "  JOIN RDB$RELATIONS r ON r.RDB$RELATION_NAME = rf.RDB$RELATION_NAME "
@@ -314,6 +315,7 @@ duckdb::vector<FirebirdTableSchema> LoadAllTableSchemas(
         if (!current || current->table_name != rel) {
             FirebirdTableSchema ts;
             ts.table_name = rel;
+            ts.is_view = cursor->GetBool(8);
             result.push_back(std::move(ts));
             current = &result.back();
         }
@@ -562,29 +564,41 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
                                    bind->column_names, bind->column_types);
     }
 
-    // View-shape lookup for the ROWS-pagination safety decision. Only
-    // worth the extra round trip when there is no single-column numeric
-    // PK to fall back on for ordering — that path is already safe and
-    // cheap, so we don't pay this cost for the common case. Also gated on
-    // `paging`: is_view/is_view_simple_for_pagination are consumed ONLY by
-    // OpenNextPartitionCursor's pagination decision below, so a plain
-    // (non-paginated) scan of a PK-less table/view must not pay this extra
-    // round trip for a value it will never use.
-    if (!bind->pk && paging) {
-        std::string upper = bind->table_name;
-        for (auto &c : upper) {
+    // View-type check + type/descriptor reconciliation (#33): a view's
+    // column metadata is frozen in RDB$FIELDS at CREATE VIEW time and can
+    // legitimately disagree with what Firebird's live DSQL compiler
+    // produces for the identical expression today (confirmed root cause:
+    // SUM() over a NUMERIC(10,2) column promotes to BIGINT-backed
+    // NUMERIC(18,2) at runtime, while the view's frozen catalog metadata
+    // claims INT128-backed DECIMAL(38,2) — allocating the DuckDB Vector
+    // from the stale wide type crashes DuckDB's own
+    // Vector::VerifyVectorType assertion once the fetch tries to write
+    // the narrow real type into it). ReconcileViewColumnTypes (shared
+    // with the ATTACH path's FirebirdTableEntry::GetScanFunction, in
+    // firebird_storage.cpp) corrects column_types (the field that
+    // actually prevents the crash — it drives return_types/Vector
+    // allocation below) and column_descs (kept consistent with the real
+    // wire type for charset/pushdown-gating purposes) together from a
+    // live, execute-free Prepare — never from the catalog alone. Also
+    // returns whether the target is a view, reused below instead of a
+    // second LookupObjectType call.
+    bind->is_view = ReconcileViewColumnTypes(
+        conn, bind->table_name, bind->column_names,
+        bind->column_types, bind->column_descs);
+
+    // Pagination-safety view-shape analysis (Smart Scan Planning Report) —
+    // still gated to the paginated, PK-less case only; expensive
+    // (RDB$VIEW_SOURCE text parse), and its result is consumed ONLY by
+    // OpenNextPartitionCursor's pagination decision.
+    if (bind->is_view && !bind->pk && paging) {
+        std::string upper_for_pagination_check = bind->table_name;
+        for (auto &c : upper_for_pagination_check) {
             c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         }
-        std::string object_type;
-        if (LookupObjectType(conn, upper, object_type)) {
-            bind->is_view = (object_type == "VIEW");
-            if (bind->is_view) {
-                ViewAnalysis va = AnalyzeViewSource(conn, upper);
-                bind->is_view_simple_for_pagination =
-                    va.inspected && !va.has_join && !va.has_group_by &&
-                    !va.has_aggregate;
-            }
-        }
+        ViewAnalysis va = AnalyzeViewSource(conn, upper_for_pagination_check);
+        bind->is_view_simple_for_pagination =
+            va.inspected && !va.has_join && !va.has_group_by &&
+            !va.has_aggregate;
     }
 
     return_types = bind->column_types;

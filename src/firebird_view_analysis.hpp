@@ -40,4 +40,28 @@ struct ViewAnalysis {
 ViewAnalysis AnalyzeViewSource(FirebirdConnection &conn,
                                const std::string &upper_table);
 
+// Reconciles column_types/column_descs for a VIEW target from a live,
+// execute-free XSQLDA describe, correcting for the case where the view's
+// catalog-frozen column metadata (RDB$FIELDS, set at CREATE VIEW time)
+// disagrees with what Firebird's live DSQL compiler produces for the
+// identical projected expression today (e.g. SUM() promotion widening or
+// narrowing a NUMERIC column's effective storage width). column_types/
+// column_descs are mutated IN PLACE only when the target is a view AND
+// the live describe succeeds with a matching column count;
+// character_set_id is always preserved from the original column_descs
+// entries (XSQLDA cannot supply it for BLOB columns — that slot carries
+// the blob subtype instead). Best-effort: any failure (exception, column
+// count mismatch) leaves column_types/column_descs unchanged.
+//
+// Returns true iff the target is a view (regardless of whether
+// reconciliation changed anything) — callers that also need "is this a
+// view" for other purposes (e.g. pagination-safety decisions) can reuse
+// this return value instead of paying for a second LookupObjectType
+// call.
+bool ReconcileViewColumnTypes(FirebirdConnection &conn,
+                              const std::string &table_name,
+                              const duckdb::vector<std::string> &column_names,
+                              duckdb::vector<LogicalType> &column_types,
+                              duckdb::vector<FirebirdColumnDesc> &column_descs);
+
 } // namespace duckdb

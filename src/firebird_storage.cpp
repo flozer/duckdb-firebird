@@ -27,6 +27,7 @@
 #include "firebird_dbt_sources.hpp"
 #include "firebird_scanner.hpp"
 #include "firebird_client.hpp"
+#include "firebird_view_analysis.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -122,10 +123,14 @@ public:
         data->pool = pool_;
         data->pk_descriptor = pk_descriptor_; // cached at ATTACH, zero I/O
 
-        // PK probe — lazy + memoised. The first scan against a table
-        // pays the three RDB$ round-trips; subsequent scans return the
-        // cached PrimaryKeyInfo (or nullopt) for free. The probe uses
-        // the pool so we don't pay the connect cost on top.
+        // View column types/descriptors are already correct here — they
+        // were reconciled in FirebirdSchemaEntry::EnsureTablesLoaded's
+        // add_entry lambda, against local mutable copies, BEFORE this
+        // (shared, published) TableCatalogEntry was ever constructed. So
+        // this method only has to serve the PK-probe cache: lazy +
+        // memoised under pk_lock_, the first scan against a table pays
+        // the round trip, subsequent scans (and concurrent scans, once
+        // the lock is released) reuse the cached result for free.
         {
             std::lock_guard<std::mutex> g(pk_lock_);
             if (!pk_loaded_) {
@@ -368,9 +373,25 @@ private:
         // per-table fallback below.
         auto add_entry = [&](const std::string &table_name,
                              const duckdb::vector<std::string> &col_names,
-                             const duckdb::vector<LogicalType> &col_types,
-                             duckdb::vector<FirebirdColumnDesc> col_descs) {
+                             duckdb::vector<LogicalType> col_types,
+                             duckdb::vector<FirebirdColumnDesc> col_descs,
+                             bool is_view) {
             if (col_names.empty()) return;
+            // View column types/descs must be finalized BEFORE the entry is
+            // built and published — FirebirdTableEntry instances are shared
+            // across every connection, so mutating a published entry's
+            // columns later (as GetScanFunction used to do) is a data race
+            // against concurrent readers (DESCRIBE, information_schema,
+            // catalog introspection) that access GetColumns() without going
+            // through GetScanFunction first. Reconciling here, on local
+            // mutable copies, means info.columns (and therefore
+            // cached_column_types_, mirrored from it in the
+            // FirebirdTableEntry constructor) are correct at construction
+            // time — nothing downstream needs to mutate a shared entry.
+            if (is_view) {
+                ReconcileViewColumnTypes(conn, table_name, col_names,
+                                         col_types, col_descs);
+            }
             CreateTableInfo info(catalog.GetName(), this->name, table_name);
             for (size_t i = 0; i < col_names.size(); ++i) {
                 info.columns.AddColumn(ColumnDefinition(col_names[i], col_types[i]));
@@ -457,7 +478,7 @@ private:
             auto schemas = LoadAllTableSchemas(conn, none_encoding_);
             for (auto &ts : schemas) {
                 add_entry(ts.table_name, ts.names, ts.types,
-                          std::move(ts.descs));
+                          std::move(ts.descs), ts.is_view);
             }
             batch_ok = true;
         } catch (std::exception &e) {
@@ -480,14 +501,19 @@ private:
             // firebird_scan('SELECT * FROM MON$…') and don't belong in a
             // user-facing catalog.
             std::vector<std::string> table_names;
+            std::vector<bool> table_is_view;
             try {
                 auto cur = conn.OpenCursor(
-                    "SELECT TRIM(r.RDB$RELATION_NAME) "
+                    "SELECT TRIM(r.RDB$RELATION_NAME), "
+                    "       r.RDB$VIEW_BLR IS NOT NULL "
                     "  FROM RDB$RELATIONS r "
                     " WHERE r.RDB$SYSTEM_FLAG = 0 "
                     "   AND (r.RDB$RELATION_TYPE IS NULL OR r.RDB$RELATION_TYPE <> 3) "
                     " ORDER BY r.RDB$RELATION_NAME");
-                while (cur->Fetch()) table_names.push_back(cur->GetText(0));
+                while (cur->Fetch()) {
+                    table_names.push_back(cur->GetText(0));
+                    table_is_view.push_back(cur->GetBool(1));
+                }
             } catch (std::exception &e) {
                 // The fallback's own discovery query failed too — a genuine
                 // connection / credential / permission problem, not a
@@ -502,7 +528,8 @@ private:
             // One RDB$RELATION_FIELDS round-trip per table. Individual table
             // failures are downgraded to a skip so a single bad relation
             // doesn't poison the whole ATTACH.
-            for (auto &table_name : table_names) {
+            for (size_t ti = 0; ti < table_names.size(); ++ti) {
+                const auto &table_name = table_names[ti];
                 try {
                     duckdb::vector<std::string> col_names;
                     duckdb::vector<LogicalType> col_types;
@@ -511,7 +538,7 @@ private:
                                     col_names, col_types, col_descs,
                                     none_encoding_);
                     add_entry(table_name, col_names, col_types,
-                              std::move(col_descs));
+                              std::move(col_descs), table_is_view[ti]);
                 } catch (std::exception &) {
                     // Skip — table will simply not appear in fb.main.
                 }
