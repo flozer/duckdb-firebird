@@ -3,8 +3,17 @@ name: Build + Test Linux x64 (FB 3/4/5 matrix)
 # Builds the extension once and runs the SQL test suites against three
 # Firebird major versions (3, 4, 5) sequentially on a single Ubuntu 24.04
 # runner. The FB server is started in a Docker container, port-mapped to
-# localhost:3050 — the suite connects via TCP so the client lib in the
-# runner doesn't need an exact version match with the server.
+# localhost:3050. The client library used to talk to it is extracted from
+# that SAME container image (see "Extract matching libfbclient" below) —
+# earlier versions of this workflow used the runner's system-wide
+# libfbclient.so.2 (installed once via apt, always Firebird 3.0 on Ubuntu
+# noble) for all three matrix legs, which meant fb4/fb5 ran an FB3 client
+# against an FB4/FB5 server: a real client/server wire-protocol mismatch,
+# not a version the client and server ever agree to negotiate down to.
+# That surfaced as "sqlcode -204 Data type unknown" preparing a query
+# against a self-join/aggregate view (see issue #40) — nothing to do with
+# extension code, purely this workflow using one fixed client library for
+# every server version.
 
 on:
   push:
@@ -130,6 +139,29 @@ jobs:
 
           # Suite tests connect over TCP — expose the URL form.
           echo "FIREBIRD_TEST_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/test.fdb?charset=UTF8" >> $GITHUB_ENV
+
+      - name: Extract matching libfbclient from the fb${{ matrix.fb_major }} container
+        run: |
+          # The extension loads libfbclient.so.2 at runtime via dlopen
+          # (src/firebird_client_loader.cpp) rather than linking it at
+          # build time, so whatever copy is on the runner's library search
+          # path is what actually talks wire protocol to the server. Pull
+          # the client lib straight out of THIS job's own container image
+          # so it's always version-matched to the server it's about to
+          # talk to, instead of relying on the runner's single system-wide
+          # apt-installed copy (always FB3.0 on Ubuntu noble).
+          LIB_IN_CONTAINER=$(docker exec fb sh -c "find / -xdev -name 'libfbclient.so*' 2>/dev/null | head -1")
+          if [ -z "$LIB_IN_CONTAINER" ]; then
+            echo "::error::could not locate libfbclient.so* inside the fb${{ matrix.fb_major }} container"
+            exit 1
+          fi
+          echo "found $LIB_IN_CONTAINER in container"
+          # -L follows symlinks: the found path is very likely the
+          # SONAME symlink (libfbclient.so.2 -> libfbclient.so.2.x.y), and
+          # copying without dereferencing would produce a broken symlink
+          # on the runner (its target wouldn't exist outside the container).
+          docker cp -L "fb:$LIB_IN_CONTAINER" ./libfbclient-fb${{ matrix.fb_major }}.so.2
+          echo "DUCKDB_FIREBIRD_CLIENT_LIBRARY=$PWD/libfbclient-fb${{ matrix.fb_major }}.so.2" >> $GITHUB_ENV
 
       - name: Pin DuckDB version
         run: |
