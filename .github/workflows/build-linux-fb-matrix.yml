@@ -105,6 +105,24 @@ jobs:
           -- (information_schema.columns) assert against.
           ALTER TABLE EMPLOYEE ADD NAME_LEN COMPUTED BY (CHAR_LENGTH(EMP_NAME));
           COMMIT;
+          -- Kept in sync with scripts/setup_test_firebird.sh — DEPT + the
+          -- FK + EMP_UPPER_NAME_IDX give EMPLOYEE a PK, an FK, and an
+          -- expression index, which firebird_index_profile.test requires
+          -- (>1 index row on EMPLOYEE).
+          CREATE TABLE DEPT (
+              DEPT_NO   VARCHAR(3) NOT NULL PRIMARY KEY,
+              DEPT_NAME VARCHAR(40)
+          );
+          INSERT INTO DEPT VALUES ('600', 'Engineering');
+          INSERT INTO DEPT VALUES ('700', 'Sales');
+          INSERT INTO DEPT VALUES ('900', 'Support');
+          COMMIT;
+          ALTER TABLE EMPLOYEE
+              ADD CONSTRAINT FK_EMP_DEPT FOREIGN KEY (DEPT_NO)
+              REFERENCES DEPT (DEPT_NO) ON UPDATE CASCADE ON DELETE SET NULL;
+          COMMIT;
+          CREATE INDEX EMP_UPPER_NAME_IDX ON EMPLOYEE COMPUTED BY (UPPER(EMP_NAME));
+          COMMIT;
           CREATE TABLE FILE_STORAGE (
             FILE_ID  INTEGER NOT NULL PRIMARY KEY,
             NAME     VARCHAR(40) NOT NULL,
@@ -118,6 +136,41 @@ jobs:
           CREATE OR ALTER VIEW V_ACTIVE_EMP (EMP_ID, EMP_NAME, DEPT_NO) AS
               SELECT EMP_ID, EMP_NAME, DEPT_NO
                 FROM EMPLOYEE WHERE ACTIVE = TRUE;
+          COMMIT;
+          -- Kept in sync with scripts/setup_test_firebird.sh — these two
+          -- views are exercised by firebird_scan.test and
+          -- firebird_attach.test's #33 view-type-reconciliation regression
+          -- cases, both of which run in this workflow.
+          CREATE OR ALTER VIEW V_ALL_EMP (EMP_ID, EMP_NAME) AS
+              SELECT EMP_ID, EMP_NAME FROM EMPLOYEE;
+          COMMIT;
+          CREATE OR ALTER VIEW V_DEPT_HEADCOUNT (DEPT_NO, HEADCOUNT, TOTAL_SALARY) AS
+              SELECT e.DEPT_NO, COUNT(*), SUM(e.SALARY)
+                FROM EMPLOYEE e
+                JOIN EMPLOYEE m ON m.DEPT_NO = e.DEPT_NO
+               GROUP BY e.DEPT_NO;
+          COMMIT;
+          -- Kept in sync with scripts/fixture_index_profile.sql —
+          -- firebird_index_profile.test also requires a zero-index table
+          -- (TNO_INDEX) and a PK-plus-one-inactive-index table
+          -- (TIDX_INACTIVE).
+          CREATE TABLE TNO_INDEX (
+              CODE  VARCHAR(10),
+              QTY   INTEGER,
+              NOTE  VARCHAR(20)
+          );
+          INSERT INTO TNO_INDEX VALUES ('A1', 10, 'first');
+          INSERT INTO TNO_INDEX VALUES ('B2', 20, 'second');
+          COMMIT;
+          CREATE TABLE TIDX_INACTIVE (
+              ID    INTEGER NOT NULL PRIMARY KEY,
+              QTY   INTEGER,
+              NOTE  VARCHAR(20)
+          );
+          INSERT INTO TIDX_INACTIVE VALUES (1, 5, 'x');
+          COMMIT;
+          CREATE INDEX IDX_TIDX_INACTIVE_QTY ON TIDX_INACTIVE (QTY);
+          ALTER INDEX IDX_TIDX_INACTIVE_QTY INACTIVE;
           COMMIT;
           SQL
 
