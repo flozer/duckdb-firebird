@@ -141,6 +141,19 @@ CREATE OR ALTER VIEW V_MULTILINE_KW (DEPT_NO, N) AS
         BY e.DEPT_NO;
 COMMIT;
 
+-- Multi-segment BLOB fixture (issue #35) -- NOTE/DATA start as short
+-- placeholders here; scripts/mkblob_fixture.cpp overwrites them with
+-- genuinely multi-segment content right after this heredoc runs (a
+-- plain SQL literal, even with SEGMENT SIZE declared, is stored as one
+-- segment -- see that file's header comment).
+CREATE TABLE TBLOB_MULTISEG (
+    ID    INTEGER NOT NULL PRIMARY KEY,
+    NOTE  BLOB SUB_TYPE 1 SEGMENT SIZE 80,
+    DATA  BLOB SUB_TYPE 0 SEGMENT SIZE 80
+);
+INSERT INTO TBLOB_MULTISEG VALUES (1, 'placeholder', CAST('placeholder' AS BLOB SUB_TYPE 0));
+COMMIT;
+
 -- Apostrophe fixture — TQUOTES exercises the prepared-statement bind path
 -- (firebird_bind_params.test): string filters must parametrise so embedded
 -- apostrophes can't break the SQL. Mirrors scripts/smoke_fixture.sql; also
@@ -242,6 +255,25 @@ CREATE INDEX IDX_TIDX_INACTIVE_QTY ON TIDX_INACTIVE (QTY);
 ALTER INDEX IDX_TIDX_INACTIVE_QTY INACTIVE;
 COMMIT;
 EOF
+
+# Overwrite TBLOB_MULTISEG's placeholder BLOBs with genuinely
+# multi-segment content (issue #35) -- see scripts/mkblob_fixture.cpp's
+# header comment for why a SQL literal can't do this.
+MKBLOB_SRC="$(dirname "$0")/mkblob_fixture.cpp"
+MKBLOB_BIN="$(dirname "$FIREBIRD_TEST_DB")/mkblob_fixture"
+if command -v g++ >/dev/null 2>&1; then
+    FB_INC="${FB_SDK_ROOT:-/usr}/include"
+    [ -d "/usr/include/firebird" ] && FB_INC="/usr/include/firebird"
+    g++ -std=c++17 -I"$FB_INC" -o "$MKBLOB_BIN" "$MKBLOB_SRC" -lfbclient
+elif command -v cl.exe >/dev/null 2>&1 && [ -n "${FB_SDK_ROOT:-}" ]; then
+    cl.exe /nologo /EHsc /I"${FB_SDK_ROOT}/include" "$MKBLOB_SRC" \
+        /link "/LIBPATH:${FB_SDK_ROOT}/lib" fbclient_ms.lib "/OUT:${MKBLOB_BIN}.exe"
+    MKBLOB_BIN="${MKBLOB_BIN}.exe"
+else
+    echo "mkblob_fixture: no C++ compiler found (need g++ or cl.exe+FB_SDK_ROOT)" >&2
+    exit 1
+fi
+"$MKBLOB_BIN" "$FIREBIRD_TEST_DB" "$ISC_USER" "$ISC_PASSWORD" 1
 
 # Make the file world-readable so the test harness (running as a different
 # user than the firebird daemon) can open it via the embedded engine.
