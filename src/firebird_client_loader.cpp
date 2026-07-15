@@ -26,6 +26,13 @@ static LibHandle PlatformOpen(const char *name) {
 static void *PlatformSym(LibHandle handle, const char *sym) {
     return reinterpret_cast<void *>(GetProcAddress(handle, sym));
 }
+static std::string PlatformOpenError() {
+    DWORD err = GetLastError();
+    char buf[256] = {};
+    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                   nullptr, err, 0, buf, sizeof(buf), nullptr);
+    return std::string(buf);
+}
 #else
 using LibHandle = void *;
 static LibHandle PlatformOpen(const char *name) {
@@ -33,6 +40,10 @@ static LibHandle PlatformOpen(const char *name) {
 }
 static void *PlatformSym(LibHandle handle, const char *sym) {
     return dlsym(handle, sym);
+}
+static std::string PlatformOpenError() {
+    const char *err = dlerror();
+    return err ? std::string(err) : std::string("(no dlerror() detail available)");
 }
 #endif
 
@@ -104,15 +115,18 @@ const FirebirdClientApi &fbapi() {
     //    actually supplied.
     if (const char *env = std::getenv("DUCKDB_FIREBIRD_CLIENT_LIBRARY")) {
         if (env[0] != '\0') {
-            if (auto h = PlatformOpen(env)) {
+            auto h = PlatformOpen(env);
+            if (h) {
                 BindSymbols(api, h, env);
                 loaded = true;
                 return api;
             }
+            std::string open_err = PlatformOpenError();
             throw IOException(
                 std::string("DUCKDB_FIREBIRD_CLIENT_LIBRARY is set to '") +
                 env + "' but that file could not be loaded. Check the path "
-                "and that the binary matches this process architecture.");
+                "and that the binary matches this process architecture. "
+                "Underlying error: " + open_err);
         }
     }
 
