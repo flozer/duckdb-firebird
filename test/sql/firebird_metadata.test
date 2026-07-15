@@ -36,6 +36,7 @@ SHOW TABLES FROM fb;
 DEPT
 EMPLOYEE
 FILE_STORAGE
+TBLOB_MULTISEG
 TCHILD
 TIDX_INACTIVE
 TNO_INDEX
@@ -91,6 +92,7 @@ SELECT table_catalog, table_schema, table_name, table_type
 fb	main	DEPT	BASE TABLE
 fb	main	EMPLOYEE	BASE TABLE
 fb	main	FILE_STORAGE	BASE TABLE
+fb	main	TBLOB_MULTISEG	BASE TABLE
 fb	main	TCHILD	BASE TABLE
 fb	main	TIDX_INACTIVE	BASE TABLE
 fb	main	TNO_INDEX	BASE TABLE
@@ -131,7 +133,7 @@ query I
 SELECT COUNT(*) FROM information_schema.columns
  WHERE table_catalog = 'fb';
 ----
-39
+42
 
 # --- Case-insensitive table lookup --------------------------------
 #
