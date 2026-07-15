@@ -160,8 +160,8 @@ COMMIT;
 -- counted by firebird_metadata.test (14 tables / 42 columns, after
 -- TBLOB_MULTISEG above and the TIDX_INACTIVE / TNO_INDEX fixtures
 -- below) and ordered by
--- firebird_dbt_sources.test (DEPT -> EMPLOYEE -> FILE_STORAGE -> TCHILD ->
--- TPK_COMPOSITE -> TQUOTES -> V_ACTIVE_EMP).
+-- firebird_dbt_sources.test (DEPT -> EMPLOYEE -> FILE_STORAGE ->
+-- TBLOB_MULTISEG -> TCHILD -> TPK_COMPOSITE -> TQUOTES -> V_ACTIVE_EMP).
 CREATE TABLE TQUOTES (
     ID    INTEGER NOT NULL PRIMARY KEY,
     LABEL VARCHAR(60) NOT NULL

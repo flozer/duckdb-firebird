@@ -178,12 +178,13 @@ ones — see Tests below), not hand-computed.
    partial hex/byte comparison (e.g. first N and last N bytes), never by
    treating it as text.
 3. **`DEPT`'s existing long comment** (already-present fixture,
-   `scripts/setup_test_firebird.sh`, 178 × `DEPT_LONG_COMMENT_TEST_` =
-   4094 chars) — a regression test asserting `octet_length(comment) =
-   4094` **and** that the comment ends with the exact trailing
+   `scripts/setup_test_firebird.sh`, a repeated `DEPT_LONG_COMMENT_TEST_`
+   literal totaling exactly 4100 chars, confirmed by direct measurement)
+   — a regression test asserting `LENGTH(comment) = 4100` (already
+   present) **and** that the comment ends with the exact trailing
    substring it's supposed to end with (proving the tail — the part
    that would be lost by the bug — survived, not just that *some*
-   4094-length value came back). This closes the exact gap the
+   4100-length value came back). This closes the exact gap the
    fixture's own comment says it was meant to close, and needed zero new
    fixture work.
 4. **Regression guard for the single-segment case**: an existing/short
