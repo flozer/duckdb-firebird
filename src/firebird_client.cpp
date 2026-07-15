@@ -827,6 +827,17 @@ std::string FirebirdStatement::ReadBlob(idx_t col) const {
     isc_open_blob2(status, &conn_.db(), &conn_.tr(), &blob, &blob_id, 0, nullptr);
     FirebirdConnection::Check(status, "isc_open_blob2");
 
+    // isc_get_segment's return codes: isc_segstr_eof is the ONLY signal
+    // that there is no more BLOB data -- this is the sole loop-exit
+    // condition. isc_segment means the current logical segment was
+    // larger than `segment` and got truncated; the rest of that same
+    // segment follows on the next call (handled below by simply looping
+    // again). rc == 0 means this call's segment completed with no
+    // truncation -- it says nothing about whether MORE segments remain
+    // after it. A multi-segment BLOB returns 0 on every call except the
+    // last real read before isc_segstr_eof, so treating rc == 0 as
+    // end-of-blob (as this loop used to) silently drops every segment
+    // after the first. See docs/superpowers/specs/2026-07-15-blob-lossless-fix-design.md.
     std::string out;
     char segment[8192];
     unsigned short seg_len = 0;
@@ -839,7 +850,6 @@ std::string FirebirdStatement::ReadBlob(idx_t col) const {
             FirebirdConnection::Check(status, "isc_get_segment");
         }
         out.append(segment, seg_len);
-        if (rc == 0) break;  // last partial segment
     }
     std::memset(status, 0, sizeof(status));
     isc_close_blob(status, &blob);
