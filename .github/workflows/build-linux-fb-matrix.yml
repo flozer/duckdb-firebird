@@ -150,18 +150,57 @@ jobs:
           # so it's always version-matched to the server it's about to
           # talk to, instead of relying on the runner's single system-wide
           # apt-installed copy (always FB3.0 on Ubuntu noble).
+          # SONAME convention differs by major version -- FB 2.5/3.0 use
+          # libfbclient.so.2, FB4+ bumped it to match the major version
+          # (libfbclient.so.4, .so.5) after an ABI break, so the pattern
+          # has to stay broad ("libfbclient.so*") rather than hardcoding
+          # ".2". A first attempt at this fix found the right file this
+          # way but still failed to dlopen() on fb3/fb4 -- both of those
+          # images keep libfbclient in a self-contained directory
+          # (/opt/firebird/lib, /usr/lib64) alongside its own private
+          # copies of transitive dependencies (crypto/ICU/etc). Copying
+          # only the one .so file stranded those siblings inside the
+          # container, so the runner's dynamic linker couldn't resolve
+          # them. fb5 happened to live under the Ubuntu multiarch path
+          # (/usr/lib/x86_64-linux-gnu) where its deps were already
+          # satisfied by packages apt had already installed on the
+          # runner, which is why only fb3/fb4 hit this.
           LIB_IN_CONTAINER=$(docker exec fb sh -c "find / -xdev -name 'libfbclient.so*' 2>/dev/null | head -1")
           if [ -z "$LIB_IN_CONTAINER" ]; then
             echo "::error::could not locate libfbclient.so* inside the fb${{ matrix.fb_major }} container"
             exit 1
           fi
           echo "found $LIB_IN_CONTAINER in container"
-          # -L follows symlinks: the found path is very likely the
-          # SONAME symlink (libfbclient.so.2 -> libfbclient.so.2.x.y), and
-          # copying without dereferencing would produce a broken symlink
-          # on the runner (its target wouldn't exist outside the container).
-          docker cp -L "fb:$LIB_IN_CONTAINER" ./libfbclient-fb${{ matrix.fb_major }}.so.2
-          echo "DUCKDB_FIREBIRD_CLIENT_LIBRARY=$PWD/libfbclient-fb${{ matrix.fb_major }}.so.2" >> $GITHUB_ENV
+          # Copy the lib itself plus whatever *specific* shared-library
+          # dependencies ldd resolves for it inside the container -- not
+          # the whole containing directory, which for fb5 is the shared
+          # Ubuntu multiarch path (/usr/lib/x86_64-linux-gnu) holding
+          # thousands of unrelated system libraries. ldd's "=> /path"
+          # lines give exactly the resolved deps that matter; anything
+          # ldd resolves via the runner's own ld.so cache (libc, libm,
+          # etc., already present) is harmless to copy too, just extra
+          # bytes, not extra risk.
+          LOCAL_DIR="$PWD/fbclient-fb${{ matrix.fb_major }}"
+          mkdir -p "$LOCAL_DIR"
+          # Exclude core glibc-family libs (libc/libpthread/libm/libdl/
+          # librt/ld-linux) from the copy: those must always come from the
+          # runner's own base system. Preferring a container-side copy of
+          # THOSE via LD_LIBRARY_PATH risks a glibc ABI mismatch across the
+          # whole process, not just Firebird calls -- strictly worse than
+          # the bug this step exists to fix. Everything else Firebird-
+          # specific (ICU, crypto/decNumber, etc.) is safe and necessary
+          # to copy alongside it.
+          docker exec fb sh -c "ldd '$LIB_IN_CONTAINER'" \
+            | grep -oE '/[^ ]+' | sort -u \
+            | grep -vE '/(libc|libpthread|libm|libdl|librt|ld-linux)[.-]' \
+            | while read -r dep; do
+                docker cp -L "fb:$dep" "$LOCAL_DIR/$(basename "$dep")" 2>/dev/null || true
+              done
+          docker cp -L "fb:$LIB_IN_CONTAINER" "$LOCAL_DIR/$(basename "$LIB_IN_CONTAINER")"
+          LOCAL_LIB="$LOCAL_DIR/$(basename "$LIB_IN_CONTAINER")"
+          file "$LOCAL_LIB"
+          echo "LD_LIBRARY_PATH=$LOCAL_DIR:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "DUCKDB_FIREBIRD_CLIENT_LIBRARY=$LOCAL_LIB" >> $GITHUB_ENV
 
       - name: Pin DuckDB version
         run: |
