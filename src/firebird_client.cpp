@@ -834,8 +834,9 @@ std::string FirebirdStatement::ReadBlob(idx_t col) const {
     // segment follows on the next call (handled below by simply looping
     // again). rc == 0 means this call's segment completed with no
     // truncation -- it says nothing about whether MORE segments remain
-    // after it. A multi-segment BLOB returns 0 on every call except the
-    // last real read before isc_segstr_eof, so treating rc == 0 as
+    // after it. A multi-segment BLOB returns 0 on every data-bearing
+    // call (isc_segstr_eof only ever arrives on its own, subsequent,
+    // zero-length call), so treating rc == 0 as
     // end-of-blob (as this loop used to) silently drops every segment
     // after the first. See docs/superpowers/specs/2026-07-15-blob-lossless-fix-design.md.
     std::string out;
