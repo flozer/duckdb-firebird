@@ -105,8 +105,26 @@ jobs:
             docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_biz4.sql /var/lib/firebird/data/biz4.fdb
           fi
 
+          # CHARACTER SET NONE fixture (issue #26) -- exercises the
+          # none_encoding feature. Unlike fixture_biz4.sql above, this runs
+          # on all three matrix legs (CHARACTER SET NONE is not FB4+-only).
+          docker cp scripts/fixture_none_charset.sql fb:/tmp/fixture_none_charset.sql
+          printf "%s\n" "CREATE DATABASE '/var/lib/firebird/data/none.fdb' DEFAULT CHARACTER SET NONE;" \
+            | docker exec -i fb bash -c "isql -u SYSDBA -p masterkey"
+          docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_none_charset.sql /var/lib/firebird/data/none.fdb
+
           # Suite tests connect over TCP — expose the URL form.
           echo "FIREBIRD_TEST_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/test.fdb?charset=UTF8" >> $GITHUB_ENV
+          # charset=NONE (not UTF8/WIN1252/etc) -- ValidateClientCharset
+          # (src/firebird_client.cpp) only accepts UTF8/NONE/OCTETS, and
+          # only NONE preserves the raw, untransliterated bytes
+          # none_encoding decodes client-side. This mirrors the local
+          # setup, where FIREBIRD_NONE_DB is a bare path with no charset
+          # param at all -- that leaves info.charset empty, so the
+          # extension never sends isc_dpb_lc_ctype and Firebird defaults
+          # the connection to NONE. ?charset=NONE here makes that same
+          # behavior explicit.
+          echo "FIREBIRD_NONE_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/none.fdb?charset=NONE" >> $GITHUB_ENV
 
       - name: Extract matching libfbclient from the fb${{ matrix.fb_major }} container
         run: |
@@ -219,14 +237,12 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_pool_stats.test
           ./build/release/test/unittest test/sql/firebird_predicates.test
           ./build/release/test/unittest test/sql/firebird_profile_table.test
-          # firebird_explain_pushdown.test and firebird_type_audit.test are
-          # NOT listed here: both gate their entire file on
-          # `require-env FIREBIRD_NONE_DB` (confirmed via a local run with
-          # that var unset -- DuckDB's sqllogictest runner skips the WHOLE
-          # file, not just the NONE-specific block), which this workflow
-          # does not provision (issue #26). Adding them here would just
-          # report "0 assertions, skipped" -- not real coverage. Revisit
-          # once #26 lands.
+          # firebird_explain_pushdown.test and firebird_type_audit.test
+          # gate their entire file on `require-env FIREBIRD_NONE_DB` --
+          # now provisioned above (issue #26), so both run for real here.
+          ./build/release/test/unittest test/sql/firebird_none_charset.test
+          ./build/release/test/unittest test/sql/firebird_explain_pushdown.test
+          ./build/release/test/unittest test/sql/firebird_type_audit.test
 
       - name: FB4+ live type smoke (INT128 / DECIMAL(38) / TIMESTAMP_TZ)
         if: matrix.fb_major != '3'
