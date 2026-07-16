@@ -167,6 +167,26 @@ jobs:
           echo "LD_LIBRARY_PATH=$LOCAL_DIR:$LD_LIBRARY_PATH" >> $GITHUB_ENV
           echo "DUCKDB_FIREBIRD_CLIENT_LIBRARY=$LOCAL_LIB" >> $GITHUB_ENV
 
+      - name: Build and run mkblob_fixture (issue #35 / #39)
+        run: |
+          # mkblob_fixture.cpp writes TBLOB_MULTISEG's genuinely
+          # multi-segment BLOB content via real isc_put_segment calls --
+          # a plain SQL literal can't do this (see the file's own header
+          # comment), so it can't be folded into fixture_common.sql. The
+          # firebirdsql/firebird:*-noble images have no C++ toolchain, so
+          # this compiles on the runner instead, linking against the
+          # SAME version-matched libfbclient the previous step already
+          # extracted from this job's own container -- never the
+          # apt-installed firebird-dev package's generic -lfbclient,
+          # which would silently relink against a mismatched client
+          # version and reintroduce the exact bug PR #41 fixed.
+          LOCAL_LIB="$DUCKDB_FIREBIRD_CLIENT_LIBRARY"
+          LOCAL_DIR="$(dirname "$LOCAL_LIB")"
+          g++ -std=c++17 -I/usr/include/firebird \
+              -o mkblob_fixture scripts/mkblob_fixture.cpp \
+              -L"$LOCAL_DIR" -l:"$(basename "$LOCAL_LIB")"
+          ./mkblob_fixture localhost/3050:/var/lib/firebird/data/test.fdb SYSDBA masterkey 1
+
       - name: Pin DuckDB version
         run: |
           DUCKDB_GIT_VERSION=${DUCKDB_VERSION} make set_duckdb_version
