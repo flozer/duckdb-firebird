@@ -46,11 +46,17 @@ being one:
 
 ```bash
 grep -inE "$KEYWORDS" "$WORKFLOW" \
-  | grep -vE '^[0-9]+:[[:space:]]*#|^[0-9]+:[[:space:]]*-[[:space:]]*name:'
+  | grep -vE '^[0-9]+:[[:space:]]*#|^[0-9]+:[[:space:]]*-[[:space:]]*name:|^[0-9]+:[[:space:]]*$'
 ```
 
 (`grep -n` prefixes each match with `N:`, hence anchoring past the line
-number rather than the raw line start.)
+number rather than the raw line start.) The third alternative
+(`^[0-9]+:[[:space:]]*$`) excludes blank lines — a blank line can never
+contain a DDL keyword to begin with, so this branch never actually fires
+in practice, but it's included for the same reason the comment/step-name
+branches are: cheap, harmless, and keeps the pre-filter's stated intent
+("skip lines that can't be real fixture DDL") complete rather than
+partial.
 
 ### 2. Wider keyword coverage (false-negative fix)
 
