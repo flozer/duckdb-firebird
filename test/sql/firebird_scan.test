@@ -302,11 +302,16 @@ firebird_scan: table 'DOES_NOT_EXIST'
 statement ok
 SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'V_DEPT_HEADCOUNT');
 
-query I
-SELECT typeof(TOTAL_SALARY) = 'DECIMAL(18,2)'
+# TEMP DIAGNOSTIC for issue #42 (reverting once the real CI-observed type
+# is known) -- selecting typeof() directly (not wrapped in an equality
+# comparison) against a deliberately-wrong expected value, so the test
+# framework's own "Expected / Actual" failure output prints the REAL
+# typeof() string in the CI log.
+query T
+SELECT typeof(TOTAL_SALARY)
   FROM firebird_scan('${FIREBIRD_TEST_DB}', 'V_DEPT_HEADCOUNT') LIMIT 1;
 ----
-true
+ZZZ_ISSUE42_PROBE_ZZZ
 
 # V_DEPT_HEADCOUNT is defined as a self-join (EMPLOYEE e JOIN EMPLOYEE m
 # ON m.DEPT_NO = e.DEPT_NO, GROUP BY e.DEPT_NO — see

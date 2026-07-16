@@ -214,11 +214,18 @@ SELECT column_name, numeric_precision, numeric_scale
 ----
 TOTAL_SALARY	18	2
 
-query I
-SELECT typeof(TOTAL_SALARY) = 'DECIMAL(18,2)'
+# TEMP DIAGNOSTIC for issue #42 (reverting once the real CI-observed type
+# is known) -- selecting typeof() directly (not wrapped in an equality
+# comparison) against a deliberately-wrong expected value, so the test
+# framework's own "Expected / Actual" failure output prints the REAL
+# typeof() string in the CI log. The information_schema.columns check
+# above (numeric_precision/scale) is left as-is -- a mismatch there
+# already self-reports the real numbers, no trick needed.
+query T
+SELECT typeof(TOTAL_SALARY)
   FROM fb.main.V_DEPT_HEADCOUNT LIMIT 1;
 ----
-true
+ZZZ_ISSUE42_PROBE_ZZZ
 
 # Independent value cross-check: V_DEPT_HEADCOUNT is a self-join (EMPLOYEE e
 # JOIN EMPLOYEE m ON m.DEPT_NO = e.DEPT_NO, GROUP BY e.DEPT_NO -- see
