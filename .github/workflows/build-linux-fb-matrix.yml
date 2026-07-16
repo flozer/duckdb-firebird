@@ -50,6 +50,9 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Guard against inline fixture DDL drift (#39)
+        run: bash scripts/check_no_inline_fixture_drift.sh
+
       - name: Install build deps + firebird client
         run: |
           sudo apt-get update
@@ -92,96 +95,8 @@ jobs:
           docker exec -i fb bash -c "isql -u SYSDBA -p masterkey" <<'SQL'
           CREATE DATABASE '/var/lib/firebird/data/test.fdb' DEFAULT CHARACTER SET UTF8;
           SQL
-          docker exec -i fb bash -c "isql -u SYSDBA -p masterkey /var/lib/firebird/data/test.fdb" <<'SQL'
-          CREATE TABLE EMPLOYEE (
-            EMP_ID    INTEGER NOT NULL PRIMARY KEY,
-            EMP_NAME  VARCHAR(60) NOT NULL,
-            DEPT_NO   VARCHAR(3),
-            SALARY    NUMERIC(10,2),
-            HIRE_DATE DATE,
-            ACTIVE    BOOLEAN,
-            NOTE      BLOB SUB_TYPE 1
-          );
-          INSERT INTO EMPLOYEE VALUES (1, 'Alice Andersson', '600', 75000.50, DATE '2020-03-15', TRUE,  'Senior developer');
-          INSERT INTO EMPLOYEE VALUES (2, 'Bob Brown',       '600', 82500.00, DATE '2019-07-01', TRUE,  NULL);
-          INSERT INTO EMPLOYEE VALUES (3, 'Carlos Chen',     '900', 65000.75, DATE '2022-11-20', FALSE, 'On leave');
-          INSERT INTO EMPLOYEE VALUES (4, 'Diana Davis',     '600', 98000.25, DATE '2018-01-10', TRUE,  'Team lead');
-          INSERT INTO EMPLOYEE VALUES (5, 'Erik Eklund',     '700', 71200.00, DATE '2021-06-30', TRUE,  NULL);
-          COMMIT;
-          -- NAME_LEN computed column: keeps EMPLOYEE at 8 columns, matching the
-          -- canonical fixture (setup_test_firebird.sh / smoke_fixture.sql) that
-          -- firebird_scan.test (column_count) and firebird_attach.test
-          -- (information_schema.columns) assert against.
-          ALTER TABLE EMPLOYEE ADD NAME_LEN COMPUTED BY (CHAR_LENGTH(EMP_NAME));
-          COMMIT;
-          -- Kept in sync with scripts/setup_test_firebird.sh — DEPT + the
-          -- FK + EMP_UPPER_NAME_IDX give EMPLOYEE a PK, an FK, and an
-          -- expression index, which firebird_index_profile.test requires
-          -- (>1 index row on EMPLOYEE).
-          CREATE TABLE DEPT (
-              DEPT_NO   VARCHAR(3) NOT NULL PRIMARY KEY,
-              DEPT_NAME VARCHAR(40)
-          );
-          INSERT INTO DEPT VALUES ('600', 'Engineering');
-          INSERT INTO DEPT VALUES ('700', 'Sales');
-          INSERT INTO DEPT VALUES ('900', 'Support');
-          COMMIT;
-          ALTER TABLE EMPLOYEE
-              ADD CONSTRAINT FK_EMP_DEPT FOREIGN KEY (DEPT_NO)
-              REFERENCES DEPT (DEPT_NO) ON UPDATE CASCADE ON DELETE SET NULL;
-          COMMIT;
-          CREATE INDEX EMP_UPPER_NAME_IDX ON EMPLOYEE COMPUTED BY (UPPER(EMP_NAME));
-          COMMIT;
-          CREATE TABLE FILE_STORAGE (
-            FILE_ID  INTEGER NOT NULL PRIMARY KEY,
-            NAME     VARCHAR(40) NOT NULL,
-            SIZE_B   INTEGER NOT NULL,
-            PAYLOAD  BLOB SUB_TYPE 0
-          );
-          INSERT INTO FILE_STORAGE VALUES (1, 'logo.png',     6, CAST(_ASCII'binary' AS BLOB SUB_TYPE 0));
-          INSERT INTO FILE_STORAGE VALUES (2, 'empty.dat',    0, NULL);
-          INSERT INTO FILE_STORAGE VALUES (3, 'document.bin', 5, CAST(_ASCII'hello'  AS BLOB SUB_TYPE 0));
-          COMMIT;
-          CREATE OR ALTER VIEW V_ACTIVE_EMP (EMP_ID, EMP_NAME, DEPT_NO) AS
-              SELECT EMP_ID, EMP_NAME, DEPT_NO
-                FROM EMPLOYEE WHERE ACTIVE = TRUE;
-          COMMIT;
-          -- Kept in sync with scripts/setup_test_firebird.sh — these two
-          -- views are exercised by firebird_scan.test and
-          -- firebird_attach.test's #33 view-type-reconciliation regression
-          -- cases, both of which run in this workflow.
-          CREATE OR ALTER VIEW V_ALL_EMP (EMP_ID, EMP_NAME) AS
-              SELECT EMP_ID, EMP_NAME FROM EMPLOYEE;
-          COMMIT;
-          CREATE OR ALTER VIEW V_DEPT_HEADCOUNT (DEPT_NO, HEADCOUNT, TOTAL_SALARY) AS
-              SELECT e.DEPT_NO, COUNT(*), SUM(e.SALARY)
-                FROM EMPLOYEE e
-                JOIN EMPLOYEE m ON m.DEPT_NO = e.DEPT_NO
-               GROUP BY e.DEPT_NO;
-          COMMIT;
-          -- Kept in sync with scripts/fixture_index_profile.sql —
-          -- firebird_index_profile.test also requires a zero-index table
-          -- (TNO_INDEX) and a PK-plus-one-inactive-index table
-          -- (TIDX_INACTIVE).
-          CREATE TABLE TNO_INDEX (
-              CODE  VARCHAR(10),
-              QTY   INTEGER,
-              NOTE  VARCHAR(20)
-          );
-          INSERT INTO TNO_INDEX VALUES ('A1', 10, 'first');
-          INSERT INTO TNO_INDEX VALUES ('B2', 20, 'second');
-          COMMIT;
-          CREATE TABLE TIDX_INACTIVE (
-              ID    INTEGER NOT NULL PRIMARY KEY,
-              QTY   INTEGER,
-              NOTE  VARCHAR(20)
-          );
-          INSERT INTO TIDX_INACTIVE VALUES (1, 5, 'x');
-          COMMIT;
-          CREATE INDEX IDX_TIDX_INACTIVE_QTY ON TIDX_INACTIVE (QTY);
-          ALTER INDEX IDX_TIDX_INACTIVE_QTY INACTIVE;
-          COMMIT;
-          SQL
+          docker cp scripts/fixture_common.sql fb:/tmp/fixture_common.sql
+          docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_common.sql /var/lib/firebird/data/test.fdb
 
           if [ "${{ matrix.fb_major }}" != "3" ]; then
             docker cp scripts/fixture_biz4.sql fb:/tmp/fixture_biz4.sql
@@ -254,6 +169,26 @@ jobs:
           file "$LOCAL_LIB"
           echo "LD_LIBRARY_PATH=$LOCAL_DIR:$LD_LIBRARY_PATH" >> $GITHUB_ENV
           echo "DUCKDB_FIREBIRD_CLIENT_LIBRARY=$LOCAL_LIB" >> $GITHUB_ENV
+
+      - name: Build and run mkblob_fixture (issue #35 / #39)
+        run: |
+          # mkblob_fixture.cpp writes TBLOB_MULTISEG's genuinely
+          # multi-segment BLOB content via real isc_put_segment calls --
+          # a plain SQL literal can't do this (see the file's own header
+          # comment), so it can't be folded into fixture_common.sql. The
+          # firebirdsql/firebird:*-noble images have no C++ toolchain, so
+          # this compiles on the runner instead, linking against the
+          # SAME version-matched libfbclient the previous step already
+          # extracted from this job's own container -- never the
+          # apt-installed firebird-dev package's generic -lfbclient,
+          # which would silently relink against a mismatched client
+          # version and reintroduce the exact bug PR #41 fixed.
+          LOCAL_LIB="$DUCKDB_FIREBIRD_CLIENT_LIBRARY"
+          LOCAL_DIR="$(dirname "$LOCAL_LIB")"
+          g++ -std=c++17 -I/usr/include/firebird \
+              -o mkblob_fixture scripts/mkblob_fixture.cpp \
+              -L"$LOCAL_DIR" -l:"$(basename "$LOCAL_LIB")"
+          ./mkblob_fixture localhost/3050:/var/lib/firebird/data/test.fdb SYSDBA masterkey 1
 
       - name: Pin DuckDB version
         run: |
