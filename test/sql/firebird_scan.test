@@ -292,18 +292,29 @@ firebird_scan: table 'DOES_NOT_EXIST'
 #  have a catalog-frozen type (set at CREATE VIEW time) that disagrees
 #  with Firebird's live runtime type for the identical expression today.
 #  V_DEPT_HEADCOUNT's TOTAL_SALARY (SUM(EMPLOYEE.SALARY), SALARY is
-#  NUMERIC(10,2)) is catalogued as INT128-backed DECIMAL(38,2), but
-#  Firebird's live SUM() promotion produces BIGINT-backed NUMERIC(18,2).
-#  Before the fix: "INTERNAL Error: Expected vector of type INT64, but
-#  found vector of type INT128". This must not just avoid crashing — the
-#  value AND the reconciled DuckDB type must both be correct.
+#  NUMERIC(10,2)) is catalogued as INT128-backed DECIMAL(38,2). Before the
+#  fix: "INTERNAL Error: Expected vector of type INT64, but found vector
+#  of type INT128". This must not just avoid crashing — the value AND the
+#  reconciled DuckDB type must both be correct.
+#
+#  The reconciled type itself legitimately varies by real server
+#  version/configuration (issue #42): live-tested against real Firebird
+#  3/4/5 CI containers (default config) gives BIGINT-backed DECIMAL(18,2)
+#  on FB3 and INT128-backed DECIMAL(38,2) on FB4/FB5 -- both are correct
+#  reconciliations of the SAME expression on their respective servers,
+#  not a bug; other real FB5 installs tested during this investigation
+#  (a docker-hosted server, a local install) gave DECIMAL(18,2), likely
+#  due to a compatibility setting inherited from how those specific
+#  databases were created/configured, not a FB4/5-general default. This
+#  test accepts either width; the value cross-check below is the actual
+#  correctness proof, not the type string.
 # ---------------------------------------------------------------------------
 
 statement ok
 SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'V_DEPT_HEADCOUNT');
 
 query I
-SELECT typeof(TOTAL_SALARY) = 'DECIMAL(18,2)'
+SELECT typeof(TOTAL_SALARY) IN ('DECIMAL(18,2)', 'DECIMAL(38,2)')
   FROM firebird_scan('${FIREBIRD_TEST_DB}', 'V_DEPT_HEADCOUNT') LIMIT 1;
 ----
 true

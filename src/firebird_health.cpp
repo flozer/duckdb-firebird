@@ -70,7 +70,23 @@ static HealthInfo BuildHealth(FirebirdConnection &conn) {
             h.ods_major = cur->GetShort(0);
             h.ods_minor = cur->GetShort(1);
             h.sql_dialect = cur->GetShort(2);
-            h.page_size = cur->GetLong(3);
+            // MON$PAGE_SIZE's width changed across Firebird versions:
+            // SMALLINT (2 bytes) on 2.5/3.0, widened to INTEGER (4 bytes)
+            // on 4.0+ to support the 32K page size FB4 introduced (32768
+            // overflows signed SMALLINT's 32767 max). A hardcoded accessor
+            // is wrong on one side or the other -- GetLong over-read the
+            // 2-byte SMALLINT buffer on FB3 (issue #43: undefined
+            // behavior, read as truthy garbage on most platforms, as zero
+            // on one real Linux/glibc build); GetShort under-reads the
+            // 4-byte INTEGER buffer on FB4+ for any page size above 32767
+            // (silently wrong, not a crash). Dispatch on the live sqltype
+            // instead, matching the existing pattern in
+            // firebird_scanner.cpp's PK-range MIN/MAX probe.
+            switch (cur->columns()[3].sqltype) {
+            case SQL_SHORT: h.page_size = cur->GetShort(3); break;
+            case SQL_LONG:  h.page_size = cur->GetLong(3);  break;
+            default:        h.page_size = 0;                break;
+            }
             h.forced_writes = (cur->GetShort(4) != 0);
             h.sweep_interval = cur->GetLong(5);
             h.oit = cur->GetInt64(6);
