@@ -208,6 +208,25 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_attach.test
           ./build/release/test/unittest test/sql/firebird_health.test
           ./build/release/test/unittest test/sql/firebird_index_profile.test
+          ./build/release/test/unittest test/sql/firebird_bind_params.test
+          ./build/release/test/unittest test/sql/firebird_blob_lossless.test
+          ./build/release/test/unittest test/sql/firebird_dbt_sources.test
+          ./build/release/test/unittest test/sql/firebird_metadata.test
+          ./build/release/test/unittest test/sql/firebird_metadata_bridge.test
+          ./build/release/test/unittest test/sql/firebird_observability.test
+          ./build/release/test/unittest test/sql/firebird_paging.test
+          ./build/release/test/unittest test/sql/firebird_pool.test
+          ./build/release/test/unittest test/sql/firebird_pool_stats.test
+          ./build/release/test/unittest test/sql/firebird_predicates.test
+          ./build/release/test/unittest test/sql/firebird_profile_table.test
+          # firebird_explain_pushdown.test and firebird_type_audit.test are
+          # NOT listed here: both gate their entire file on
+          # `require-env FIREBIRD_NONE_DB` (confirmed via a local run with
+          # that var unset -- DuckDB's sqllogictest runner skips the WHOLE
+          # file, not just the NONE-specific block), which this workflow
+          # does not provision (issue #26). Adding them here would just
+          # report "0 assertions, skipped" -- not real coverage. Revisit
+          # once #26 lands.
 
       - name: FB4+ live type smoke (INT128 / DECIMAL(38) / TIMESTAMP_TZ)
         if: matrix.fb_major != '3'
