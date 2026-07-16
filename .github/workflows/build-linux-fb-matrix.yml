@@ -50,6 +50,9 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Guard against inline fixture DDL drift (#39)
+        run: bash scripts/check_no_inline_fixture_drift.sh
+
       - name: Install build deps + firebird client
         run: |
           sudo apt-get update
