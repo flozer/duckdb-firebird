@@ -118,7 +118,11 @@ $swTotal = [System.Diagnostics.Stopwatch]::StartNew()
 # --- 1. Health -----------------------------------------------------------
 $report.Add("## 1. firebird_health()")
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-$health = Invoke-DuckDbJson "$attach SELECT * FROM firebird_health('fb');"
+# warnings is LIST(VARCHAR) -- DuckDB CLI's -json mode renders list
+# elements unquoted (e.g. [sweep_disabled, charset_none]), which is not
+# valid JSON and breaks ConvertFrom-Json. Cast it to a comma-joined
+# VARCHAR in the query itself so -json never has to serialize a LIST.
+$health = Invoke-DuckDbJson "$attach SELECT engine_version, ods_version, sql_dialect, default_charset, page_size, forced_writes, sweep_interval, oit_gap, oat_gap, attachments, array_to_string(warnings, ', ') AS warnings_str FROM firebird_health('fb');"
 $sw.Stop()
 if (Test-IsError $health) {
     $report.Add("- Status: **ERROR** ($($health.__error)) -- see $diagLog for detail, not embedded in this report")
@@ -134,7 +138,7 @@ if (Test-IsError $health) {
     $report.Add("- oit_gap: $($h.oit_gap)")
     $report.Add("- oat_gap: $($h.oat_gap)")
     $report.Add("- attachments (visible to this credential): $($h.attachments)")
-    $report.Add("- warnings: $($h.warnings -join ', ')")
+    $report.Add("- warnings: $($h.warnings_str)")
 } else {
     $report.Add("- Status: no row returned")
 }
@@ -194,6 +198,7 @@ if (Test-IsError $blobCols) {
     $okCount = 0
     $mismatchCount = 0
     $errorCount = 0
+    $noDataCount = 0
     $lengths = @()
     foreach ($col in $blobCols) {
         # Column/table identity is used ONLY to build this one query --
@@ -203,7 +208,7 @@ if (Test-IsError $blobCols) {
         $sql = "$attach SELECT md5(CAST(""$c"" AS VARCHAR)) AS h1, md5(CAST(""$c"" AS VARCHAR)) AS h2, length(CAST(""$c"" AS VARCHAR)) AS len FROM fb.main.""$tbl"" WHERE ""$c"" IS NOT NULL LIMIT 1;"
         $r = Invoke-DuckDbJson $sql
         if (Test-IsError $r) { $errorCount++; continue }
-        if ($r.Count -eq 0) { continue }
+        if ($r.Count -eq 0) { $noDataCount++; continue }
         $row = $r[0]
         if ($row.h1 -eq $row.h2) { $okCount++ } else { $mismatchCount++ }
         $lengths += [int]$row.len
@@ -211,6 +216,7 @@ if (Test-IsError $blobCols) {
     $report.Add("- Columns sampled: $($blobCols.Count)")
     $report.Add("- Self-consistent (checksum matched across two fetches): $okCount")
     $report.Add("- Mismatched (potential non-determinism -- investigate): $mismatchCount")
+    $report.Add("- No non-NULL row found to sample (empty table/column): $noDataCount")
     $report.Add("- Errored while sampling: $errorCount")
     if ($lengths.Count -gt 0) {
         $report.Add("- Sampled value lengths: min=$(($lengths | Measure-Object -Minimum).Minimum), max=$(($lengths | Measure-Object -Maximum).Maximum), avg=$([math]::Round((($lengths | Measure-Object -Average).Average), 1))")
