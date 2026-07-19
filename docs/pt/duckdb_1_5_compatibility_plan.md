@@ -137,6 +137,32 @@ restaura o pin ao final). Bases de teste provisionadas em `C:\fbtest\`:
 Nenhum. As tres versoes compilam sem alteracao de codigo e os testes produzem
 resultado identico (605 assercoes em cada). Nao foi necessario nenhum patch.
 
+## Resultado da re-verificacao (2026-07-19, Runtime/ABI Compatibility Gate)
+
+Reexecutado com a suite atual (19 arquivos `firebird_*.test`, apos as frentes
+#39/#31/#26/#47/#48 da Production Stability Gate terem unificado a fixture
+canonica e fechado as lacunas de cobertura CI). Rodado a partir de um worktree
+isolado (`C:/tmp/fbwt-rabi`, nunca o worktree principal sujo), com uma copia
+local de `scripts/build_matrix.ps1` apontando `$root` para esse worktree — o
+script commitado continua fixo em `d:/Dados/duckdb-firebird` por design (ver
+"Proximo passo recomendado" acima; nao alterado nesta verificacao).
+
+| Versao  | Commit DuckDB | Build | Testes                   | Assertions | Status | Artefato |
+|---------|---------------|-------|---------------------------|------------|--------|----------|
+| v1.5.2  | `8a5851971f`  | ok    | 19 pass / 0 env-missing   | 854        | PASS   | firebird.duckdb_extension |
+| v1.5.3  | `14eca11bd9`  | ok    | 19 pass / 0 env-missing   | 854        | PASS   | firebird.duckdb_extension (baseline / pin do submodulo) |
+| v1.5.4  | `08e34c447b`  | ok    | 19 pass / 0 env-missing   | 854        | PASS   | firebird.duckdb_extension |
+
+### API drift (re-verificacao)
+
+Nenhum. As mesmas tres tags compilam sem alteracao de codigo desde a
+verificacao de 2026-06-19; a suite cresceu de 13 para 19 arquivos (mais
+`firebird_blob_lossless`, `firebird_decfloat`, `firebird_dbt_sources`,
+`firebird_metadata_bridge`, `firebird_none_charset`, `firebird_explain_pushdown`)
+e de 605 para 854 assercoes, com resultado identico e zero `env-missing` nas
+tres versoes. Ver `docs/pt/runtime_abi_compatibility_gate.md` para o
+relatorio consolidado da gate.
+
 ### Notas de ambiente
 
 - Falha inicial em `firebird_metadata`, `firebird_bind_params` e `firebird_dbt_sources`
