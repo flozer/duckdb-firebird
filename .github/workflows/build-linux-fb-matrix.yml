@@ -103,6 +103,12 @@ jobs:
             printf "%s\n" "CREATE DATABASE '/var/lib/firebird/data/biz4.fdb' DEFAULT CHARACTER SET UTF8;" \
               | docker exec -i fb bash -c "isql -u SYSDBA -p masterkey"
             docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_biz4.sql /var/lib/firebird/data/biz4.fdb
+
+            # DECFLOAT fixture (issue #48) -- loads into the SAME biz4.fdb,
+            # no new database, no table-name conflict with fixture_biz4.sql
+            # (DECVALS vs FB4_TYPES/DEPARTMENT/CUSTOMER).
+            docker cp scripts/fixture_decfloat.sql fb:/tmp/fixture_decfloat.sql
+            docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_decfloat.sql /var/lib/firebird/data/biz4.fdb
           fi
 
           # CHARACTER SET NONE fixture (issue #26) -- exercises the
@@ -250,6 +256,9 @@ jobs:
           ISC_USER: SYSDBA
           ISC_PASSWORD: masterkey
           FIREBIRD_BIZ4_DB: firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/biz4.fdb?charset=UTF8
+          # Same database as FIREBIRD_BIZ4_DB (issue #48) -- DECVALS was
+          # loaded into biz4.fdb above, not a separate database.
+          FIREBIRD_DECFLOAT_DB: firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/biz4.fdb?charset=UTF8
         run: |
           ./build/release/duckdb -unsigned <<'EOF'
           SELECT
@@ -264,6 +273,7 @@ jobs:
            LIMIT 1;
           EOF
           ./build/release/test/unittest test/sql/firebird_type_audit_fb4.test
+          ./build/release/test/unittest test/sql/firebird_decfloat.test
 
       - name: Stop Firebird container
         if: always()
