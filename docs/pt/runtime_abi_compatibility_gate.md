@@ -195,21 +195,47 @@ array de 2+ elementos faz *member enumeration* e retorna um array de
 corrigido checando o TIPO do retorno (`-is [hashtable]`) em vez da
 truthiness da propriedade.
 
-**Pendente:** este harness ainda **nao rodou contra o ambiente de
-producao real** — precisa do Fernando definir `FIREBIRD_MATURITY_DB` /
-`ISC_USER` / `ISC_PASSWORD` (e opcionalmente `MATURITY_DUCKDB_EXE`
-apontando pra um build com a extensao) e executar:
+**Executado contra banco real (2026-07-19).** Fernando rodou o harness
+contra uma base Firebird real de teste (~90 GB, formato/escala de
+producao — nao um fixture sintetico). Resultado sanitizado (sem path,
+sem credencial, sem valor de linha, sem conteudo BLOB/texto, sem nome de
+tabela/coluna):
 
-```powershell
-$env:FIREBIRD_MATURITY_DB = "..."   # nunca comitar isso
-$env:ISC_USER = "..."
-$env:ISC_PASSWORD = "..."
-pwsh -File scripts/maturity_battery.ps1 > maturity_report.md
-```
+| Secao | Resultado |
+|---|---|
+| `firebird_health()` | engine `5.0.3`, ODS `13.1`, dialect `3`, charset padrao `NONE`, page_size `16384`, `forced_writes=true`, `sweep_interval=0`, `oit_gap=1278` (bem abaixo do limite de 1.000.000), `oat_gap=0`, `attachments=3`, warnings: `sweep_disabled`, `charset_none` |
+| Relacoes expostas | `2926` |
+| `firebird_type_audit()` agregado | `blob_text: 6`, `none_charset: 15367`, `timestamp_tz: 6` |
+| Auto-consistencia BLOB/texto | 20 colunas amostradas — 9 auto-consistentes (checksum bateu nas duas buscas), 0 divergentes, 11 sem linha nao-nula pra amostrar (tabela/coluna vazia), 0 erro; tamanhos amostrados: min=1, max=50, media=6.9 |
+| Status geral | sem erros |
 
-O `maturity_report.md` gerado e seguro para compartilhar (sem dado
-sensivel) e deve ser anexado a esta gate antes da decisao final de
-release.
+**Leitura:** `sweep_disabled` e `charset_none` sao esperados para uma
+base legada desse perfil (NONE como charset padrao, sweep manual) — nao
+sao falhas da extensao, sao caracteristicas reais do banco, corretamente
+detectadas e reportadas pelo `firebird_health()`. As 15367 colunas
+`none_charset` confirmam que o cenario WIN1252/NONE que a extensao foi
+desenhada pra tratar e exatamente o perfil de banco legado brasileiro
+real, nao um caso sintetico raro. Zero divergencia na checagem de
+auto-consistencia (9/9 das amostras com dado) confirma que o fetch e
+deterministico e repetivel contra dado real e grande.
+
+**Dois bugs reais do harness encontrados e corrigidos rodando contra
+essa base** (invisiveis contra o fixture local pequeno, so apareceram
+contra dado real e grande):
+
+1. `firebird_health()`'s `warnings` e `LIST(VARCHAR)`; o modo `-json` do
+   CLI do DuckDB serializa elementos de lista sem aspas (ex.
+   `[sweep_disabled, charset_none]`), o que nao e JSON valido e quebrava
+   o parse. Corrigido castando pra `VARCHAR` via `array_to_string` na
+   propria query, entao `-json` nunca precisa serializar uma LIST aqui.
+2. O loop de auto-consistencia de BLOB descartava silenciosamente
+   colunas sem linha nao-nula pra amostrar (11 das 20 nesta base real),
+   sem contar isso — o "colunas amostradas" nao batia com a soma dos
+   outros contadores. Adicionado um contador explicito "sem linha
+   nao-nula pra amostrar".
+
+Ambos corrigidos e commitados (`529c438`) antes deste resultado ser
+incorporado.
 
 ## 8. Follow-ups nao bloqueantes
 
@@ -238,15 +264,17 @@ release.
 
 ## Decisao final
 
-**READY, condicionado a maturity battery real (Secao 7).**
+**READY.**
 
-Tudo que pode ser verificado sem acesso ao ambiente de producao do
-Fernando esta verde: compatibilidade DuckDB (3/3), matriz Firebird CI
-(3/3), client-lib runtime loading (robusto, documentado), artefatos
-Linux/Windows (ambos produzidos corretamente), docs de instalacao
-(corretas, com um gap cosmetico de comunicacao). O unico item em aberto
-e a execucao real do harness da Secao 7 contra o banco de producao —
-por desenho, isso so pode ser feito pelo Fernando, no ambiente dele.
+Todas as 8 areas fechadas com evidencia: compatibilidade DuckDB (3/3),
+matriz Firebird CI (3/3), client-lib runtime loading (robusto,
+documentado), artefatos Linux/Windows (ambos produzidos corretamente),
+docs de instalacao (corretas, com um gap cosmetico de comunicacao), e a
+maturity battery real (Secao 7) executada contra uma base de teste real
+de ~90 GB — zero erro, zero divergencia de auto-consistencia, achados
+(`sweep_disabled`, `charset_none`, 15367 colunas NONE-charset)
+consistentes com o perfil de banco legado que a extensao foi desenhada
+pra tratar, nao sinal de problema.
 
 Nenhuma acao em `duckdb/community-extensions` ou upstream nesta frente.
 Preparacao de changelog/README/release artifacts e Community Update
