@@ -17,8 +17,8 @@ Rule:
 | Usage guide | `docs/en/usage_guide.md` | `docs/pt/usage_guide.md` | Paired |
 | Function manual | `docs/en/function_manual.md` | `docs/pt/function_manual.md` | Paired |
 | Roadmap | `docs/en/roadmap.md` | `docs/pt/roadmap.md` | Paired for current strategy; EN keeps full historical detail |
-| Linux guide | `docs/en/guide_linux.md` | pending | Needs PT counterpart before major doc release |
-| Windows guide | `docs/en/guide_windows.md` | pending | Needs PT counterpart before major doc release |
+| Linux guide | `docs/en/guide_linux.md` | `docs/pt/guide_linux.md` | Paired (v1.0.0) |
+| Windows guide | `docs/en/guide_windows.md` | `docs/pt/guide_windows.md` | Paired (v1.0.0) |
 | Observability | `docs/en/observability.md` | covered inside `docs/pt/function_manual.md` | Acceptable for now; split PT page when observability changes again |
 | Architecture | `docs/en/architecture.md` | pending | Internal/developer doc; translate when DEV workflow depends on it |
 | Test report | `docs/en/test_report.md` | pending | Release evidence; translate or summarize per release |

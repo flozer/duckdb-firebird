@@ -1,15 +1,20 @@
 <div align="center">
   <h1>duckdb-firebird</h1>
   <p><strong>Query Firebird directly from <a href="https://github.com/duckdb/duckdb">DuckDB</a>.</strong></p>
+  <p><em>The first Firebird extension published in the
+    <a href="https://github.com/duckdb/community-extensions">DuckDB Community Extensions</a> registry.</em></p>
   <p>
-    Federated analytics over Firebird, Parquet, CSV, S3, and local DuckDB tables,
-    with pushdown, native ATTACH, legacy charset handling, and materialization paths.
+    Read-only scan, native ATTACH, metadata/diagnostics, and pushdown explain
+    for Firebird 3/4/5 -- DuckDB's own SQL (CREATE TABLE AS, COPY ... TO
+    PARQUET) handles materialization and export; this extension is the read
+    path, not an ETL/CDC/scheduler layer.
   </p>
   <p>
     <a href="LICENSE"><img alt="license MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
-    <a href="https://github.com/flozer/duckdb-firebird/releases/tag/v0.6.0"><img alt="release v0.6.0" src="https://img.shields.io/badge/release-v0.6.0-blue.svg"></a>
+    <a href="https://github.com/flozer/duckdb-firebird/releases/tag/v0.6.1"><img alt="release v0.6.1" src="https://img.shields.io/badge/release-v0.6.1-blue.svg"></a>
     <a href="https://github.com/flozer/duckdb-firebird/actions/workflows/build-linux-fb-matrix.yml"><img alt="linux matrix" src="https://github.com/flozer/duckdb-firebird/actions/workflows/build-linux-fb-matrix.yml/badge.svg"></a>
     <a href="https://github.com/duckdb/community-extensions/pull/1980"><img alt="community extension merged" src="https://img.shields.io/badge/DuckDB%20community-merged-brightgreen.svg"></a>
+    <a href="https://duckdb.org/community_extensions/download_metrics"><img alt="total DuckDB Community downloads for firebird" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fflozer%2Fduckdb-firebird%2Fmain%2F.github%2Fbadges%2Fdownloads.json"></a>
   </p>
   <p>
     <a href="docs/en/usage_guide.md">Usage guide</a> |
@@ -59,8 +64,14 @@ such as GizmoSQL.
 - **Firebird 3/4/5 type mapping** - including `INT128`, `DECIMAL(38)`,
   `TIMESTAMP WITH TIME ZONE`, text BLOBs, binary BLOBs, booleans, dates, and
   timestamps.
-- **DuckDB ecosystem output** - materialize to DuckDB tables, Parquet, S3/MinIO,
-  or serve through Arrow Flight SQL via GizmoSQL.
+- **Diagnostics and metadata bridge** - inspect constraints, indexes,
+  generators, domains, dependencies, comments, health, type-fidelity findings
+  (`firebird_type_audit`), index profile, table profile alerts, and
+  `firebird_explain_pushdown` planning reports.
+- **Plays well with plain DuckDB SQL** - once scanned/attached, ordinary
+  `CREATE TABLE AS`, `COPY ... TO PARQUET`, S3/MinIO writes, and Arrow Flight
+  SQL via GizmoSQL are DuckDB's own features, not something this extension
+  implements or manages.
 
 ## Quick Start
 
@@ -218,7 +229,19 @@ DuckDB behavior.
 
 ## Current Status
 
-Release: **v0.6.0**.
+Published community release: **v0.6.1**. The DuckDB Community catalog still
+installs the version pinned by `community-extensions/description.yml`; that
+submission has not been touched by this release.
+
+`main` is release-ready as **v1.0.0**: Metadata Bridge 2.0, pushdown explain
+planning, type audit, database/table/index diagnostics, the Smart Scan
+Planning report, deterministic paging safeguards, lossless type/BLOB
+hardening, and a closed Production Stability + Runtime/ABI Compatibility
+gate (fresh DuckDB v1.5.2/v1.5.3/v1.5.4 and Firebird 3/4/5 matrices, a
+read-only maturity battery run against a real ~90GB database, zero product
+errors). See
+[docs/en/release_notes_v1.0.0.md](docs/en/release_notes_v1.0.0.md) for the
+full release notes.
 
 | Area | Status |
 |---|---|
@@ -237,18 +260,21 @@ Release: **v0.6.0**.
 | LRU prepared statement cache | Deferred benchmark item |
 | Scanner-native Arrow `RecordBatch` output | v1.x candidate |
 
-### v0.6 Firebird-native diagnostics
-
-Released in **v0.6.0**. See `docs/en/roadmap.md`.
+### Firebird-native diagnostics
 
 | Area | Status |
 |---|---|
-| `firebird_profile_table('fb.main.T')` factual table/view diagnostics | Released in v0.6.0 |
-| Heavy-view shape detection (JOIN / aggregation / no-filter warnings) | Released in v0.6.0 |
-| Pushdown explainability in `firebird_last_query` / `firebird_query_log` (`limit_pushed`, `offset_pushed`, `not_pushed_reasons`) | Released in v0.6.0 |
-| `firebird_pool_stats('fb')` connection-pool introspection | Released in v0.6.0 |
-| `DECFLOAT(16/34)` lossless fallback (VARCHAR via server-side `CAST`) | Released in v0.6.0 |
-| Adaptive parallel scan recommendations (refined `recommended_partitions` + caveats in `firebird_profile_table`) | Released in v0.6.0 |
+| `firebird_profile_table('fb.main.T')` factual table/view diagnostics | Done |
+| Structured profile alerts (`alerts LIST(STRUCT(code,severity,message))`) | Done |
+| Heavy-view shape detection (JOIN / aggregation / no-filter warnings) | Done |
+| `firebird_explain_pushdown(sql)` planning report | Done |
+| Pushdown explainability in `firebird_last_query` / `firebird_query_log` (`limit_pushed`, `offset_pushed`, `not_pushed_reasons`) | Done |
+| `firebird_pool_stats('fb')` connection-pool introspection | Done |
+| `firebird_health('fb')` database/server health facts | Done |
+| `firebird_index_profile('fb.main.T')` index diagnostics | Done |
+| `firebird_type_audit('fb')` type/charset fidelity findings | Done |
+| `DECFLOAT(16/34)` lossless fallback (VARCHAR via server-side `CAST`) | Done |
+| Adaptive parallel scan recommendations (shared with scanner planning) | Done |
 
 `firebird_pool_stats('fb')` reports one attached catalog's pool state
 (config + idle queue + lifetime counters) by explicit alias. It does not
@@ -384,11 +410,26 @@ community-extensions/      DuckDB community descriptor copy
 - [LICENSE](LICENSE)
 - [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
 
+## License
+
+DuckDB Firebird is released under the [MIT License](LICENSE).
+
+<div align="center">
+  <h2>Support the project</h2>
+  <p>If DuckDB Firebird helps your work, you can support its continued development.</p>
+  <a href="https://buymeacoffee.com/fernandolozer">
+    <img
+      src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png"
+      alt="Support Fernando Lozer on Buy Me a Coffee"
+      height="50">
+  </a>
+</div>
+
 ## Community Catalog
 
 The DuckDB community-extension submission was merged via
 [duckdb/community-extensions#1980](https://github.com/duckdb/community-extensions/pull/1980).
-The community descriptor points to `repo.ref: v0.6.0` (runtime-loaded
+The community descriptor points to `repo.ref: v0.6.1` (runtime-loaded
 Firebird client; no `libfbclient` build dependency), so normal users should
 install from the official DuckDB community repository:
 

@@ -17,6 +17,11 @@ For the `firebird5.0-server` package on Ubuntu/Debian, the default
 `SYSDBA` password lives in `/etc/firebird/SYSDBA.password` — read it
 once at install time and stash it.
 
+This guide pins DuckDB v1.5.3 for reproducible builds. The extension is
+also verified against v1.5.2 and v1.5.4 with zero API drift -- see
+`docs/pt/duckdb_1_5_compatibility_plan.md` for the full cross-version
+matrix.
+
 ## Step 1 — Clone and pin
 
 ```bash
