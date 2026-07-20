@@ -21,6 +21,11 @@ service) **and** the SDK (headers under `include\`, import library
 `lib\fbclient_ms.lib`), so there's no separate "client SDK" download.
 Default install path: `C:\Program Files\Firebird\Firebird_5_0`.
 
+This guide pins DuckDB v1.5.3 for reproducible builds. The extension is
+also verified against v1.5.2 and v1.5.4 with zero API drift -- see
+`docs/pt/duckdb_1_5_compatibility_plan.md` for the full cross-version
+matrix.
+
 ## Step 1 — Clone and pin
 
 ```powershell

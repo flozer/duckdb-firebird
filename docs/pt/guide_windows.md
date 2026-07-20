@@ -22,6 +22,11 @@ import `lib\fbclient_ms.lib`), entao nao ha um download separado de
 "client SDK". Path de instalacao padrao:
 `C:\Program Files\Firebird\Firebird_5_0`.
 
+Este guia fixa o DuckDB na v1.5.3 pra builds reproduziveis. A extensao
+tambem e verificada contra v1.5.2 e v1.5.4, sem nenhum drift de API —
+veja `docs/pt/duckdb_1_5_compatibility_plan.md` pra matriz completa
+entre versoes.
+
 ## Passo 1 — Clonar e fixar versao
 
 ```powershell

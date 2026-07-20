@@ -17,6 +17,11 @@ Para o pacote `firebird5.0-server` no Ubuntu/Debian, a senha padrao do
 `SYSDBA` fica em `/etc/firebird/SYSDBA.password` — leia uma vez na
 instalacao e guarde.
 
+Este guia fixa o DuckDB na v1.5.3 pra builds reproduziveis. A extensao
+tambem e verificada contra v1.5.2 e v1.5.4, sem nenhum drift de API —
+veja `docs/pt/duckdb_1_5_compatibility_plan.md` pra matriz completa
+entre versoes.
+
 ## Passo 1 — Clonar e fixar versao
 
 ```bash
