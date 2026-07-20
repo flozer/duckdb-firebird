@@ -196,11 +196,24 @@ bool ReconcileViewColumnTypes(FirebirdConnection &conn,
     }
 
     std::string object_type;
-    if (!LookupObjectType(conn, upper, object_type)) {
-        return false;
+    bool object_type_confirmed = false;
+    try {
+        object_type_confirmed = LookupObjectType(conn, upper, object_type);
+    } catch (...) {
+        // Connection-level failure classifying the object -- do NOT assume
+        // "not a view" and skip reconciliation. That's exactly the crash
+        // ReconcileViewColumnTypes exists to prevent (see the aggregate-view
+        // INT128/NUMERIC comment at this function's call site in
+        // firebird_scanner.cpp). Fall through to the live-describe probe
+        // below defensively instead; object_type_confirmed stays false so
+        // the check below doesn't treat this as a confirmed non-view.
     }
-    const bool is_view = (object_type == "VIEW");
-    if (!is_view) {
+
+    // Only skip reconciliation when the object is CONFIRMED non-view --
+    // never on mere uncertainty (a LookupObjectType exception, or a
+    // `false` return meaning no matching RDB$RELATIONS row was found).
+    // Both uncertain cases fall through to the probe below defensively.
+    if (object_type_confirmed && object_type != "VIEW") {
         return false;
     }
 

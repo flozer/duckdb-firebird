@@ -580,8 +580,12 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
     // allocation below) and column_descs (kept consistent with the real
     // wire type for charset/pushdown-gating purposes) together from a
     // live, execute-free Prepare — never from the catalog alone. Also
-    // returns whether the target is a view, reused below instead of a
-    // second LookupObjectType call.
+    // returns true when the target is a confirmed view OR when object-type
+    // classification itself failed (#36 -- uncertainty must never skip
+    // reconciliation, since that's exactly what protects against the crash
+    // above); only a CONFIRMED non-view returns false here. Reused below
+    // instead of a second LookupObjectType call, so treat `is_view` as
+    // "might be a view" rather than a hard guarantee.
     bind->is_view = ReconcileViewColumnTypes(
         conn, bind->table_name, bind->column_names,
         bind->column_types, bind->column_descs);
