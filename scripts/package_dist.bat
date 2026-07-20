@@ -31,13 +31,25 @@ if not exist "%FBCLIENT%" (
 )
 
 REM Version source priority:
-REM   1. GITHUB_REF_NAME when it looks like a tag (v<semver>) -- the
-REM      release-assets.yml workflow runs on tag push, so this is the
-REM      authoritative source for published artifacts.
-REM   2. community-extensions/description.yml -- local dev fallback.
-REM   3. "unknown" -- last resort.
+REM   1. RELEASE_VERSION when set -- release-assets.yml exports this
+REM      explicitly (derived from the release tag, whether the run was
+REM      triggered by a tag push or a manual workflow_dispatch against a
+REM      branch). Authoritative whenever set; immune to GITHUB_REF_NAME
+REM      reflecting the dispatch ref ("main") instead of the release tag
+REM      on a manual re-run.
+REM   2. GITHUB_REF_NAME when it looks like a tag (v<semver>) -- true on
+REM      a real tag-push trigger even if RELEASE_VERSION wasn't set.
+REM   3. community-extensions/description.yml -- local dev fallback.
+REM   4. "unknown" -- last resort.
 set "VERSION="
-if defined GITHUB_REF_NAME (
+if defined RELEASE_VERSION (
+    if "%RELEASE_VERSION:~0,1%"=="v" (
+        set "VERSION=%RELEASE_VERSION:~1%"
+    ) else (
+        set "VERSION=%RELEASE_VERSION%"
+    )
+)
+if "%VERSION%"=="" if defined GITHUB_REF_NAME (
     if "%GITHUB_REF_NAME:~0,1%"=="v" set "VERSION=%GITHUB_REF_NAME:~1%"
 )
 if "%VERSION%"=="" for /f "delims=" %%v in ('powershell -NoProfile -Command "((Select-String -Path community-extensions/description.yml -Pattern '^^  version:').Line -split ':')[1].Trim()"') do set "VERSION=%%v"
