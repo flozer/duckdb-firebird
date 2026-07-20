@@ -52,22 +52,40 @@ for an *actual* view, the #33 crash is silently reintroduced — gated
 behind an even rarer trigger (a connection hiccup landing on exactly this
 one query) instead of fixed.
 
-**Corrected rule**, approved as this front's actual design:
+**Corrected rule**, approved as this front's actual design. There are two
+distinct ways `LookupObjectType` can fail to positively confirm "not a
+view," and both must be treated the same — falling through to the
+defensive probe, not skipping reconciliation:
 
-- `LookupObjectType` confirms the object is **not** a view (query
-  succeeds, `object_type != "VIEW"`) → skip reconciliation, unchanged
-  from today. Safe: plain tables don't have the frozen-vs-live type drift
-  views do.
+- **(a) it throws** — a genuine connection-level failure during the
+  classification query itself.
+- **(b) it returns `false` without throwing** — the query succeeded but
+  found no matching row in `RDB$RELATIONS` (e.g. the relation was
+  dropped between the earlier catalog listing that discovered
+  `table_name` and this lookup — a race, not a normal case, since we
+  only reach this point for a name the schema-load step already believed
+  existed).
+
+Neither (a) nor (b) is a *positive confirmation* that the object is not a
+view — both are "we don't know." Only a successful lookup that
+*explicitly* returns a non-`VIEW` type counts as confirmed-non-view. So:
+
+- `LookupObjectType` **explicitly confirms** the object is **not** a view
+  (query succeeds, returns `true`, `object_type != "VIEW"`) → skip
+  reconciliation, unchanged from today. Safe: plain tables don't have the
+  frozen-vs-live type drift views do.
 - `LookupObjectType` confirms the object **is** a view → reconcile,
   unchanged from today.
-- `LookupObjectType` **fails to answer** (throws) → do **not** assume
-  "not a view." Proceed into the existing live-describe probe
-  defensively, the same as if it had been confirmed a view. Correctness
-  outweighs the small extra round-trip this costs in the rare failure
-  case; the probe is a `PrepareOnlyTag` (execute-free) describe, safe and
-  cheap to run against a plain table too (it just reconfirms the same
-  types the catalog already had — a no-op in effect, not a correctness
-  risk).
+- `LookupObjectType` **fails to positively confirm non-view status** —
+  either by throwing (a) or by returning `false` (b) — → do **not**
+  assume "not a view" in either case. Proceed into the existing
+  live-describe probe defensively, the same as if it had been confirmed
+  a view. Correctness outweighs the small extra round-trip this costs in
+  the rare failure case; the probe is a `PrepareOnlyTag` (execute-free)
+  describe, safe and cheap to run against a plain table (or an
+  already-dropped one, where the probe's own existing `catch (...)` at
+  `:230` falls back to the catalog-derived types unchanged) — a no-op in
+  effect for the safe cases, not a correctness risk in the unsafe one.
 
 ## Design
 
