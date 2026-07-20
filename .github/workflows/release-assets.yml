@@ -79,7 +79,14 @@ jobs:
 
   windows-x64:
     name: windows-x64 release asset
-    runs-on: windows-latest
+    # windows-latest ships MSVC 14.51, which removed
+    # stdext::checked_array_iterator that DuckDB v1.5.3's bundled
+    # third_party/fmt still uses (fmt/format.h fails before extension code).
+    # Toolset 14.43 is not installed on that image, so pin the older image
+    # whose default MSVC still has the symbol. Same fix as build-windows.yml
+    # (commit 7d3f538) -- this workflow never received it, and hit the exact
+    # same failure on the v1.0.0 release-assets run.
+    runs-on: windows-2022
     timeout-minutes: 120
 
     steps:
