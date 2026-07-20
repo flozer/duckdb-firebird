@@ -4,8 +4,10 @@
   <p><em>The first Firebird extension published in the
     <a href="https://github.com/duckdb/community-extensions">DuckDB Community Extensions</a> registry.</em></p>
   <p>
-    Federated analytics over Firebird, Parquet, CSV, S3, and local DuckDB tables,
-    with pushdown, native ATTACH, legacy charset handling, and materialization paths.
+    Read-only scan, native ATTACH, metadata/diagnostics, and pushdown explain
+    for Firebird 3/4/5 -- DuckDB's own SQL (CREATE TABLE AS, COPY ... TO
+    PARQUET) handles materialization and export; this extension is the read
+    path, not an ETL/CDC/scheduler layer.
   </p>
   <p>
     <a href="LICENSE"><img alt="license MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
@@ -63,10 +65,13 @@ such as GizmoSQL.
   `TIMESTAMP WITH TIME ZONE`, text BLOBs, binary BLOBs, booleans, dates, and
   timestamps.
 - **Diagnostics and metadata bridge** - inspect constraints, indexes,
-  generators, domains, dependencies, comments, health, type-fidelity findings,
-  index profile, table profile alerts, and planned pushdown.
-- **DuckDB ecosystem output** - materialize to DuckDB tables, Parquet, S3/MinIO,
-  or serve through Arrow Flight SQL via GizmoSQL.
+  generators, domains, dependencies, comments, health, type-fidelity findings
+  (`firebird_type_audit`), index profile, table profile alerts, and
+  `firebird_explain_pushdown` planning reports.
+- **Plays well with plain DuckDB SQL** - once scanned/attached, ordinary
+  `CREATE TABLE AS`, `COPY ... TO PARQUET`, S3/MinIO writes, and Arrow Flight
+  SQL via GizmoSQL are DuckDB's own features, not something this extension
+  implements or manages.
 
 ## Quick Start
 
@@ -224,13 +229,19 @@ DuckDB behavior.
 
 ## Current Status
 
-Published community release: **v0.6.1**.
+Published community release: **v0.6.1**. The DuckDB Community catalog still
+installs the version pinned by `community-extensions/description.yml`; that
+submission has not been touched by this release.
 
-The `main` branch also contains the completed v0.7/v0.8/v1.0 release-prep
-work: Metadata Bridge 2.0, pushdown explain planning, type audit,
-database/table/index diagnostics, deterministic paging safeguards, and
-lossless type/BLOB hardening. The DuckDB Community catalog still installs the
-version pinned by `community-extensions/description.yml`.
+`main` is release-ready as **v1.0.0**: Metadata Bridge 2.0, pushdown explain
+planning, type audit, database/table/index diagnostics, the Smart Scan
+Planning report, deterministic paging safeguards, lossless type/BLOB
+hardening, and a closed Production Stability + Runtime/ABI Compatibility
+gate (fresh DuckDB v1.5.2/v1.5.3/v1.5.4 and Firebird 3/4/5 matrices, a
+read-only maturity battery run against a real ~90GB database, zero product
+errors). See
+[docs/en/release_notes_v1.0.0.md](docs/en/release_notes_v1.0.0.md) for the
+full release notes.
 
 | Area | Status |
 |---|---|
