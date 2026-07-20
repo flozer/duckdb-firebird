@@ -50,14 +50,25 @@ if [ ! -f "$EXT" ]; then
 fi
 
 # Version source priority:
-#   1. GITHUB_REF_NAME when it looks like a tag (`v<semver>`) - the
-#      release-assets.yml workflow runs on tag push, so this is the
-#      authoritative source for published artifacts.
-#   2. community-extensions/description.yml - the developer-edited
+#   1. RELEASE_VERSION when set - release-assets.yml exports this
+#      explicitly (derived from the release tag, whether the run was
+#      triggered by a tag push or a manual workflow_dispatch against a
+#      branch). This is the authoritative source whenever the workflow
+#      sets it, and is immune to GITHUB_REF_NAME reflecting the dispatch
+#      ref (e.g. "main") instead of the release tag on a manual re-run.
+#   2. GITHUB_REF_NAME when it looks like a tag (`v<semver>`) - true on
+#      a real tag-push trigger even if RELEASE_VERSION wasn't set.
+#   3. community-extensions/description.yml - the developer-edited
 #      version field. Useful for local builds outside CI.
-#   3. "unknown" - last resort so the archive still gets produced.
+#   4. "unknown" - last resort so the archive still gets produced.
 VERSION=""
-if [ -n "${GITHUB_REF_NAME:-}" ]; then
+if [ -n "${RELEASE_VERSION:-}" ]; then
+    case "$RELEASE_VERSION" in
+        v*) VERSION="${RELEASE_VERSION#v}" ;;
+        *)  VERSION="$RELEASE_VERSION" ;;
+    esac
+fi
+if [ -z "$VERSION" ] && [ -n "${GITHUB_REF_NAME:-}" ]; then
     case "$GITHUB_REF_NAME" in
         v*) VERSION="${GITHUB_REF_NAME#v}" ;;
     esac

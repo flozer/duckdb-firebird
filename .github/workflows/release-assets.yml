@@ -56,6 +56,8 @@ jobs:
         run: scripts/build_linux_local.sh --clean
 
       - name: Package
+        env:
+          RELEASE_VERSION: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
         run: scripts/package_dist_linux.sh
 
       - name: Upload workflow artifact
@@ -161,6 +163,8 @@ jobs:
 
       - name: Package
         shell: cmd
+        env:
+          RELEASE_VERSION: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
         run: scripts\package_dist.bat
 
       - name: Upload workflow artifact
