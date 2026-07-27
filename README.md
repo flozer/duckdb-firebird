@@ -231,17 +231,22 @@ DuckDB behavior.
 
 Published community release: **v0.6.1**. The DuckDB Community catalog still
 installs the version pinned by `community-extensions/description.yml`; that
-submission has not been touched by this release.
+submission has not been touched by this repository's own v1.0.x releases.
 
-`main` is release-ready as **v1.0.0**: Metadata Bridge 2.0, pushdown explain
-planning, type audit, database/table/index diagnostics, the Smart Scan
-Planning report, deterministic paging safeguards, lossless type/BLOB
-hardening, and a closed Production Stability + Runtime/ABI Compatibility
-gate (fresh DuckDB v1.5.2/v1.5.3/v1.5.4 and Firebird 3/4/5 matrices, a
-read-only maturity battery run against a real ~90GB database, zero product
-errors). See
-[docs/en/release_notes_v1.0.0.md](docs/en/release_notes_v1.0.0.md) for the
-full release notes.
+`main` is at **v1.0.1** (patch release, see
+[docs/en/release_notes_v1.0.1.md](docs/en/release_notes_v1.0.1.md)):
+Metadata Bridge 2.0, pushdown explain planning, type audit, database/
+table/index diagnostics, the Smart Scan Planning report, deterministic
+paging safeguards, lossless type/BLOB hardening, and a closed Production
+Stability + Runtime/ABI Compatibility gate (fresh DuckDB
+v1.5.2/v1.5.3/v1.5.4/v1.5.5 and Firebird 3/4/5 matrices, a read-only
+maturity battery run against a real ~90GB database, zero product errors).
+v1.5.5 — the current DuckDB Community Extensions compatibility target —
+is validated as an additional matrix version; the repository's own default
+build pin stays v1.5.3 for now. See
+[docs/en/release_notes_v1.0.0.md](docs/en/release_notes_v1.0.0.md) and
+[docs/pt/duckdb_1_5_compatibility_plan.md](docs/pt/duckdb_1_5_compatibility_plan.md)
+for full detail.
 
 | Area | Status |
 |---|---|

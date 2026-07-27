@@ -23,7 +23,7 @@
 #
 # Exit code: non-zero if the baseline v1.5.3 fails to build.
 
-param([string[]]$Tags = @('v1.5.2', 'v1.5.3', 'v1.5.4'))
+param([string[]]$Tags = @('v1.5.2', 'v1.5.3', 'v1.5.4', 'v1.5.5'))
 
 $ErrorActionPreference = 'Continue'
 $root = 'd:/Dados/duckdb-firebird'
