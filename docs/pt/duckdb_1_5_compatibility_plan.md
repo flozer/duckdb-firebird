@@ -163,6 +163,34 @@ e de 605 para 854 assercoes, com resultado identico e zero `env-missing` nas
 tres versoes. Ver `docs/pt/runtime_abi_compatibility_gate.md` para o
 relatorio consolidado da gate.
 
+## Resultado da verificacao v1.5.5 (2026-07-27, Compatibility + CI Reliability Gate)
+
+`v1.5.5` e o alvo atual de compatibilidade do catalogo DuckDB Community
+Extensions. Adicionada como quarta versao validada na matriz local
+(`scripts/build_matrix.ps1`'s default `-Tags` agora
+`v1.5.2,v1.5.3,v1.5.4,v1.5.5`). Escopo deliberadamente minimo, por decisao
+explicita do Fernando: **o pin padrao do repositorio continua v1.5.3** em
+todo workflow, script de build e no submodulo commitado — nao houve
+migracao do baseline. Migrar o pin padrao para v1.5.5 fica como frente
+separada, futura, se a validacao mostrar necessidade real ou depois do
+Community Update.
+
+Rodado a partir de um worktree isolado (`C:/tmp/fbwt-155`, nunca o
+worktree principal sujo), mesma copia-local do `scripts/build_matrix.ps1`
+apontando `$root` para esse worktree.
+
+| Versao  | Commit DuckDB | Build | Testes                   | Assertions | Status | Artefato |
+|---------|---------------|-------|---------------------------|------------|--------|----------|
+| v1.5.2  | `8a5851971f`  | ok    | 19 pass / 0 env-missing   | 854        | PASS   | firebird.duckdb_extension |
+| v1.5.3  | `14eca11bd9`  | ok    | 19 pass / 0 env-missing   | 854        | PASS   | firebird.duckdb_extension (baseline / pin do submodulo) |
+| v1.5.4  | `08e34c447b`  | ok    | 19 pass / 0 env-missing   | 854        | PASS   | firebird.duckdb_extension |
+| v1.5.5  | `d8cdaa33fd`  | ok    | 19 pass / 0 env-missing   | 854        | PASS   | firebird.duckdb_extension |
+
+### API drift (v1.5.5)
+
+Nenhum. Compila sem alteracao de codigo, mesma suite (19 arquivos, 854
+assercoes), resultado identico as outras tres versoes.
+
 ### Notas de ambiente
 
 - Falha inicial em `firebird_metadata`, `firebird_bind_params` e `firebird_dbt_sources`
