@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   update-download-badge:
@@ -24,15 +25,36 @@ jobs:
       - name: Update badge JSON
         run: node scripts/update_download_badge.mjs
 
-      - name: Commit badge update
+      - name: Open/update badge PR (never pushes to main directly)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # main is a protected branch (required PR, enforce_admins) --
+          # a direct push here always fails with GH006. If the badge JSON
+          # didn't change, exit clean without creating a branch or PR at
+          # all. If it did change, commit ONLY that file to a fixed bot
+          # branch (recreated from the current main HEAD every run, so it
+          # never carries stale history), force-push it, and open a PR if
+          # one isn't already open -- never merge it automatically.
           if git diff --quiet -- .github/badges/downloads.json; then
             echo "Download badge unchanged."
             exit 0
           fi
 
+          BRANCH="bot/update-download-badge"
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
           git add .github/badges/downloads.json
           git commit -m "docs: update download badge"
-          git push
+          git push --force origin "$BRANCH"
+
+          existing_pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number --jq 'length')
+          if [ "$existing_pr" = "0" ]; then
+            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
+              --title "docs: update download badge" \
+              --body "Automated update to \`.github/badges/downloads.json\` via \`scripts/update_download_badge.mjs\`. No auto-merge -- review and merge manually."
+          else
+            echo "PR already open for $BRANCH -- branch force-pushed with the latest count, no new PR needed."
+          fi
