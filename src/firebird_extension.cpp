@@ -14,30 +14,162 @@
 #include "duckdb.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 
 namespace duckdb {
 
+namespace {
+
+// Registers a table function with in-band documentation so duckdb_functions()
+// exposes real parameter names, a description, and a runnable example.
+//
+// positional_names covers only the positional parameters: duckdb_functions()
+// zips parameter_names against the combined list of positional arguments plus
+// fn.named_parameters (iterated in hash-map order), so the named tail must be
+// read from the same map here to stay index-aligned.
+CreateTableFunctionInfo DescribedTableFunction(TableFunction fn, vector<string> positional_names,
+                                               string description, string example, vector<string> categories) {
+    FunctionDescription desc;
+    desc.parameter_names = std::move(positional_names);
+    for (const auto &kv : fn.named_parameters) {
+        desc.parameter_names.push_back(kv.first);
+    }
+    desc.description = std::move(description);
+    desc.examples = {std::move(example)};
+    desc.categories = std::move(categories);
+    CreateTableFunctionInfo info(std::move(fn));
+    info.descriptions.push_back(std::move(desc));
+    // Matches the bare RegisterFunction(TableFunction) overload, which wraps
+    // the function in a TableFunctionSet registered with ALTER_ON_CONFLICT.
+    info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+    return info;
+}
+
+} // namespace
+
 static void LoadInternal(ExtensionLoader &loader) {
-    loader.RegisterFunction(GetFirebirdScanFunction());
-    loader.RegisterFunction(GetFirebirdTablesFunction());
-    loader.RegisterFunction(GetFirebirdAttachFunction());
-    loader.RegisterFunction(GetFirebirdLastQueryFunction());
-    loader.RegisterFunction(GetFirebirdQueryLogFunction());
-    loader.RegisterFunction(GetFirebirdDbtSourcesFunction());
-    loader.RegisterFunction(GetFirebirdProfileTableFunction());
-    loader.RegisterFunction(GetFirebirdPoolStatsFunction());
-    loader.RegisterFunction(GetFirebirdIndexesFunction());
-    loader.RegisterFunction(GetFirebirdForeignKeysFunction());
-    loader.RegisterFunction(GetFirebirdGeneratorsFunction());
-    loader.RegisterFunction(GetFirebirdDomainsFunction());
-    loader.RegisterFunction(GetFirebirdComputedColumnsFunction());
-    loader.RegisterFunction(GetFirebirdDependenciesFunction());
-    loader.RegisterFunction(GetFirebirdCommentsFunction());
-    loader.RegisterFunction(GetFirebirdExplainPushdownFunction());
-    loader.RegisterFunction(GetFirebirdTypeAuditFunction());
-    loader.RegisterFunction(GetFirebirdHealthFunction());
-    loader.RegisterFunction(GetFirebirdIndexProfileFunction());
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdScanFunction(), {"connection_string", "table_name"},
+        "Reads a Firebird table into DuckDB with projection and predicate pushdown, "
+        "optional parallel PK-range partitioning (partitions=N), ROWS paging, and "
+        "CHARACTER SET NONE decoding.",
+        "SELECT * FROM firebird_scan('database=C:/data/erp.fdb user=APP_READONLY password=secret', 'CUSTOMER');",
+        {"firebird", "scan"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdTablesFunction(), {"connection_string"},
+        "Lists the Firebird tables visible to a connection, without attaching the database.",
+        "SELECT * FROM firebird_tables('database=C:/data/erp.fdb user=APP_READONLY password=secret');",
+        {"firebird", "catalog"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdAttachFunction(), {"connection_string"},
+        "Returns one CREATE VIEW statement per Firebird table, each wrapping "
+        "firebird_scan(), for a view-based workflow instead of a storage ATTACH.",
+        "SELECT sql FROM firebird_attach_sql('database=C:/data/erp.fdb user=APP_READONLY password=secret');",
+        {"firebird", "catalog"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdLastQueryFunction(), {},
+        "Returns telemetry for the most recent Firebird scan in the current session: "
+        "remote SQL, pushed and residual filters with reasons, pushed paging, timing, "
+        "rows read, and parallel scan and connection-reuse details.",
+        "SELECT * FROM firebird_last_query();",
+        {"firebird", "observability"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdQueryLogFunction(), {},
+        "Returns the bounded per-session log of Firebird scans (opt-in via "
+        "SET firebird_query_log_size = N), with the same telemetry columns as "
+        "firebird_last_query().",
+        "SELECT * FROM firebird_query_log();",
+        {"firebird", "observability"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdDbtSourcesFunction(), {"catalog_name"},
+        "Generates dbt sources.yml content for every Firebird table exposed by an "
+        "attached catalog; the YAML is a starting point to review.",
+        "SELECT yaml FROM firebird_generate_dbt_sources('fb');",
+        {"firebird", "dbt"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdProfileTableFunction(), {"qualified_name"},
+        "Returns a single-row factual diagnostic for one table or view behind an "
+        "attached catalog: primary key, indexes, watermark and filter candidates, "
+        "full-scan risk, advisory recommended_partitions, and structured alerts.",
+        "SELECT * FROM firebird_profile_table('fb.main.CUSTOMER');",
+        {"firebird", "diagnostics"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdPoolStatsFunction(), {"catalog_name"},
+        "Returns config, idle-queue size, and lifetime counters for the connection "
+        "pool of one attached Firebird catalog, by explicit alias; it never leases "
+        "a connection.",
+        "SELECT * FROM firebird_pool_stats('fb');",
+        {"firebird", "diagnostics"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdIndexesFunction(), {"catalog_name"},
+        "Lists all user indexes with per-segment columns, uniqueness, activity, and "
+        "expression source for expression indexes.",
+        "SELECT * FROM firebird_indexes('fb');",
+        {"firebird", "metadata"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdForeignKeysFunction(), {"catalog_name"},
+        "Lists foreign-key constraints column by column with the real Firebird "
+        "update and delete referential rules.",
+        "SELECT * FROM firebird_foreign_keys('fb');",
+        {"firebird", "metadata"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdGeneratorsFunction(), {"catalog_name"},
+        "Lists user generators/sequences with their initial value and current value "
+        "(read per generator via GEN_ID(name, 0)).",
+        "SELECT * FROM firebird_generators('fb');",
+        {"firebird", "metadata"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdDomainsFunction(), {"catalog_name"},
+        "Lists user-defined domains with formatted type, nullability, charset, and "
+        "CHECK/DEFAULT clauses.",
+        "SELECT * FROM firebird_domains('fb');",
+        {"firebird", "metadata"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdComputedColumnsFunction(), {"catalog_name"},
+        "Lists COMPUTED BY columns of all user tables with their expression source.",
+        "SELECT * FROM firebird_computed_columns('fb');",
+        {"firebird", "metadata"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdDependenciesFunction(), {"catalog_name"},
+        "Lists dependencies between database objects (tables, views, procedures, "
+        "triggers, and others), down to column level when known.",
+        "SELECT * FROM firebird_dependencies('fb');",
+        {"firebird", "metadata"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdCommentsFunction(), {"catalog_name"},
+        "Lists RDB$DESCRIPTION comments for user tables, views, and columns.",
+        "SELECT * FROM firebird_comments('fb');",
+        {"firebird", "metadata"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdExplainPushdownFunction(), {"sql"},
+        "Analyzes a SELECT over attached Firebird tables plan-only, reporting per "
+        "scan what would be pushed down (filters, projection, ROWS paging, PK-range "
+        "partitions) without executing the query.",
+        "SELECT * FROM firebird_explain_pushdown('SELECT EMP_ID, EMP_NAME FROM fb.main.EMPLOYEE WHERE EMP_ID > 10');",
+        {"firebird", "diagnostics"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdTypeAuditFunction(), {"catalog_name"},
+        "Reports per-column type and charset fidelity findings (NONE charset, "
+        "DECFLOAT as VARCHAR, INT128, timezone types, text BLOBs) for an attached "
+        "catalog; only columns with a caveat are emitted.",
+        "SELECT * FROM firebird_type_audit('fb');",
+        {"firebird", "diagnostics"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdHealthFunction(), {"alias"},
+        "Returns a single-row database and server health diagnostic (engine and ODS "
+        "version, dialect, charset, page size, transaction counters OIT/OAT/OST, "
+        "attachments, warning codes) read from MON$ tables.",
+        "SELECT * FROM firebird_health('fb');",
+        {"firebird", "diagnostics"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdIndexProfileFunction(), {"qualified_name"},
+        "Returns one row per index of a Firebird table (columns, uniqueness, "
+        "activity, PK/FK backing, raw selectivity, structured alerts) plus "
+        "unindexed filter candidates; a table with no indexes emits one synthetic "
+        "row.",
+        "SELECT * FROM firebird_index_profile('fb.main.CUSTOMER');",
+        {"firebird", "diagnostics"}));
 
     // Register the StorageExtension so DuckDB knows how to handle
     //   ATTACH 'firebird://…' AS fb (TYPE firebird);
