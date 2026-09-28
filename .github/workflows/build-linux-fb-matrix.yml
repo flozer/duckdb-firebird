@@ -249,6 +249,8 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_none_charset.test
           ./build/release/test/unittest test/sql/firebird_explain_pushdown.test
           ./build/release/test/unittest test/sql/firebird_type_audit.test
+          # Catalog-metadata-only test (issue #63); needs no fixture
+          ./build/release/test/unittest test/sql/firebird_function_docs.test
 
       - name: FB4+ live type smoke (INT128 / DECIMAL(38) / TIMESTAMP_TZ)
         if: matrix.fb_major != '3'

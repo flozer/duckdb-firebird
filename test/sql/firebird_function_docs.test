@@ -1,0 +1,67 @@
+# name: test/sql/firebird_function_docs.test
+# description: duckdb_functions() in-band documentation coverage (issue #63).
+#              Every firebird_* table function registers a FunctionDescription
+#              with real parameter names, a one-sentence description, a
+#              runnable SELECT example, and categories.
+# group: [firebird]
+#
+# No Firebird server required: this test inspects DuckDB catalog metadata only.
+
+require firebird
+
+# One row per registered firebird_* table function
+query I
+SELECT count(*)
+FROM duckdb_functions()
+WHERE function_type = 'table'
+  AND function_name LIKE 'firebird%'
+----
+19
+
+# Every function carries description, examples, and categories
+query I
+SELECT count(*)
+FROM duckdb_functions()
+WHERE function_name LIKE 'firebird%'
+  AND (description IS NULL OR len(examples) = 0 OR len(categories) = 0)
+----
+0
+
+# No placeholder parameter names survive (col0/col1/... would mean a
+# FunctionDescription without parameter_names, or one shorter than the
+# function's full positional + named parameter list)
+query I
+SELECT count(*)
+FROM duckdb_functions()
+WHERE function_name LIKE 'firebird%'
+  AND len(list_filter(parameters, lambda p: starts_with(p, 'col'))) > 0
+----
+0
+
+# firebird_scan: 2 positional + 9 named parameters, all with real names
+query I
+SELECT len(parameters)
+FROM duckdb_functions()
+WHERE function_name = 'firebird_scan'
+----
+11
+
+query I
+SELECT count(*)
+FROM duckdb_functions()
+WHERE function_name = 'firebird_scan'
+  AND list_contains(parameters, 'connection_string')
+  AND list_contains(parameters, 'table_name')
+  AND list_contains(parameters, 'row_limit')
+  AND list_contains(parameters, 'none_encoding')
+----
+1
+
+# Examples are full statements: table functions cannot be bare expressions
+query I
+SELECT count(*)
+FROM duckdb_functions()
+WHERE function_name LIKE 'firebird%'
+  AND len(list_filter(examples, lambda e: NOT starts_with(e, 'SELECT'))) > 0
+----
+0
