@@ -98,9 +98,10 @@ static void LoadInternal(ExtensionLoader &loader) {
         {"firebird", "diagnostics"}));
     loader.RegisterFunction(DescribedTableFunction(
         GetFirebirdPoolStatsFunction(), {"catalog_name"},
-        "Returns config, idle-queue size, and lifetime counters for the connection "
-        "pool of one attached Firebird catalog, by explicit alias; it never leases "
-        "a connection.",
+        "Returns config, idle-queue size, active-lease count, lifetime counters, "
+        "and the sanitized last connection error for the connection pool of one "
+        "attached Firebird catalog, by explicit alias; it never leases a "
+        "connection.",
         "SELECT * FROM firebird_pool_stats('fb');",
         {"firebird", "diagnostics"}));
     loader.RegisterFunction(DescribedTableFunction(

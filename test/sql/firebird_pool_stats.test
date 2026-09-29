@@ -53,7 +53,7 @@ ATTACH '${FIREBIRD_TEST_DB}' AS fbps (TYPE firebird);
 query I
 SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM firebird_pool_stats('fbps'));
 ----
-8
+10
 
 query I
 SELECT COUNT(*) FROM firebird_pool_stats('fbps');
@@ -117,8 +117,31 @@ SELECT total_created >= idle_connections FROM firebird_pool_stats('fbps');
 true
 
 # ---------------------------------------------------------------------------
+#  Active leases + last_error (F2). After synchronous queries every lease
+#  has returned to the pool (RAII), so active_connections is 0; on a
+#  healthy catalog no connection creation has failed, so last_error is
+#  NULL. The error path (populated when a post-ATTACH connection creation
+#  fails, e.g. the server went away) is not reproducible inside
+#  sqllogictest without stopping the server mid-run.
+# ---------------------------------------------------------------------------
+
+query IT
+SELECT active_connections, last_error FROM firebird_pool_stats('fbps');
+----
+0	NULL
+
+# created must always cover the currently idle plus active connections.
+
+query T
+SELECT total_created >= idle_connections + active_connections
+  FROM firebird_pool_stats('fbps');
+----
+true
+
+# ---------------------------------------------------------------------------
 #  Pool disabled: a separate ATTACH with pooling off reports pool_enabled
-#  false and never parks idle connections (idle_connections stays 0).
+#  false and never parks idle connections (idle_connections stays 0), and
+#  the disabled path also drains active_connections back to 0.
 # ---------------------------------------------------------------------------
 
 statement ok
@@ -135,13 +158,20 @@ SELECT pool_enabled, idle_connections FROM firebird_pool_stats('fbps_off');
 ----
 false	0
 
-# No leak: the connection string / credentials never appear in the output.
+query IT
+SELECT active_connections, last_error FROM firebird_pool_stats('fbps_off');
+----
+0	NULL
+
+# No leak: the connection string / credentials never appear in the output
+# (last_error is stored password-redacted).
 
 query I
 SELECT COUNT(*) FROM firebird_pool_stats('fbps')
  WHERE catalog_name LIKE '%SYSDBA%'
     OR catalog_name LIKE '%masterkey%'
-    OR catalog_name LIKE '%.fdb%';
+    OR catalog_name LIKE '%.fdb%'
+    OR last_error  LIKE '%masterkey%';
 ----
 0
 

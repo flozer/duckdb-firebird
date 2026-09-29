@@ -232,13 +232,49 @@ std::unique_ptr<FirebirdConnection> FirebirdConnectionPool::Acquire() {
     return AcquireWithInfo().conn;
 }
 
+// Redact every occurrence of the connection password (both the
+// 'user:pass@' URL form and the 'password=pass' DPB form embed it
+// verbatim) and cap the stored length so a pathological message cannot
+// grow unbounded.
+static std::string SanitizeConnectionError(std::string message,
+                                           const std::string &password) {
+    if (!password.empty()) {
+        const std::string redacted = "****";
+        size_t pos = 0;
+        while ((pos = message.find(password, pos)) != std::string::npos) {
+            message.replace(pos, password.size(), redacted);
+            pos += redacted.size();
+        }
+    }
+    if (message.size() > 500) {
+        message.resize(500);
+    }
+    return message;
+}
+
+void FirebirdConnectionPool::RecordConnectionError(const std::string &message) {
+    std::lock_guard<std::mutex> g(lock_);
+    last_error_ = SanitizeConnectionError(message, info_.password);
+}
+
+std::string FirebirdConnectionPool::LastError() {
+    std::lock_guard<std::mutex> g(lock_);
+    return last_error_;
+}
+
 FirebirdConnectionLease FirebirdConnectionPool::AcquireWithInfo() {
     if (!config_.enabled) {
         // Pool disabled: every Acquire creates a fresh connection and
         // Release drops it. Idle queue is never touched.
-        auto fresh = std::make_unique<FirebirdConnection>(info_);
-        total_created_.fetch_add(1, std::memory_order_relaxed);
-        return { std::move(fresh), false };
+        try {
+            auto fresh = std::make_unique<FirebirdConnection>(info_);
+            total_created_.fetch_add(1, std::memory_order_relaxed);
+            active_.fetch_add(1, std::memory_order_relaxed);
+            return { std::move(fresh), false };
+        } catch (const std::exception &e) {
+            RecordConnectionError(e.what());
+            throw;
+        }
     }
 
     {
@@ -265,17 +301,26 @@ FirebirdConnectionLease FirebirdConnectionPool::AcquireWithInfo() {
             auto conn = std::move(idle_.back().conn);
             idle_.pop_back();
             total_reused_.fetch_add(1, std::memory_order_relaxed);
+            active_.fetch_add(1, std::memory_order_relaxed);
             return { std::move(conn), true };
         }
     }
 
-    auto fresh = std::make_unique<FirebirdConnection>(info_);
-    total_created_.fetch_add(1, std::memory_order_relaxed);
-    return { std::move(fresh), false };
+    try {
+        auto fresh = std::make_unique<FirebirdConnection>(info_);
+        total_created_.fetch_add(1, std::memory_order_relaxed);
+        active_.fetch_add(1, std::memory_order_relaxed);
+        return { std::move(fresh), false };
+    } catch (const std::exception &e) {
+        RecordConnectionError(e.what());
+        throw;
+    }
 }
 
 void FirebirdConnectionPool::Release(std::unique_ptr<FirebirdConnection> conn) {
     if (!conn) return;
+
+    active_.fetch_sub(1, std::memory_order_relaxed);
 
     if (!config_.enabled) {
         // Pool disabled: never park, destroy on release.
