@@ -91,7 +91,9 @@ static void LoadInternal(ExtensionLoader &loader) {
         GetFirebirdProfileTableFunction(), {"qualified_name"},
         "Returns a single-row factual diagnostic for one table or view behind an "
         "attached catalog: primary key, indexes, watermark and filter candidates, "
-        "full-scan risk, advisory recommended_partitions, and structured alerts.",
+        "full-scan risk, advisory recommended_partitions, structured alerts, and a "
+        "row estimate (PK-range upper bound, or exact COUNT(*) when "
+        "exact_row_count=true).",
         "SELECT * FROM firebird_profile_table('fb.main.CUSTOMER');",
         {"firebird", "diagnostics"}));
     loader.RegisterFunction(DescribedTableFunction(
