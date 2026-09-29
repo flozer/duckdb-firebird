@@ -207,3 +207,47 @@ assercoes), resultado identico as outras tres versoes.
 ### Escopo
 
 Nenhuma acao community/upstream. Nenhum PR, tag, release ou asset. Submodulo restaurado.
+
+## Verificacao v1.5.6 (2026-09-29)
+
+A v1.5.6 saiu em 2026-09-28 como linha de correcoes da 1.5.x. Sem mudanca na
+superficie de API que a extensao usa (`extension_loader`,
+`CreateTableFunctionInfo`, `StorageExtension::Register`); traz a unificacao
+de versionamento de simbolos da C-API v1 e backports aditivos das grafias de
+API do DuckDB 2.0. Verificada no mesmo fluxo da matriz anterior
+(`scripts/build_matrix.ps1`, Windows/MSVC, Firebird 5.0.3 local, submodulo
+restaurado ao pin v1.5.3 ao final).
+
+A matriz agora cobre os 21 arquivos de teste (incluindo os novos
+`firebird_partitions_scan`, `firebird_function_docs` e a suíte F1–F4), com
+`FIREBIRD_PARTITIONS_DB` adicionado ao mapa de fixtures do script.
+
+| Versao  | Commit DuckDB | Build | Testes                  | Assertions | Status | Artefato |
+|---------|---------------|-------|--------------------------|------------|--------|----------|
+| v1.5.3  | `14eca11bd9`  | ok    | 21/21 arquivos, 0 falhas | 903        | PASS   | firebird.duckdb_extension (baseline / pin do submodulo) |
+| v1.5.6  | `069cc9f9b5`  | ok    | 21/21 arquivos, 0 falhas | 903        | PASS   | firebird.duckdb_extension |
+
+### API drift (v1.5.6)
+
+Nenhum. Compila sem alteracao de codigo; resultado identico ao baseline
+v1.5.3 na mesma suite.
+
+### Notas de ambiente
+
+- Falha inicial de `firebird_blob_lossless.test` (identica em v1.5.3 e
+  v1.5.6) era fixture: o `test.fdb` provisionado manualmente nao tinha os
+  BLOBs multi-segmento escritos por `scripts/mkblob_fixture.cpp`. Apos
+  aplicar o mkblob, o teste passa nas duas versoes. Classificacao:
+  ambiente/fixture, nao compatibilidade DuckDB.
+
+### Decisao de pin
+
+Mantido `v1.5.3` como pin de build (CI e scripts). A v1.5.6 entra como
+versao validada adicional. Promover o pin so faz sentido quando o catalogo
+DuckDB Community Extensions mover o proprio alvo (hoje v1.5.5), evitando
+divergencia entre o que validamos localmente e o que o catalogo constroi.
+
+### Escopo
+
+Nenhuma acao community/upstream. Nenhum PR upstream, tag, release ou asset
+desta verificacao. Submodulo restaurado ao pin.

@@ -248,9 +248,10 @@ paging safeguards, lossless type/BLOB hardening, and a closed Production
 Stability + Runtime/ABI Compatibility gate (fresh DuckDB
 v1.5.2/v1.5.3/v1.5.4/v1.5.5 and Firebird 3/4/5 matrices, a read-only
 maturity battery run against a real ~90GB database, zero product errors).
-v1.5.5 — the current DuckDB Community Extensions compatibility target —
-is validated as an additional matrix version; the repository's own default
-build pin stays v1.5.3 for now. See
+DuckDB v1.5.5 — the current DuckDB Community Extensions compatibility
+target — and v1.5.6 (released 2026-09-28) are validated as additional
+matrix versions (v1.5.6: full suite, 21/21 test files, 2026-09-29); the
+repository's own default build pin stays v1.5.3 for now. See
 [docs/en/release_notes_v1.0.0.md](docs/en/release_notes_v1.0.0.md) and
 [docs/pt/duckdb_1_5_compatibility_plan.md](docs/pt/duckdb_1_5_compatibility_plan.md)
 for full detail.

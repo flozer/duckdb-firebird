@@ -23,7 +23,7 @@
 #
 # Exit code: non-zero if the baseline v1.5.3 fails to build.
 
-param([string[]]$Tags = @('v1.5.2', 'v1.5.3', 'v1.5.4', 'v1.5.5'))
+param([string[]]$Tags = @('v1.5.3', 'v1.5.5', 'v1.5.6'))
 
 $ErrorActionPreference = 'Continue'
 $root = 'd:/Dados/duckdb-firebird'
@@ -64,11 +64,13 @@ $testFixtureVar = @{
     'firebird_metadata_bridge.test'    = 'FIREBIRD_TEST_DB'
     'firebird_decfloat.test'           = 'FIREBIRD_DECFLOAT_DB'
     'firebird_none_charset.test'       = 'FIREBIRD_NONE_DB'
+    'firebird_partitions_scan.test'    = 'FIREBIRD_PARTITIONS_DB'
     'firebird_explain_pushdown.test'   = 'FIREBIRD_TEST_DB'
     'firebird_type_audit.test'         = 'FIREBIRD_TEST_DB'
     'firebird_health.test'             = 'FIREBIRD_TEST_DB'
     'firebird_index_profile.test'      = 'FIREBIRD_TEST_DB'
     'firebird_blob_lossless.test'      = 'FIREBIRD_TEST_DB'
+    'firebird_function_docs.test'      = $null
 }
 
 function Invoke-Build([string]$buildDir) {
@@ -104,8 +106,10 @@ function Invoke-Tests([string]$buildDir) {
     try {
         foreach ($t in ($testFixtureVar.Keys | Sort-Object)) {
             $needVar = $testFixtureVar[$t]
-            $dbPath = [Environment]::GetEnvironmentVariable($needVar)
-            if (-not $dbPath -or -not (Test-Path $dbPath)) { $envmiss++; continue }
+            if ($needVar) {
+                $dbPath = [Environment]::GetEnvironmentVariable($needVar)
+                if (-not $dbPath -or -not (Test-Path $dbPath)) { $envmiss++; continue }
+            }
             $out = (& $unittest "test/sql/$t" 2>&1 | Out-String)
             if ($out -match 'All tests passed \((\d+) assertions?') { $pass++; $asserts += [int]$Matches[1] }
             elseif ($out -match 'No tests were run|Skipped') { $envmiss++ }
