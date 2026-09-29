@@ -361,12 +361,14 @@ SELECT * FROM firebird_comments('fb');
 
 ## Level 4 - Diagnostics and observability
 
-### `firebird_profile_table(qualified_name)`
+### `firebird_profile_table(qualified_name [, exact_row_count])`
 
 Returns a single-row factual diagnostic for one Firebird relation reachable
 through an attached Firebird catalog. The argument is a qualified name in
 `catalog.schema.table` form; the schema part is accepted only as `main`
 (the Firebird ATTACH path exposes exactly one schema) and may be omitted.
+The optional named parameter `exact_row_count=true` replaces the cheap row
+estimate with a real server-side `COUNT(*)` (see "Row estimate" below).
 
 ```sql
 ATTACH 'database=C:/data/erp.fdb user=APP_READONLY password=secret'
@@ -393,6 +395,11 @@ Output columns:
 - `recommended_partitions` - advisory `partitions=N` value
 - `warnings` - list of explicit caveats (human-readable strings)
 - `alerts` - structured form of `warnings`: `LIST(STRUCT(code VARCHAR, severity VARCHAR, message VARCHAR))`
+- `estimated_rows` - best available row count: PK-range upper bound by
+  default, exact `COUNT(*)` with `exact_row_count=true`; `NULL` when no
+  numeric-PK range was probed and no exact count ran
+- `row_estimate_method` - `pk_range_upper_bound` or `exact_count`;
+  `NULL` alongside a `NULL` estimate
 
 This is a factual diagnostic, not a cost-based advisor. Heuristics are
 simple and explicit: a watermark candidate is judged by type, not by proven
@@ -400,6 +407,25 @@ monotonicity; `recommended_partitions` is derived from the primary-key
 `MIN`/`MAX` range, not a row count, and is advisory only. The `warnings`
 column carries those caveats inline. Use it to decide whether to scan live,
 filter harder, partition, or materialize through DuckDB/dbt/Parquet.
+
+#### Row estimate — how it is produced
+
+`estimated_rows` never triggers a full scan on its own:
+
+- **`pk_range_upper_bound`** (default, tables with a single-column numeric
+  PK): `MAX(PK) - MIN(PK) + 1` from the same probe that feeds
+  `recommended_partitions`. It is an *upper bound that assumes a dense
+  key* — sequences/identity columns track it closely; sparse keys (gaps,
+  deletes) overcount. It is never presented as a count.
+- **`exact_count`** (only with `exact_row_count=true`): a real
+  `SELECT COUNT(*)` executed server-side on the source table. This reads
+  every row on the server — request it knowingly. When the count cannot
+  run (e.g. privilege), the cheap estimate stays and
+  `row_estimate_method` shows what was actually produced; the
+  `exact_count_executed` alert is emitted only when the count really ran.
+- Tables without a usable single-column numeric PK (composite / non-numeric
+  / no PK) have no cheap estimate: both columns are `NULL` unless
+  `exact_row_count=true` produces one.
 
 ### `recommended_partitions` — how it is computed
 
@@ -495,6 +521,9 @@ Alert code catalog:
 | `non_numeric_pk_serial` | LOW | Single non-numeric PK — serial scan only |
 | `no_indexed_filter_columns` | MEDIUM | No cheap indexed filter columns found |
 | `none_charset_text_columns` | MEDIUM | One or more text columns use CHARACTER SET NONE |
+| `filter_before_scan` | MEDIUM | HIGH-risk base table with filterable columns — the message names them |
+| `materialize_before_scan` | HIGH | HIGH-risk base table with no filter/watermark columns — materialize instead |
+| `exact_count_executed` | LOW | `exact_row_count=true` ran a server-side `COUNT(*)` |
 
 ### `firebird_index_profile(qualified_name)`
 

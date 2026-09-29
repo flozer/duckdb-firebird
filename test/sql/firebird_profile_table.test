@@ -2,7 +2,8 @@
 # description: Phase 4 firebird_profile_table - argument/qualified-name
 #              validation, object type, PK detection, index listing,
 #              watermark / filter heuristics, full-scan risk, partition
-#              recommendation, warnings, no-leak.
+#              recommendation, warnings, no-leak, row estimate +
+#              exact_row_count, structured required-filter alerts.
 # group: [firebird]
 #
 # Requires the EMPLOYEE / FILE_STORAGE / TPK_COMPOSITE / V_ACTIVE_EMP
@@ -377,6 +378,83 @@ SELECT COUNT(*) FROM (
   SELECT UNNEST(alerts) AS a FROM firebird_profile_table('fb.main.EMPLOYEE')
 ) t
 WHERE a.code IN ('no_primary_key', 'view_no_scan_lever');
+----
+0
+
+# ---------------------------------------------------------------------------
+#  Row estimate (F1): EMPLOYEE has a dense INTEGER PK 1..5, so the default
+#  estimate is the PK-range upper bound; exact_row_count=true swaps in a
+#  real COUNT(*) (5 rows) and records that the count ran.
+# ---------------------------------------------------------------------------
+
+query IT
+SELECT estimated_rows, row_estimate_method FROM t_prof_emp;
+----
+5	pk_range_upper_bound
+
+query IT
+SELECT estimated_rows, row_estimate_method
+FROM firebird_profile_table('fb.main.EMPLOYEE', exact_row_count=true);
+----
+5	exact_count
+
+query TT
+SELECT a.code, a.severity FROM (
+  SELECT UNNEST(alerts) AS a
+  FROM firebird_profile_table('fb.main.EMPLOYEE', exact_row_count=true)
+) t
+WHERE a.code = 'exact_count_executed';
+----
+exact_count_executed	LOW
+
+# The default call never runs COUNT(*) (no exact_count_executed alert).
+query I
+SELECT COUNT(*) FROM (
+  SELECT UNNEST(alerts) AS a FROM t_prof_emp
+) t
+WHERE a.code = 'exact_count_executed';
+----
+0
+
+# No numeric-PK lever -> no estimate at all (composite PK case).
+query IT
+SELECT estimated_rows, row_estimate_method FROM t_prof_comp;
+----
+NULL	NULL
+
+# ---------------------------------------------------------------------------
+#  Structured required-filter recommendations (F1): a HIGH-risk base table
+#  gets an actionable alert naming its filterable columns (TPK_COMPOSITE:
+#  indexed PK parts A and B); LOW-risk tables and views do not.
+# ---------------------------------------------------------------------------
+
+query TT
+SELECT a.code, a.severity FROM (
+  SELECT UNNEST(alerts) AS a FROM t_prof_comp
+) t
+WHERE a.code = 'filter_before_scan';
+----
+filter_before_scan	MEDIUM
+
+query T
+SELECT list_aggr(warnings, 'string_agg', '|') LIKE '%[A, B]%'
+FROM t_prof_comp;
+----
+true
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT UNNEST(alerts) AS a FROM t_prof_emp
+) t
+WHERE a.code IN ('filter_before_scan', 'materialize_before_scan');
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT UNNEST(alerts) AS a FROM t_prof_view
+) t
+WHERE a.code IN ('filter_before_scan', 'materialize_before_scan');
 ----
 0
 

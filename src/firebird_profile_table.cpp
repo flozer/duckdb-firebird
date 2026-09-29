@@ -120,6 +120,11 @@ struct TableProfile {
     std::vector<std::string> filter_candidates;
     std::string full_scan_risk = "MEDIUM"; // LOW | MEDIUM | HIGH
     int32_t recommended_partitions = 1;
+    // Row estimate: PK-range upper bound by default, exact COUNT(*) only
+    // when the caller opts in via the exact_row_count named parameter.
+    // estimated_rows < 0 means "no estimate available" (emitted as NULL).
+    int64_t estimated_rows = -1;
+    std::string row_estimate_method; // "" | pk_range_upper_bound | exact_count
     std::vector<Alert> alerts;
 };
 
@@ -153,6 +158,23 @@ static std::string UpperCopy(const std::string &s) {
     for (auto &c : out) {
         c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     }
+    return out;
+}
+
+// Identifier quoting for the probes below (doubles embedded double quotes).
+// The names reaching here come from RDB$ lookups (already upper-cased), so
+// this is correctness, not injection defense.
+static std::string QuoteIdent(const std::string &ident) {
+    std::string out;
+    out.reserve(ident.size() + 2);
+    out.push_back('"');
+    for (char c : ident) {
+        if (c == '"') {
+            out.push_back('"');
+        }
+        out.push_back(c);
+    }
+    out.push_back('"');
     return out;
 }
 
@@ -297,7 +319,8 @@ static bool IsCheapFilterType(const FirebirdColumnDesc &desc,
 
 static TableProfile BuildProfile(FirebirdConnection &conn,
                                  const std::string &table_name,
-                                 NoneEncoding none_encoding) {
+                                 NoneEncoding none_encoding,
+                                 bool exact_row_count) {
     const std::string upper = UpperCopy(table_name);
 
     TableProfile p;
@@ -423,6 +446,11 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
         const idx_t parts = PickPartitionCount(pk->min_value, pk->max_value);
         p.recommended_partitions = static_cast<int32_t>(parts);
         p.full_scan_risk = (parts > 1) ? "MEDIUM" : "LOW";
+        // Cheap row estimate from the already-probed PK range: an upper
+        // bound that assumes a dense key. Sparse keys (gaps, deletes)
+        // overcount; the exact count is opt-in via exact_row_count below.
+        p.estimated_rows = pk->max_value - pk->min_value + 1;
+        p.row_estimate_method = "pk_range_upper_bound";
         if (parts > 1) {
             AddAlert(p, "partition_advisory", "LOW",
                 "Recommended partitions=" + std::to_string(parts) +
@@ -504,6 +532,65 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
         }
     }
 
+    // 6b) Required-filter recommendations, structured (promoted from the
+    //     prose inside other alerts). For a base table whose only read path
+    //     is a full scan, the actionable advice depends on what the table
+    //     offers: filterable columns -> push a selective filter before
+    //     scanning; nothing to filter on -> materialize instead. Views
+    //     already carry their own lever guidance (view_no_scan_lever plus
+    //     the heavy-view codes), so this stays table-only.
+    if (!is_view && p.full_scan_risk == "HIGH") {
+        std::vector<std::string> recs = p.filter_candidates;
+        for (const auto &w : p.watermark_candidates) {
+            if (std::find(recs.begin(), recs.end(), w) == recs.end()) {
+                recs.push_back(w);
+            }
+        }
+        if (!recs.empty()) {
+            std::string joined;
+            for (size_t i = 0; i < recs.size(); ++i) {
+                if (i > 0) {
+                    joined += ", ";
+                }
+                joined += recs[i];
+            }
+            AddAlert(p, "filter_before_scan", "MEDIUM",
+                "Full-scan risk is HIGH and this table has filterable "
+                "columns: push a selective WHERE on one of [" + joined +
+                "] before scanning. A filter reduces rows read even when "
+                "the column carries no index; without one every row "
+                "travels the wire.");
+        } else {
+            AddAlert(p, "materialize_before_scan", "HIGH",
+                "Full-scan risk is HIGH and no cheap filter or watermark "
+                "column exists: every scan reads every row. Repeated "
+                "analytics should materialize this table through DuckDB "
+                "(CREATE TABLE AS / COPY TO PARQUET) instead of scanning "
+                "it live.");
+        }
+    }
+
+    // 6c) Opt-in exact row count. COUNT(*) reads every row server-side, so
+    //     it never runs unless the caller explicitly asks; when it fails
+    //     (e.g. privilege), the cheap estimate above stays and the method
+    //     column shows what was actually produced.
+    if (exact_row_count) {
+        try {
+            auto cur = conn.OpenCursor(
+                "SELECT COUNT(*) FROM " + QuoteIdent(upper));
+            if (cur->Fetch() && !cur->IsNull(0)) {
+                p.estimated_rows = cur->GetInt64(0);
+                p.row_estimate_method = "exact_count";
+                AddAlert(p, "exact_count_executed", "LOW",
+                    "Exact row count executed: COUNT(*) ran server-side on "
+                    "the source table because exact_row_count=true. This "
+                    "reads every row on the server; request it knowingly.");
+            }
+        } catch (...) {
+            // Keep the cheap estimate; row_estimate_method reflects it.
+        }
+    }
+
     // 7) Generic caveats.
     if (!p.has_primary_key && !is_view) {
         // Already warned above for the no-PK case; nothing extra.
@@ -537,6 +624,7 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
 struct ProfileTableBindData : public TableFunctionData {
     std::string catalog_name;
     std::string table_name;
+    bool exact_row_count = false;
 };
 
 struct ProfileTableGlobalState : public GlobalTableFunctionState {
@@ -558,6 +646,11 @@ ProfileTableBind(ClientContext &context, TableFunctionBindInput &input,
     auto bind = make_uniq<ProfileTableBindData>();
     bind->catalog_name = qn.catalog;
     bind->table_name = qn.table;
+    for (auto &kv : input.named_parameters) {
+        if (kv.first == "exact_row_count") {
+            bind->exact_row_count = kv.second.GetValue<bool>();
+        }
+    }
 
     // Resolve the alias eagerly so a bad catalog fails at bind time, not
     // mid-scan. Reuses the dbt-sources validator (same "is this a Firebird
@@ -576,6 +669,8 @@ ProfileTableBind(ClientContext &context, TableFunctionBindInput &input,
         "recommended_partitions",
         "warnings",
         "alerts",
+        "estimated_rows",
+        "row_estimate_method",
     };
     return_types = {
         LogicalType::VARCHAR,
@@ -592,6 +687,8 @@ ProfileTableBind(ClientContext &context, TableFunctionBindInput &input,
             {"code", LogicalType::VARCHAR},
             {"severity", LogicalType::VARCHAR},
             {"message", LogicalType::VARCHAR}})),
+        LogicalType::BIGINT,
+        LogicalType::VARCHAR,
     };
     return std::move(bind);
 }
@@ -650,8 +747,8 @@ static void ProfileTableFunction(ClientContext &context,
     // The lease releases the connection on scope exit, even if BuildProfile
     // throws mid-probe (e.g. relation not found).
     auto lease = AcquireFirebirdCatalogLease(context, bind.catalog_name);
-    TableProfile p =
-        BuildProfile(*lease.conn, bind.table_name, lease.none_encoding);
+    TableProfile p = BuildProfile(*lease.conn, bind.table_name,
+                                  lease.none_encoding, bind.exact_row_count);
 
     output.SetCardinality(1);
     output.data[0].SetValue(0, Value(p.table_name));
@@ -665,6 +762,12 @@ static void ProfileTableFunction(ClientContext &context,
     output.data[8].SetValue(0, Value::INTEGER(p.recommended_partitions));
     output.data[9].SetValue(0, WarningsFromAlerts(p.alerts));
     output.data[10].SetValue(0, AlertStructList(p.alerts));
+    output.data[11].SetValue(
+        0, p.estimated_rows < 0 ? Value(LogicalType::BIGINT)
+                                : Value::BIGINT(p.estimated_rows));
+    output.data[12].SetValue(0, p.row_estimate_method.empty()
+                                    ? Value(LogicalType::VARCHAR)
+                                    : Value(p.row_estimate_method));
     g.emitted = true;
 }
 
@@ -674,6 +777,7 @@ TableFunction GetFirebirdProfileTableFunction() {
                      ProfileTableFunction,
                      ProfileTableBind,
                      ProfileTableInitGlobal);
+    fn.named_parameters["exact_row_count"] = LogicalType::BOOLEAN;
     return fn;
 }
 

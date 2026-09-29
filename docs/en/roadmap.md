@@ -686,10 +686,12 @@ The analyzer returns (delivered in the first version unless noted):
 - Existing indexes. (delivered)
 - Candidate watermark columns. (delivered, by type)
 - Good filter columns. (delivered, indexed + cheap-type)
-- Row estimate, when cheap and safe. (deferred)
+- Row estimate. (delivered: PK-range upper bound by default; opt-in exact
+  `COUNT(*)` via `exact_row_count=true`)
 - Full-scan risk. (delivered)
 - Recommended `partitions=N`. (delivered, advisory, from PK range)
-- Required-filter recommendations. (deferred; surfaced as warnings)
+- Required-filter recommendations. (delivered as structured alerts
+  `filter_before_scan` / `materialize_before_scan`)
 
 Acceptance is diagnostic quality, not query execution speed. The
 function should help users decide whether to scan live, filter harder,
@@ -889,7 +891,7 @@ explicitly opens a new milestone:
 Known non-blocking technical debt stays recorded instead of delaying v0.6:
 
 - row estimates and structured required-filter recommendations in
-  `firebird_profile_table()`;
+  `firebird_profile_table()`; (delivered post-v1.0.2)
 - active/in-use count and `last_error` in `firebird_pool_stats()`;
 - promoting the DECFLOAT fixture into the main CI fixture;
 - exercising `recommended_partitions > 1` in CI;

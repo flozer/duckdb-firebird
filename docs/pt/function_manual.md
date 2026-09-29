@@ -766,7 +766,7 @@ SELECT * FROM firebird_comments('fb');
 
 ## Nivel 4 - Diagnostico e observabilidade
 
-### `firebird_profile_table(qualified_name)`
+### `firebird_profile_table(qualified_name [, exact_row_count])`
 
 #### O que faz e como funciona
 
@@ -774,7 +774,9 @@ Retorna uma unica linha com diagnostico factual de uma relacao Firebird
 acessivel por um catalogo Firebird ja anexado via `ATTACH ... (TYPE
 firebird)`. O argumento e um nome qualificado no formato
 `catalog.schema.table`; a parte de schema so e aceita como `main` (o
-caminho ATTACH expoe exatamente um schema) e pode ser omitida.
+caminho ATTACH expoe exatamente um schema) e pode ser omitida. O parametro
+nomeado opcional `exact_row_count=true` troca a estimativa barata de linhas
+por um `COUNT(*)` real no servidor (veja "Estimativa de linhas" abaixo).
 
 ```sql
 ATTACH 'C:/dados/empresa.fdb' AS fb
@@ -801,6 +803,11 @@ Colunas de saida:
 - `recommended_partitions`: valor `partitions=N` apenas como recomendacao.
 - `warnings`: lista de ressalvas explicitas (strings legíveis por humanos).
 - `alerts`: forma estruturada de `warnings`: `LIST(STRUCT(code VARCHAR, severity VARCHAR, message VARCHAR))`.
+- `estimated_rows`: melhor contagem disponivel: limite superior pela faixa
+  da PK por padrao, `COUNT(*)` exato com `exact_row_count=true`; `NULL`
+  quando nao ha faixa de PK numerica e nenhuma contagem exata rodou.
+- `row_estimate_method`: `pk_range_upper_bound` ou `exact_count`; `NULL`
+  junto com uma estimativa `NULL`.
 
 Como funciona internamente:
 
@@ -819,6 +826,25 @@ sao simples e explicitas: candidato a watermark e julgado pelo tipo, nao
 por monotonicidade comprovada; `recommended_partitions` deriva da faixa
 `MIN`/`MAX` da PK, nao de contagem de linhas, e e apenas recomendacao. A
 coluna `warnings` carrega essas ressalvas inline.
+
+#### Estimativa de linhas - como e produzida
+
+`estimated_rows` nunca dispara um full scan por conta propria:
+
+- **`pk_range_upper_bound`** (padrao, tabelas com PK numerica de coluna
+  unica): `MAX(PK) - MIN(PK) + 1`, do mesmo probe que alimenta
+  `recommended_partitions`. E um *limite superior que assume chave
+  densa* — colunas identity/sequence acompanham bem; chaves esparsas
+  (lacunas, deletes) superestimam. Nunca e apresentado como contagem.
+- **`exact_count`** (somente com `exact_row_count=true`): um
+  `SELECT COUNT(*)` real executado no servidor sobre a tabela de origem.
+  Isto le todas as linhas do servidor — peca conscientemente. Quando a
+  contagem nao pode rodar (ex.: privilegio), a estimativa barata
+  permanece e `row_estimate_method` mostra o que foi de fato produzido; o
+  alerta `exact_count_executed` so e emitido quando a contagem rodou.
+- Tabelas sem PK numerica de coluna unica utilizavel (composta /
+  nao-numerica / sem PK) nao tem estimativa barata: ambas as colunas ficam
+  `NULL` a menos que `exact_row_count=true` produza uma.
 
 #### `recommended_partitions` - como e calculado
 
@@ -950,6 +976,9 @@ Catalogo de codigos de alerta:
 | `non_numeric_pk_serial` | LOW | PK nao-numerica de coluna unica — apenas scan serial |
 | `no_indexed_filter_columns` | MEDIUM | Nenhuma coluna de filtro indexada barata encontrada |
 | `none_charset_text_columns` | MEDIUM | Uma ou mais colunas texto usam CHARACTER SET NONE |
+| `filter_before_scan` | MEDIUM | Tabela base de risco HIGH com colunas filtraveis — a mensagem as nomeia |
+| `materialize_before_scan` | HIGH | Tabela base de risco HIGH sem colunas de filtro/watermark — materialize |
+| `exact_count_executed` | LOW | `exact_row_count=true` executou um `COUNT(*)` no servidor |
 
 ### `firebird_index_profile(qualified_name)`
 
