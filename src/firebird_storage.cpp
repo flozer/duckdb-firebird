@@ -882,6 +882,8 @@ struct FirebirdPoolStatsRow {
     int64_t     total_created = 0;
     int64_t     total_reused = 0;
     int64_t     total_discarded = 0;
+    int64_t     active_connections = 0;
+    std::string last_error; // "" -> NULL (no failure recorded)
 };
 
 FirebirdPoolStatsRow ReadFirebirdPoolStats(ClientContext &context,
@@ -894,14 +896,16 @@ FirebirdPoolStatsRow ReadFirebirdPoolStats(ClientContext &context,
     const auto &cfg = pool.Config();
 
     FirebirdPoolStatsRow row;
-    row.catalog_name     = catalog_name;
-    row.pool_enabled     = cfg.enabled;
-    row.max_idle_size    = cfg.max_size;
-    row.idle_timeout_ms  = cfg.idle_timeout_ms;
-    row.idle_connections = static_cast<int64_t>(pool.IdleCount());
-    row.total_created    = pool.TotalCreated();
-    row.total_reused     = pool.TotalReused();
-    row.total_discarded  = pool.TotalDiscarded();
+    row.catalog_name       = catalog_name;
+    row.pool_enabled       = cfg.enabled;
+    row.max_idle_size      = cfg.max_size;
+    row.idle_timeout_ms    = cfg.idle_timeout_ms;
+    row.idle_connections   = static_cast<int64_t>(pool.IdleCount());
+    row.total_created      = pool.TotalCreated();
+    row.total_reused       = pool.TotalReused();
+    row.total_discarded    = pool.TotalDiscarded();
+    row.active_connections = pool.ActiveCount();
+    row.last_error         = pool.LastError();
     return row;
 }
 
@@ -940,6 +944,8 @@ unique_ptr<FunctionData> PoolStatsBind(ClientContext &context,
         "total_created",
         "total_reused",
         "total_discarded",
+        "active_connections",
+        "last_error",
     };
     return_types = {
         LogicalType::VARCHAR,
@@ -950,6 +956,8 @@ unique_ptr<FunctionData> PoolStatsBind(ClientContext &context,
         LogicalType::BIGINT,
         LogicalType::BIGINT,
         LogicalType::BIGINT,
+        LogicalType::BIGINT,
+        LogicalType::VARCHAR,
     };
     return std::move(bind);
 }
@@ -978,6 +986,10 @@ void PoolStatsFunction(ClientContext &context, TableFunctionInput &input,
     output.data[5].SetValue(0, Value::BIGINT(r.total_created));
     output.data[6].SetValue(0, Value::BIGINT(r.total_reused));
     output.data[7].SetValue(0, Value::BIGINT(r.total_discarded));
+    output.data[8].SetValue(0, Value::BIGINT(r.active_connections));
+    output.data[9].SetValue(0, r.last_error.empty()
+                                  ? Value(LogicalType::VARCHAR)
+                                  : Value(r.last_error));
     g.emitted = true;
 }
 

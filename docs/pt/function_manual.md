@@ -1379,7 +1379,7 @@ SELECT IDCLIENTE FROM fb.main.CLIENTES WHERE IDCLIENTE = 1;
 SELECT * FROM firebird_pool_stats('fb');
 ```
 
-Colunas de saida (8):
+Colunas de saida (10):
 
 - `catalog_name`: o alias passado.
 - `pool_enabled`: se o pool do ATTACH esta habilitado.
@@ -1392,11 +1392,23 @@ Colunas de saida (8):
 - `total_reused`: conexoes servidas da fila idle ao longo da vida.
 - `total_discarded`: conexoes destruidas (pool desligado, ou limite/expiracao
   da fila idle atingidos).
+- `active_connections`: conexoes emprestadas agora e ainda nao devolvidas
+  via Release.
+- `last_error`: mensagem sanitizada da criacao de conexao com falha mais
+  recente (`NULL` quando nenhuma); a senha e redigida antes de armazenar.
 
 Le apenas contadores e config que o pool ja rastreia, e **nao** faz lease de
 conexao - chamar nunca perturba o pool que reporta. Os valores configurados
 refletem as settings lidas no momento do `ATTACH`; um `SET` posterior nao
 reconfigura um pool existente (refaca o `ATTACH` para aplicar).
+
+`last_error` so e populada por falhas de criacao de conexao **posteriores**
+ao `ATTACH` (uma falha durante o proprio `ATTACH` nunca registra um
+catalogo) — por exemplo, o servidor Firebird sumiu entre consultas. A
+mensagem armazenada e o texto da excecao com toda ocorrencia da senha da
+conexao substituida por `****` e o comprimento limitado a 500 caracteres.
+`active_connections` conta leases entregues menos devolvidos; uma consulta
+em voo em outra conexao mantem o valor acima de 0.
 
 #### Para que serve
 
@@ -1416,11 +1428,8 @@ FROM firebird_pool_stats('fb');
 
 - **Por catalogo, so alias**: passa-se um alias do ATTACH; nao ha forma sem
   argumento que liste todos os catalogos anexados.
-- **Sem contagem de ativas/in-use**: o pool rastreia a fila idle e
-  contadores de vida, nao quantas conexoes estao emprestadas no momento.
-  Contagem de conexoes ativas e trabalho futuro possivel.
-- **Sem campo de ultimo erro**: historico de erro de pool nao e exposto
-  nesta versao.
+- **Sem historico de erros**: apenas o erro de conexao *mais recente* e
+  mantido (sem lista com data/hora de falhas passadas).
 
 ### `firebird_type_audit(catalog_name)`
 

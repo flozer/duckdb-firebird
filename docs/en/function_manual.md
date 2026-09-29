@@ -744,7 +744,7 @@ SELECT EMP_ID FROM fb.main.EMPLOYEE WHERE EMP_ID = 1;
 SELECT * FROM firebird_pool_stats('fb');
 ```
 
-Output columns (8):
+Output columns (10):
 
 | Column | Type | Notes |
 |---|---|---|
@@ -756,6 +756,8 @@ Output columns (8):
 | `total_created` | BIGINT | Lifetime physical connections created |
 | `total_reused` | BIGINT | Lifetime connections served from the idle queue |
 | `total_discarded` | BIGINT | Lifetime connections destroyed (pool disabled, or idle cap/expiry hit) |
+| `active_connections` | BIGINT | Connections currently leased out and not yet returned via Release |
+| `last_error` | VARCHAR | Sanitized message of the most recent failed connection creation (`NULL` when none); the password is redacted before storage |
 
 It reads only counters and config the pool already tracks, and it does
 **not** lease a connection — calling it never perturbs the pool it reports
@@ -766,15 +768,20 @@ Use it to confirm pooling is actually reusing connections, to size
 `firebird_pool_max_size`, or to verify a `firebird_pool_enabled = false`
 catalog never parks idle connections.
 
+`last_error` is populated only for post-`ATTACH` connection-creation
+failures (a failure during `ATTACH` itself never registers a catalog) —
+for example the Firebird server went away between queries. The stored
+message is the exception text with every occurrence of the connection
+password replaced by `****` and the length capped at 500 characters.
+`active_connections` counts leases handed out minus returns; a query in
+flight on another connection holds it above 0.
+
 Current limitations:
 
 - **Per-catalog, alias-only**: you pass one ATTACH alias; there is no
   no-argument form that lists every attached catalog.
-- **No active/in-use count**: the pool tracks the idle queue and lifetime
-  counters, not how many connections are currently leased out. An
-  active-connection count is possible future work.
-- **No last-error field**: pool-level error history is not surfaced in this
-  version.
+- **No error history**: only the *most recent* connection error is kept
+  (no timestamped list of past failures).
 
 ### `firebird_type_audit(catalog_name)`
 

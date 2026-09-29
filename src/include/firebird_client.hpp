@@ -241,6 +241,18 @@ public:
     int64_t TotalReused()    const { return total_reused_.load(std::memory_order_relaxed); }
     int64_t TotalDiscarded() const { return total_discarded_.load(std::memory_order_relaxed); }
 
+    // Connections handed out by Acquire/AcquireWithInfo and not yet
+    // returned via Release(). Process-relative; a caller that destroyed a
+    // connection without Release() would inflate it (all extension paths
+    // release through the pool).
+    int64_t ActiveCount() const { return active_.load(std::memory_order_relaxed); }
+
+    // Sanitized message of the most recent failed connection creation,
+    // empty when none has failed. Credentials are redacted before the
+    // message is stored. Populated only for post-ATTACH failures (a
+    // failure during ATTACH itself never registers a catalog).
+    std::string LastError();
+
     // Current config snapshot (immutable after construction in Chunk A;
     // settings-driven mutation lands in Chunk B).
     const FirebirdConnectionPoolConfig &Config() const { return config_; }
@@ -251,6 +263,8 @@ private:
         std::chrono::steady_clock::time_point released_at;
     };
 
+    void RecordConnectionError(const std::string &message);
+
     FirebirdConnectionInfo       info_;
     FirebirdConnectionPoolConfig config_;
     std::mutex                   lock_;
@@ -258,6 +272,8 @@ private:
     std::atomic<int64_t>         total_created_{0};
     std::atomic<int64_t>         total_reused_{0};
     std::atomic<int64_t>         total_discarded_{0};
+    std::atomic<int64_t>         active_{0};
+    std::string                  last_error_; // guarded by lock_
 };
 
 // Owns one isc_db_handle + a long-running read-only transaction.
