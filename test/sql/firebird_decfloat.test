@@ -6,11 +6,16 @@
 #              NaN, +/-Infinity, and a real NULL.
 # group: [firebird]
 #
-# Requires the DECVALS fixture from scripts/fixture_decfloat.sql loaded into
-# a Firebird 4/5 database referenced by FIREBIRD_DECFLOAT_DB. The test skips
-# when that env var is unset. The main CI fixture does not yet carry
-# DECFLOAT (debt: promote DECVALS into setup_test_firebird.sh with a
-# coordinated metadata/dbt test update in a future step).
+# Requires the DECVALS fixture from scripts/fixture_decfloat.sql in a
+# Firebird 4/5 database referenced by FIREBIRD_DECFLOAT_DB; the test skips
+# wherever that env var is unset (FB3 legs -- the explicit skip). The test
+# runs in the MAIN suite step (roadmap F3): CI exports the env for the
+# FB4/FB5 legs at fixture provisioning (DECVALS loads into biz4.fdb), and
+# scripts/setup_test_firebird.sh provisions a dedicated decfloat.fdb and
+# exports the env automatically when the local server is Firebird 4+.
+# DECVALS deliberately stays in its own database: the main test.fdb
+# relation lists are pinned by static, cross-version expectations
+# (firebird_metadata.test SHOW TABLES, dbt-sources YAML).
 
 require firebird
 

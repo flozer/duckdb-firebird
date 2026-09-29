@@ -70,6 +70,34 @@ else
 fi
 "$MKBLOB_BIN" "$FIREBIRD_TEST_DB" "$ISC_USER" "$ISC_PASSWORD" 1
 
+# Partitions fixture (roadmap F4) -- version-neutral, own database so the
+# pinned relation lists of the main fixture stay stable.
+PARTITIONS_DB="$(dirname "$FIREBIRD_TEST_DB")/partitions.fdb"
+rm -f "$PARTITIONS_DB"
+"$ISQL" -u "$ISC_USER" -p "$ISC_PASSWORD" <<EOF
+CREATE DATABASE '$PARTITIONS_DB' DEFAULT CHARACTER SET UTF8;
+EOF
+"$ISQL" -u "$ISC_USER" -p "$ISC_PASSWORD" "$PARTITIONS_DB" -i scripts/fixture_partitions.sql
+
+# DECFLOAT fixture on Firebird 4+ (roadmap F3): detect the engine version
+# of the database we just created and, when >= 4, provision DECVALS in its
+# own database. On Firebird 3 nothing is exported, and
+# firebird_decfloat.test self-skips via its require-env gate.
+FB_ENGINE_VERSION="$(printf "SELECT RDB\$GET_CONTEXT('SYSTEM','ENGINE_VERSION') FROM RDB\$DATABASE;\n" \
+    | "$ISQL" -u "$ISC_USER" -p "$ISC_PASSWORD" "$FIREBIRD_TEST_DB" 2>/dev/null \
+    | grep -oE '[0-9]+(\.[0-9]+)+' | head -1)"
+FB_MAJOR="${FB_ENGINE_VERSION%%.*}"
+DECFLOAT_EXPORT=""
+if [[ "$FB_MAJOR" =~ ^[0-9]+$ ]] && [ "$FB_MAJOR" -ge 4 ]; then
+    DECFLOAT_DB="$(dirname "$FIREBIRD_TEST_DB")/decfloat.fdb"
+    rm -f "$DECFLOAT_DB"
+    "$ISQL" -u "$ISC_USER" -p "$ISC_PASSWORD" <<EOF
+CREATE DATABASE '$DECFLOAT_DB' DEFAULT CHARACTER SET UTF8;
+EOF
+    "$ISQL" -u "$ISC_USER" -p "$ISC_PASSWORD" "$DECFLOAT_DB" -i scripts/fixture_decfloat.sql
+    DECFLOAT_EXPORT="FIREBIRD_DECFLOAT_DB=$DECFLOAT_DB"
+fi
+
 # Make the file world-readable so the test harness (running as a different
 # user than the firebird daemon) can open it via the embedded engine.
 chmod 0666 "$FIREBIRD_TEST_DB"
@@ -77,6 +105,8 @@ chmod 0666 "$FIREBIRD_TEST_DB"
 # Emit the env block GitHub Actions can source via $GITHUB_ENV.
 cat <<EOF
 FIREBIRD_TEST_DB=$FIREBIRD_TEST_DB
+FIREBIRD_PARTITIONS_DB=$PARTITIONS_DB
+$DECFLOAT_EXPORT
 ISC_USER=$ISC_USER
 ISC_PASSWORD=$ISC_PASSWORD
 EOF
