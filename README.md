@@ -229,13 +229,20 @@ DuckDB behavior.
 
 ## Current Status
 
-Published community release: **v0.6.1**. The DuckDB Community catalog still
-installs the version pinned by `community-extensions/description.yml`; that
-submission has not been touched by this repository's own v1.0.x releases.
+Published community release: **v1.0.1** (`INSTALL firebird FROM community`);
+the v1.0.2 descriptor update is submitted as
+[duckdb/community-extensions#2849](https://github.com/duckdb/community-extensions/pull/2849).
+The copy in [`community-extensions/description.yml`](community-extensions/description.yml)
+mirrors the submitted descriptor.
 
-`main` is at **v1.0.1** (patch release, see
-[docs/en/release_notes_v1.0.1.md](docs/en/release_notes_v1.0.1.md)):
-Metadata Bridge 2.0, pushdown explain planning, type audit, database/
+`main` is at **v1.0.2**: v1.0.1 plus in-band function documentation —
+all 19 `firebird_*` table functions are discoverable via
+`duckdb_functions()` with real parameter names, a description, an example,
+and categories (issue #63), locked in by a serverless regression test.
+
+v1.0.1 (see
+[docs/en/release_notes_v1.0.1.md](docs/en/release_notes_v1.0.1.md))
+delivered Metadata Bridge 2.0, pushdown explain planning, type audit, database/
 table/index diagnostics, the Smart Scan Planning report, deterministic
 paging safeguards, lossless type/BLOB hardening, and a closed Production
 Stability + Runtime/ABI Compatibility gate (fresh DuckDB
