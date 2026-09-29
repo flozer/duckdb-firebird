@@ -893,8 +893,16 @@ Known non-blocking technical debt stays recorded instead of delaying v0.6:
 - row estimates and structured required-filter recommendations in
   `firebird_profile_table()`; (delivered post-v1.0.2)
 - active/in-use count and `last_error` in `firebird_pool_stats()`;
-- promoting the DECFLOAT fixture into the main CI fixture;
-- exercising `recommended_partitions > 1` in CI;
+  (delivered post-v1.0.2)
+- promoting the DECFLOAT fixture into the main CI fixture; (delivered
+  post-v1.0.2 as main-suite execution: `firebird_decfloat.test` runs in
+  the canonical suite step on every FB4/FB5 leg and in local bootstraps
+  on Firebird 4+; DECVALS deliberately keeps its own database because the
+  main fixture's relation lists are pinned by static cross-version
+  expectations)
+- exercising `recommended_partitions > 1` in CI; (delivered post-v1.0.2:
+  `firebird_partitions_scan.test`, dedicated sparse-wide-PK fixture,
+  all three Firebird legs)
 - aggregate pushdown, blocked by DuckDB v1.5.3 API limitations.
 
 ## Release-testing checklist (run before every push/tag/release)

@@ -119,6 +119,14 @@ jobs:
             | docker exec -i fb bash -c "isql -u SYSDBA -p masterkey"
           docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_none_charset.sql /var/lib/firebird/data/none.fdb
 
+          # Partitions fixture (roadmap F4) -- version-neutral (plain
+          # INTEGER PK with a sparse, wide range) in its own database, so
+          # the pinned relation lists of the main fixture stay stable.
+          docker cp scripts/fixture_partitions.sql fb:/tmp/fixture_partitions.sql
+          printf "%s\n" "CREATE DATABASE '/var/lib/firebird/data/partitions.fdb' DEFAULT CHARACTER SET UTF8;" \
+            | docker exec -i fb bash -c "isql -u SYSDBA -p masterkey"
+          docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_partitions.sql /var/lib/firebird/data/partitions.fdb
+
           # Suite tests connect over TCP — expose the URL form.
           echo "FIREBIRD_TEST_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/test.fdb?charset=UTF8" >> $GITHUB_ENV
           # charset=NONE (not UTF8/WIN1252/etc) -- ValidateClientCharset
@@ -131,6 +139,15 @@ jobs:
           # the connection to NONE. ?charset=NONE here makes that same
           # behavior explicit.
           echo "FIREBIRD_NONE_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/none.fdb?charset=NONE" >> $GITHUB_ENV
+          echo "FIREBIRD_PARTITIONS_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/partitions.fdb?charset=UTF8" >> $GITHUB_ENV
+          # DECVALS still loads into biz4.fdb above (issue #48). Exporting
+          # the env HERE (instead of only in the FB4+ smoke step) lets the
+          # main suite step run firebird_decfloat.test on FB4/FB5 legs;
+          # on FB3 the var stays unset and the test self-skips via its
+          # require-env gate.
+          if [ "${{ matrix.fb_major }}" != "3" ]; then
+            echo "FIREBIRD_DECFLOAT_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/biz4.fdb?charset=UTF8" >> $GITHUB_ENV
+          fi
 
       - name: Extract matching libfbclient from the fb${{ matrix.fb_major }} container
         run: |
@@ -251,6 +268,13 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_type_audit.test
           # Catalog-metadata-only test (issue #63); needs no fixture
           ./build/release/test/unittest test/sql/firebird_function_docs.test
+          # F4: real recommended_partitions > 1 coverage on a dedicated
+          # sparse-wide-PK fixture (all FB versions).
+          ./build/release/test/unittest test/sql/firebird_partitions_scan.test
+          # DECFLOAT promoted into the main suite (roadmap F3): runs
+          # wherever FIREBIRD_DECFLOAT_DB is exported (FB4/FB5 legs);
+          # self-skips on FB3 via its require-env gate.
+          ./build/release/test/unittest test/sql/firebird_decfloat.test
 
       - name: FB4+ live type smoke (INT128 / DECIMAL(38) / TIMESTAMP_TZ)
         if: matrix.fb_major != '3'
@@ -258,9 +282,9 @@ jobs:
           ISC_USER: SYSDBA
           ISC_PASSWORD: masterkey
           FIREBIRD_BIZ4_DB: firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/biz4.fdb?charset=UTF8
-          # Same database as FIREBIRD_BIZ4_DB (issue #48) -- DECVALS was
-          # loaded into biz4.fdb above, not a separate database.
-          FIREBIRD_DECFLOAT_DB: firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/biz4.fdb?charset=UTF8
+          # FIREBIRD_DECFLOAT_DB is exported at fixture provisioning
+          # (FB4/FB5 legs); firebird_decfloat.test now runs in the main
+          # suite step, no longer here.
         run: |
           ./build/release/duckdb -unsigned <<'EOF'
           SELECT
@@ -275,7 +299,6 @@ jobs:
            LIMIT 1;
           EOF
           ./build/release/test/unittest test/sql/firebird_type_audit_fb4.test
-          ./build/release/test/unittest test/sql/firebird_decfloat.test
 
       - name: Stop Firebird container
         if: always()

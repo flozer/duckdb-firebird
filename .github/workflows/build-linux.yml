@@ -84,6 +84,7 @@ jobs:
           fi
           # Export for subsequent steps.
           echo "FIREBIRD_TEST_DB=/tmp/fbdata/test.fdb" >> $GITHUB_ENV
+          echo "FIREBIRD_PARTITIONS_DB=/tmp/fbdata/partitions.fdb" >> $GITHUB_ENV
           echo "ISC_USER=$ISC_USER"                    >> $GITHUB_ENV
           echo "ISC_PASSWORD=$ISC_PASSWORD"            >> $GITHUB_ENV
 
@@ -112,6 +113,7 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_scan.test
           ./build/release/test/unittest test/sql/firebird_attach.test
           ./build/release/test/unittest test/sql/firebird_function_docs.test
+          ./build/release/test/unittest test/sql/firebird_partitions_scan.test
 
       - name: Upload extension artifact (linux_amd64)
         uses: actions/upload-artifact@v7

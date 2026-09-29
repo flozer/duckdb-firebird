@@ -1,0 +1,115 @@
+# name: test/sql/firebird_partitions_scan.test
+# description: Roadmap F4 - exercises recommended_partitions > 1 end to end
+#              on a dedicated fixture: a sparse wide-range INTEGER PK makes
+#              firebird_profile_table recommend real parallelism (with the
+#              advisory + server-parallelism caveats), and a real
+#              partitions=4 scan returns every row exactly once. Also covers
+#              the materialize_before_scan profile case (PART_NO_LEVER: no
+#              PK, no index, no filter/watermark candidate).
+# group: [firebird]
+#
+# Requires the PART_RANGE / PART_NO_LEVER fixture from
+# scripts/fixture_partitions.sql, provisioned into its own database by
+# scripts/setup_test_firebird.sh (FIREBIRD_PARTITIONS_DB). Version-neutral:
+# runs on all Firebird 3/4/5 matrix legs.
+
+require firebird
+
+require-env FIREBIRD_PARTITIONS_DB
+
+require-env ISC_PASSWORD
+
+# ---------------------------------------------------------------------------
+#  Profile: the sparse 0..11,960,000 PK span crosses PickPartitionCount's
+#  4M threshold, so recommended_partitions lands in 2..8 (bounded by
+#  hardware concurrency; never asserted as an exact value), risk drops to
+#  MEDIUM, and the estimate is the deterministic PK-range upper bound.
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH '${FIREBIRD_PARTITIONS_DB}' AS fbp (TYPE firebird);
+
+statement ok
+CREATE OR REPLACE TABLE t_prof_part AS
+SELECT * FROM firebird_profile_table('fbp.main.PART_RANGE');
+
+query T
+SELECT recommended_partitions BETWEEN 2 AND 8
+   AND full_scan_risk = 'MEDIUM'
+FROM t_prof_part;
+----
+true
+
+query IT
+SELECT estimated_rows, row_estimate_method FROM t_prof_part;
+----
+11960001	pk_range_upper_bound
+
+query TT
+SELECT a.code, a.severity FROM (
+  SELECT UNNEST(alerts) AS a FROM t_prof_part
+) t
+WHERE a.code IN ('partition_advisory', 'server_parallelism_caveat');
+----
+partition_advisory	LOW
+server_parallelism_caveat	LOW
+
+# The parallel lever codes that must NOT fire for a numeric-PK table.
+query I
+SELECT COUNT(*) FROM (
+  SELECT UNNEST(alerts) AS a FROM t_prof_part
+) t
+WHERE a.code IN ('no_primary_key', 'composite_pk_serial', 'non_numeric_pk_serial',
+                 'numeric_pk_no_range_serial', 'filter_before_scan',
+                 'materialize_before_scan');
+----
+0
+
+# ---------------------------------------------------------------------------
+#  Real parallel scan: every row exactly once (COUNT and SUM are exact
+#  invariants of the fixture: 300 rows, SUM(ID) = 40000 * 299 * 300 / 2).
+# ---------------------------------------------------------------------------
+
+query II
+SELECT COUNT(*), SUM(ID)
+FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_RANGE', partitions=4);
+----
+300	1794000000
+
+query II
+SELECT COUNT(*), SUM(ID)
+FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_RANGE', partitions=1);
+----
+300	1794000000
+
+# ---------------------------------------------------------------------------
+#  No-lever table (F1's materialize case): no PK, no index, and no
+#  numeric/date column at all -> HIGH risk, no estimate, and the
+#  materialize recommendation instead of a filter recommendation.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE OR REPLACE TABLE t_prof_nolever AS
+SELECT * FROM firebird_profile_table('fbp.main.PART_NO_LEVER');
+
+query TT
+SELECT full_scan_risk, recommended_partitions FROM t_prof_nolever;
+----
+HIGH	1
+
+query IT
+SELECT estimated_rows, row_estimate_method FROM t_prof_nolever;
+----
+NULL	NULL
+
+query TT
+SELECT a.code, a.severity FROM (
+  SELECT UNNEST(alerts) AS a FROM t_prof_nolever
+) t
+WHERE a.code IN ('no_primary_key', 'materialize_before_scan', 'filter_before_scan');
+----
+no_primary_key	HIGH
+materialize_before_scan	HIGH
+
+statement ok
+DETACH fbp;
