@@ -5,13 +5,22 @@ out so each item can be closed independently.
 
 ## Compatibility matrix
 
-| Component | Today (v0.6.0) | Target (v1.0) |
+| Component | Today (v1.0.x) | Target |
 |---|---|---|
-| [DuckDB](https://github.com/duckdb/duckdb) | v1.5.3 (pinned in CI and build scripts) | v1.5.x + Stable C ABI when `StorageExtension` lands in it |
+| [DuckDB](https://github.com/duckdb/duckdb) | v1.5.3 (pinned in CI and build scripts); v1.5.2–v1.5.6 all validated (v1.5.6 on 2026-09-29, full suite 21/21 test files, local matrix `scripts/build_matrix.ps1`) | v1.5.x + Stable C ABI when `StorageExtension` lands in it |
 | Firebird server | 3.0, **4.0**, **5.0** all tested live (CI matrix) | same |
 | Firebird client (`libfbclient`) | 4.0+ recommended (INT128 / TZ / DECFLOAT) | 4.0+ |
 | GizmoSQL | works against the local build; air-gapped recipe documented | bundled docker image |
 | Platforms | Linux x64, Windows x64 | + macOS arm64, + Linux arm64 |
+
+v1.5.6 (released 2026-09-28) is a bug-fix line release: no change in the
+extension API surface we use (`extension_loader`, `CreateTableFunctionInfo`,
+`StorageExtension::Register`), and it carries the C-API v1 symbol-versioning
+unification plus additive backports of DuckDB 2.0 API spellings. The build
+pin intentionally stays v1.5.3 until the DuckDB Community Extensions catalog
+moves its own target (currently v1.5.5); see
+[docs/pt/duckdb_1_5_compatibility_plan.md](../pt/duckdb_1_5_compatibility_plan.md)
+for the validation record.
 
 The XSQLDA codes for `SQL_INT128 / SQL_TIMESTAMP_TZ / SQL_TIME_TZ /
 SQL_DEC16 / SQL_DEC34` are wired in `firebird_types.cpp` and verified
