@@ -273,8 +273,12 @@ A companion diagnostic to the query telemetry above. Where
 `firebird_last_query()` / `firebird_query_log()` explain a single scan,
 `firebird_pool_stats('alias')` reports the connection-pool state of one
 attached Firebird catalog: `pool_enabled`, configured `max_idle_size` /
-`idle_timeout_ms`, current `idle_connections`, and lifetime
-`total_created` / `total_reused` / `total_discarded`.
+`idle_timeout_ms`, current `idle_connections`, lifetime
+`total_created` / `total_reused` / `total_discarded`, and — since v1.1.0 —
+`active_connections` (leases handed out and not yet returned) and
+`last_error` (sanitized message of the most recent failed connection
+creation, password redacted, `NULL` when none; only post-`ATTACH`
+failures are recorded).
 
 It takes an explicit ATTACH alias (it does not enumerate catalogs), reads
 only counters the pool already tracks, and does not lease a connection, so

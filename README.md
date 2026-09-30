@@ -11,7 +11,7 @@
   </p>
   <p>
     <a href="LICENSE"><img alt="license MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
-    <a href="https://github.com/flozer/duckdb-firebird/releases/tag/v0.6.1"><img alt="release v0.6.1" src="https://img.shields.io/badge/release-v0.6.1-blue.svg"></a>
+    <a href="https://github.com/flozer/duckdb-firebird/releases/tag/v1.1.0"><img alt="release v1.1.0" src="https://img.shields.io/badge/release-v1.1.0-blue.svg"></a>
     <a href="https://github.com/flozer/duckdb-firebird/actions/workflows/build-linux-fb-matrix.yml"><img alt="linux matrix" src="https://github.com/flozer/duckdb-firebird/actions/workflows/build-linux-fb-matrix.yml/badge.svg"></a>
     <a href="https://github.com/duckdb/community-extensions/pull/1980"><img alt="community extension merged" src="https://img.shields.io/badge/DuckDB%20community-merged-brightgreen.svg"></a>
     <a href="https://duckdb.org/community_extensions/download_metrics"><img alt="total DuckDB Community downloads for firebird" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fflozer%2Fduckdb-firebird%2Fmain%2F.github%2Fbadges%2Fdownloads.json"></a>
@@ -288,19 +288,23 @@ for full detail.
 | `firebird_profile_table('fb.main.T')` factual table/view diagnostics | Done |
 | Structured profile alerts (`alerts LIST(STRUCT(code,severity,message))`) | Done |
 | Heavy-view shape detection (JOIN / aggregation / no-filter warnings) | Done |
+| Row estimate (`estimated_rows` / `row_estimate_method`, opt-in exact `COUNT(*)` via `exact_row_count=true`) | Done (v1.1.0) |
+| Structured required-filter alerts (`filter_before_scan`, `materialize_before_scan`) | Done (v1.1.0) |
 | `firebird_explain_pushdown(sql)` planning report | Done |
 | Pushdown explainability in `firebird_last_query` / `firebird_query_log` (`limit_pushed`, `offset_pushed`, `not_pushed_reasons`) | Done |
 | `firebird_pool_stats('fb')` connection-pool introspection | Done |
+| Pool active-lease count + sanitized `last_error` (`active_connections`, `last_error`) | Done (v1.1.0) |
 | `firebird_health('fb')` database/server health facts | Done |
 | `firebird_index_profile('fb.main.T')` index diagnostics | Done |
 | `firebird_type_audit('fb')` type/charset fidelity findings | Done |
 | `DECFLOAT(16/34)` lossless fallback (VARCHAR via server-side `CAST`) | Done |
 | Adaptive parallel scan recommendations (shared with scanner planning) | Done |
+| All 19 functions documented in-band in `duckdb_functions()` | Done (v1.0.2) |
 
 `firebird_pool_stats('fb')` reports one attached catalog's pool state
-(config + idle queue + lifetime counters) by explicit alias. It does not
-enumerate catalogs, reads only counters the pool already tracks, and never
-leases a connection.
+(config + idle queue + active leases + lifetime counters + last error) by
+explicit alias. It does not enumerate catalogs, reads only counters the pool
+already tracks, and never leases a connection.
 
 `DECFLOAT(16)` / `DECFLOAT(34)` (Firebird 4+ IEEE Decimal64/Decimal128) now
 surface as lossless VARCHAR via a server-side `CAST(... AS VARCHAR(64))`,
@@ -450,8 +454,12 @@ DuckDB Firebird is released under the [MIT License](LICENSE).
 
 The DuckDB community-extension submission was merged via
 [duckdb/community-extensions#1980](https://github.com/duckdb/community-extensions/pull/1980).
-The community descriptor points to `repo.ref: v0.6.1` (runtime-loaded
-Firebird client; no `libfbclient` build dependency), so normal users should
+The catalog currently serves **v1.0.1**; the v1.0.2 descriptor update is
+fully green and awaiting maintainer merge
+([duckdb/community-extensions#2849](https://github.com/duckdb/community-extensions/pull/2849)),
+and the v1.1.0 bump is prepared. Descriptors pin an immutable commit SHA in
+`repo.ref` (catalog convention), and the build keeps the Firebird client
+runtime-loaded — no `libfbclient` build dependency. Normal users should
 install from the official DuckDB community repository:
 
 ```sql

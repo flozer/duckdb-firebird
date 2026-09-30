@@ -254,23 +254,25 @@ This sidesteps the catalog plumbing for now; users get federated
 queries against Firebird through familiar `schema.table` syntax, and
 the views inherit every pushdown the scanner supports.
 
-## Deferred work (as of v0.6.0)
+## Deferred work (as of v1.1.0)
 
 Items shipped since the original v0.2 cut (Native `ATTACH`, projection
 and predicate pushdown, prepared statements, PK-range partitioning,
 HUGEINT / DECIMAL(38) / TIMESTAMP_TZ types, `CHARACTER SET NONE`
-handling, `information_schema`) are tracked in the
+handling, `information_schema`, the Metadata Bridge and diagnostics
+surface, the connection pool, row estimates, and in-band
+`duckdb_functions()` documentation) are tracked in the
 [Current Status](../../README.md#current-status) section of the README.
 
 The items below remain open:
 
 | Item                                       | Notes |
 |---|---|
-| Connection pool                            | Each LocalState opens its own connection. With native `ATTACH` shipped, short-lived connections happen via catalog metadata calls — a pool is now worth measuring. |
-| Automatic `LIMIT` pushdown into Firebird SQL | The query builder accepts a limit; needs wiring through [DuckDB](https://github.com/duckdb/duckdb)'s `TableFunction` limit pushdown hook. Modest win — DuckDB already stops calling the scan early once the limit is hit. Manual `row_limit=` / `row_offset=` already works. |
+| Automatic `LIMIT` pushdown into Firebird SQL | Needs a `TableFunction` limit-pushdown hook that DuckDB v1.5.x does not expose to storage extensions. Manual `row_limit=` / `row_offset=` already works, with deterministic `RDB$DB_KEY`/PK ordering. |
+| Aggregate pushdown (`COUNT/MIN/MAX`, no joins) | Blocked by the same v1.5.x table-filters API gap. DuckDB applies aggregates above the scan. |
 | Broader `LIKE` / regex pushdown            | Selective `LIKE 'prefix%'` is shipped (v0.5). Broader patterns (`%word%`, regex) still sit in `EXPRESSION_FILTER` and remain residual in DuckDB. |
 | Stable C extension ABI                     | The Stable C ABI (`duckdb_extension.h`) does **not** support `StorageExtension` — only scalar / aggregate / table / replacement functions. Migrating today would mean losing native `ATTACH ... AS fb (TYPE firebird)`. Tracked upstream in [duckdb/duckdb](https://github.com/duckdb/duckdb); once the C ABI gains storage-extension support, we revisit. |
-| Scanner-native Arrow `RecordBatch` output  | The scanner produces DuckDB `Vector` / `DataChunk` columns; Arrow conversion happens at the DuckDB/GizmoSQL boundary. Native Arrow output is a v1.x candidate. |
+| Scanner-native Arrow `RecordBatch` output  | The scanner produces DuckDB `Vector` / `DataChunk` columns; Arrow conversion happens at the DuckDB/GizmoSQL boundary. Only worth building with a consumer that measures a real win. |
 
 ## References
 
