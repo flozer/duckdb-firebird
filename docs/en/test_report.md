@@ -312,3 +312,26 @@ was merged on 2026-06-03 and points to `repo.ref: v0.6.0`.
   the scan in some DuckDB plans, but the storage extension does not
   yet rewrite `LIMIT N` into a Firebird `ROWS 1 TO N` automatically;
   users opt in via `row_limit=`.
+
+---
+
+## v1.1.0 release verification (2026-09-29)
+
+- **Full sqllogictest suite green in CI** on Linux x64, Windows x64, and the
+  live Firebird 3/4/5 matrix (21 test files, including the new
+  `firebird_function_docs.test` and `firebird_partitions_scan.test`).
+- **Local DuckDB build matrix** (`scripts/build_matrix.ps1`, Windows/MSVC,
+  Firebird 5.0.3): v1.5.3 and v1.5.6 both build clean and pass the full
+  21-file suite (903 assertions each) — no API drift.
+- **Read-only maturity battery on a real ~66GB Firebird 5.0.3 ERP restore**
+  (metadata and aggregate counts only, per release rules): 3,174 tables
+  discovered, 291 FKs, 9,842 indexes, 17,866 `none_charset` findings;
+  `firebird_profile_table` on a ~20M-span PK table recommended
+  `partitions=10` with both partition alerts; the documented sparse-PK
+  overcount reproduced at scale (PK-range estimate 20,107,392 vs exact
+  `COUNT(*)` 967,387); `firebird_pool_stats` coherent throughout (idle
+  parked, active drained to 0, `last_error` NULL).
+- All F1–F5 debt-queue items validated live (row estimate +
+  `exact_row_count`, structured `filter_before_scan` /
+  `materialize_before_scan` / `exact_count_executed` alerts, pool
+  active/last_error, DECFLOAT in the main suite, partitions>1 scans).
