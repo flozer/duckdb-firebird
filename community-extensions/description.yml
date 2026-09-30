@@ -30,7 +30,8 @@ extension:
 
 repo:
   github: flozer/duckdb-firebird
-  ref: v1.1.0
+  # v1.1.0 (immutable commit pin)
+  ref: eda29b89509d873ef4ddde401875a7a000be591a
 
 docs:
   hello_world: |
