@@ -231,14 +231,22 @@ DuckDB behavior.
 
 Published community release: **v1.0.1** (`INSTALL firebird FROM community`);
 the v1.0.2 descriptor update is submitted as
-[duckdb/community-extensions#2849](https://github.com/duckdb/community-extensions/pull/2849).
-The copy in [`community-extensions/description.yml`](community-extensions/description.yml)
-mirrors the submitted descriptor.
+[duckdb/community-extensions#2849](https://github.com/duckdb/community-extensions/pull/2849)
+(fully green, awaiting maintainer merge), and the v1.1.0 bump is prepared
+and stacked on top of it. The copy in
+[`community-extensions/description.yml`](community-extensions/description.yml)
+mirrors the latest prepared descriptor.
 
-`main` is at **v1.0.2**: v1.0.1 plus in-band function documentation —
-all 19 `firebird_*` table functions are discoverable via
-`duckdb_functions()` with real parameter names, a description, an example,
-and categories (issue #63), locked in by a serverless regression test.
+`main` is at **v1.1.0** (see
+[docs/en/release_notes_v1.1.0.md](docs/en/release_notes_v1.1.0.md)):
+v1.0.2's in-band function documentation (all 19 `firebird_*` table
+functions discoverable via `duckdb_functions()`, issue #63) plus row
+estimates and structured required-filter alerts in
+`firebird_profile_table`, active leases and a sanitized `last_error` in
+`firebird_pool_stats`, DECFLOAT coverage in the main CI suite, real
+`partitions > 1` CI coverage, and a validated DuckDB v1.5.6 compatibility
+record (build pin stays v1.5.3 until the community catalog moves its
+target).
 
 v1.0.1 (see
 [docs/en/release_notes_v1.0.1.md](docs/en/release_notes_v1.0.1.md))
