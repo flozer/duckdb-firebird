@@ -1,0 +1,142 @@
+# name: test/sql/firebird_session_stability.test
+# description: G4 session stability - firebird_dummy_packet_interval
+#              keepalive setting (seconds; 0 = off) and validation.
+# group: [firebird]
+#
+# Requires the EMPLOYEE fixture from scripts/setup_test_firebird.sh and
+# the same env vars the other firebird_* tests use.
+#
+# What this file can and cannot assert:
+#
+# - The DPB effect (isc_dpb_dummy_packet_interval reaching the server)
+#   is NOT automatable here: it needs a NAT/firewall dropping the
+#   connection mid-fetch to observe a behavioral difference. Validated
+#   by code inspection instead: FirebirdConnection::Attach() appends the
+#   4-byte little-endian seconds value tagged isc_dpb_dummy_packet_interval
+#   only when the setting is > 0; with 0 (default) the DPB is
+#   byte-for-byte the historical attach. Same non-automatable-path
+#   convention as firebird_none_pushdown.test.
+# - The enriched fetch-error context ("Firebird fetch failed for table
+#   ... after N rows in this scan ...") is likewise NOT triggerable in
+#   sqllogictest — it requires killing the connection while a cursor is
+#   mid-fetch. Covered by the CLI/manual validation documented in the
+#   feature commit.
+#
+# What IS asserted here: the setting is accepted, readable, default 0,
+# RESET returns it to 0, a scan works with the keepalive armed, and
+# negative values fail with the unit in the message — on BOTH the
+# firebird_scan() bind path and the ATTACH path.
+#
+# NOT added to the CI workflows (same status as the other manual-
+# fixture firebird tests; see build-linux-fb-matrix.yml test list).
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+require-env ISC_PASSWORD
+
+# ---------------------------------------------------------------------------
+#  Default: 0 (disabled) — nothing is sent on the wire.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT current_setting('firebird_dummy_packet_interval');
+----
+0
+
+# A plain scan with the default must be unaffected.
+
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE');
+----
+5
+
+# ---------------------------------------------------------------------------
+#  Keepalive armed: the value is accepted and a scan returns the
+#  expected rows (connection attaches fine with the DPB item present).
+# ---------------------------------------------------------------------------
+
+statement ok
+SET firebird_dummy_packet_interval = 60;
+
+query I
+SELECT current_setting('firebird_dummy_packet_interval');
+----
+60
+
+query I
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE EMP_ID = 2;
+----
+2
+
+# The scan-time read happens at bind time, so a value set after the
+# statement starts planning is picked up on the NEXT statement, not
+# retroactively. A low value (1s) exercises the same DPB path — the
+# query must still work against a live server.
+
+statement ok
+SET firebird_dummy_packet_interval = 1;
+
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE EMP_ID <= 5;
+----
+5
+
+# ---------------------------------------------------------------------------
+#  ATTACH path: the catalog pool clones the value captured at attach
+#  into every connection it opens (scan workers, metadata leases).
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb_keep (TYPE firebird);
+
+query I
+SELECT EMP_ID FROM fb_keep.main.EMPLOYEE WHERE EMP_ID = 2;
+----
+2
+
+statement ok
+DETACH fb_keep;
+
+# ---------------------------------------------------------------------------
+#  Negative value: rejected with the unit in the message.
+#  firebird_scan() path — validated at bind time.
+# ---------------------------------------------------------------------------
+
+statement ok
+SET firebird_dummy_packet_interval = -1;
+
+statement error
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE');
+----
+firebird_dummy_packet_interval must be >= 0 (0 = disabled), got -1 (unit: seconds)
+
+# ATTACH path — validated at attach time, same message.
+
+statement error
+ATTACH '${FIREBIRD_TEST_DB}' AS fb_bad_keep (TYPE firebird);
+----
+firebird_dummy_packet_interval must be >= 0 (0 = disabled), got -1 (unit: seconds)
+
+# ---------------------------------------------------------------------------
+#  RESET returns the default (0).
+# ---------------------------------------------------------------------------
+
+statement ok
+RESET firebird_dummy_packet_interval;
+
+query I
+SELECT current_setting('firebird_dummy_packet_interval');
+----
+0
+
+# And a scan right after RESET is normal.
+
+query I
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE EMP_ID = 2;
+----
+2

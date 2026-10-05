@@ -1789,6 +1789,61 @@ Lido no `ATTACH`. Mudanca posterior nao reconfigura pool existente.
 - Liberar handles em sessoes longas que ficam ociosas entre rajadas de
   consultas.
 
+### `SET firebird_dummy_packet_interval = SEGUNDOS`
+
+#### O que faz e como funciona
+
+Keepalive para fetches longos. Acima de `0`, **toda** conexao aberta pela
+extensao - conexoes por chamada do `firebird_scan()` e conexoes de
+`ATTACH`, do pool ou novas - envia `isc_dpb_dummy_packet_interval` no DPB
+do attach, pedindo ao Firebird para emitir um pacote dummy no fio a cada
+`SEGUNDOS`, de modo que uma conexao derrubada em silencio por NAT /
+firewall de estado seja detectada durante o fetch, em vez de aparecer
+depois como cursor morto (`-504 ... cursor lost`) ou conexao encerrada
+(`-902`).
+
+- **Unidade: segundos** - a mesma unidade de `DummyPacketInterval` no
+  `firebird.conf` do servidor e da documentacao do protocolo de rede do
+  Firebird.
+- **Padrao `0` = desligado**: o item do DPB nao e enviado e o attach fica
+  byte a byte identico as versoes anteriores.
+- Lido no bind do `firebird_scan()` e no `ATTACH`. Para um attach ja
+  existente, um `SET` posterior nao se aplica - faca `DETACH` + `ATTACH`
+  de novo (o pool cria conexoes a partir do valor capturado no attach).
+- Valores negativos (ou acima do limite de 32 bits do DPB) sao rejeitados
+  com Binder Exception que cita a unidade:
+  "firebird_dummy_packet_interval must be >= 0 (0 = disabled), got -5 (unit: seconds)".
+
+#### Para que serve
+
+- Extracoes longas via WAN, onde NAT/firewall derruba conexoes ociosas
+  no meio do fetch (sintomas classicos: `-504` cursor lost aos ~7000s,
+  `-902` em seria historica).
+- Diagnostico: se o erro de fetch passa a ocorrer com keepalive ligado,
+  o problema nao e timeout de ociosidade.
+
+#### Uso no dia a dia
+
+```sql
+SET firebird_dummy_packet_interval = 60;   -- segundos
+ATTACH 'firebird://srv:/data/erp.fdb' AS erp (TYPE firebird);
+COPY (SELECT * FROM erp.main.TABELA_GRANDE) TO 'carga.parquet';
+
+SET firebird_dummy_packet_interval = 0;    -- de volta ao padrao na sessao
+```
+
+Se mesmo assim um fetch morrer no meio, o scanner levanta `IO Error` com
+contexto acionavel (tabela, linhas ja lidas pelo worker, esta setting como
+remedio e ponteiro para `firebird_last_query()`) - veja a secao de
+troubleshooting em `docs/en/observability.md`. Ressalva honesta: o valor
+de DPB por anexacao depende do servidor honra-lo. A issue do Firebird
+[#8266](https://github.com/FirebirdSQL/firebird/issues/8266) reporta que
+em algumas versoes o valor e parseado mas nao aplicado, cabendo ao
+`DummyPacketInterval` do servidor agendar os pacotes dummy. Enviar o DPB
+segue sendo o pedido correto do lado cliente e e inofensivo em servidores
+que o ignoram; o contexto no erro de fetch (abaixo) e a metade confiavel
+do diagnostico.
+
 ## Notas de mapeamento de tipos
 
 ### Politica de tratamento de tipos

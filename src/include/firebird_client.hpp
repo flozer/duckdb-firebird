@@ -49,9 +49,25 @@ struct FirebirdConnectionInfo {
     std::string role;
     std::string charset = "UTF8";
     int dialect = 3;
+    // G4 session stability — per-attachment keepalive, carried to the
+    // server in the attach DPB as isc_dpb_dummy_packet_interval.
+    // Unit: SECONDS (the unit Firebird's own DummyPacketInterval
+    // firebird.conf entry and the wire-protocol docs use). 0 (default)
+    // = the DPB item is NOT sent, byte-for-byte the historical attach.
+    // The field propagates with every copy of this struct: pool-held
+    // connections, metadata leases, schema/table catalog entries and
+    // scanner connections all attach through FirebirdConnection::Attach().
+    int64_t dummy_packet_interval_secs = 0;
 
     static FirebirdConnectionInfo Parse(const std::string &conn_str);
 };
+
+// Validates a user-supplied dummy packet interval (seconds). 0 is the
+// "off" default and passes. Throws a BinderException with the unit in
+// the message when the value is negative or beyond the 32-bit DPB
+// payload range. Shared by the firebird_scan() bind path and the
+// ATTACH path so both reject identical values with identical text.
+void ValidateDummyPacketInterval(int64_t seconds);
 
 // Throws a BinderException if `charset` would deliver bytes DuckDB's
 // UTF-8-only string vectors can't ingest. UTF8, UTF-8, NONE, OCTETS pass;

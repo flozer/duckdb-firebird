@@ -188,6 +188,35 @@ text into `error_message` after passing it through
 The slot stays populated so a failed SQL is still recoverable for
 debugging.
 
+### Fetch-failure context (long fetches, -504 / -902)
+
+When the data fetch of a scan dies mid-cursor — the classic
+`-504 ... cursor lost` or `-902` after a NAT/firewall silently drops an
+idle connection — the scanner re-raises the error with actionable
+context attached, keeping the original message:
+
+```
+IO Error: Firebird fetch failed for table 'BIG_TABLE' after 4123877 rows
+in this scan. The connection/cursor may have been dropped (idle
+NAT/firewall timeout on long fetches - consider SET
+firebird_dummy_packet_interval = 60). Inspect firebird_last_query() for
+the exact remote SQL. Original error: <original Firebird message>
+```
+
+Where it appears: the query's `IO Error` in the client, and the same
+enriched text in `firebird_last_query().error_message` (prefixed with
+`Fetch: ` by the existing telemetry capture). What it means: the
+original Firebird error is preserved verbatim after `Original error:`;
+the row count is how far **this worker's** cursor got — under parallel
+scans (`partitions > 1`) each worker has its own connection and cursor,
+so the count is per-worker, not the query-wide total (the query-wide
+`rows_read` in telemetry is the aggregate). The remedy named in the
+message, `SET firebird_dummy_packet_interval = 60` (seconds), arms the
+attach-DPB keepalive — see the session-options section of
+`function_manual.md` for the exact semantics and the server-side
+caveat. Only the scan data-fetch path carries this context; metadata
+cursors and cursor-open failures surface their errors unchanged.
+
 ### Examples
 
 **Confirm the WHERE was pushed to Firebird (not filtered locally):**
@@ -341,6 +370,7 @@ SELECT COUNT(*) FROM firebird_query_log()
 |---|---|---|---|
 | `firebird_query_log_size` | BIGINT | 0 | Ring-buffer size. `0` disables and clears the log. |
 | `firebird_unpushed_mode` | VARCHAR | `silent` | Reaction when a scan keeps filters un-pushed: `silent` (telemetry only), `warn` (one warning), or `error` (fail the scan). See the guard section above. |
+| `firebird_dummy_packet_interval` | BIGINT | 0 | Keepalive in seconds sent as `isc_dpb_dummy_packet_interval` on every connection (`0` = off). Companion to the fetch-failure context above. |
 
 ```sql
 SELECT current_setting('firebird_query_log_size');

@@ -243,6 +243,28 @@ static void LoadInternal(ExtensionLoader &loader) {
         "message.",
         LogicalType::VARCHAR,
         Value("silent"));
+
+    // G4 session stability - keepalive for long fetches across NAT /
+    // stateful firewalls. When > 0, every connection this extension
+    // opens (firebird_scan() and ATTACH, pool and non-pool) sends
+    // isc_dpb_dummy_packet_interval in the attach DPB, asking the
+    // server to emit a dummy packet every N seconds so a dropped
+    // connection is noticed mid-fetch instead of hanging or failing
+    // with -504/-902. Unit: seconds (same unit as DummyPacketInterval
+    // in the server's firebird.conf). 0 (default) sends nothing -
+    // byte-for-byte the historical attach. Read at firebird_scan()
+    // bind time and at ATTACH time.
+    config.AddExtensionOption(
+        "firebird_dummy_packet_interval",
+        "Keepalive interval, in SECONDS, sent to Firebird as "
+        "isc_dpb_dummy_packet_interval on every connection (0 = disabled, "
+        "default). Helps when NAT/firewall idle timeouts drop long fetches "
+        "(-504 cursor lost / -902 connection shutdown). Effectiveness "
+        "depends on the server honoring the per-attachment DPB value; on "
+        "some server versions the server-side DummyPacketInterval setting "
+        "is required instead.",
+        LogicalType::BIGINT,
+        Value::BIGINT(0));
 }
 
 void FirebirdExtension::Load(ExtensionLoader &loader) {

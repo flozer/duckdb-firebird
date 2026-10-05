@@ -3,10 +3,12 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/time.hpp"
 #include "duckdb/common/types/timestamp.hpp"
@@ -218,6 +220,28 @@ void FirebirdConnection::Check(const ISC_STATUS *status, const std::string &cont
     throw IOException(msg);
 }
 
+// --- keepalive validation ----------------------------------------------------
+
+// Unit is SECONDS — matches Firebird's DummyPacketInterval in
+// firebird.conf and the isc_dpb_dummy_packet_interval wire item. The
+// DPB payload is a 4-byte integer, so anything past INT32_MAX cannot be
+// encoded and is rejected here rather than silently truncated.
+void ValidateDummyPacketInterval(int64_t seconds) {
+    if (seconds < 0) {
+        throw BinderException(
+            "firebird_dummy_packet_interval must be >= 0 (0 = disabled), "
+            "got %lld (unit: seconds)",
+            static_cast<long long>(seconds));
+    }
+    if (seconds > static_cast<int64_t>(std::numeric_limits<ISC_LONG>::max())) {
+        throw BinderException(
+            "firebird_dummy_packet_interval must fit in a 32-bit DPB "
+            "integer, got %lld (unit: seconds; max %d)",
+            static_cast<long long>(seconds),
+            static_cast<int>(std::numeric_limits<ISC_LONG>::max()));
+    }
+}
+
 // --- DPB / TPB helpers -------------------------------------------------------
 
 static void DpbAppend(std::vector<char> &dpb, char tag, const std::string &val) {
@@ -393,6 +417,21 @@ void FirebirdConnection::Attach() {
         dpb.push_back(isc_dpb_sql_dialect);
         dpb.push_back(1);
         dpb.push_back(static_cast<char>(info_.dialect));
+    }
+    if (info_.dummy_packet_interval_secs > 0) {
+        // G4 session stability — per-attachment keepalive (isc_dpb_dummy_packet_interval).
+        // Numeric DPB item: 1-byte length tag + 4-byte little-endian ISC_LONG,
+        // the canonical encoding for Firebird's numeric DPB parameters.
+        // Unit is seconds (same unit as DummyPacketInterval in firebird.conf).
+        // Default 0 leaves the DPB byte-for-byte identical to the historical
+        // attach — the item is simply never appended.
+        dpb.push_back(isc_dpb_dummy_packet_interval);
+        dpb.push_back(4);
+        const ISC_LONG secs =
+            static_cast<ISC_LONG>(info_.dummy_packet_interval_secs);
+        for (size_t shift = 0; shift < sizeof(ISC_LONG); ++shift) {
+            dpb.push_back(static_cast<char>((secs >> (shift * 8)) & 0xFF));
+        }
     }
 
     ISC_STATUS status[20] = {};

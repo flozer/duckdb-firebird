@@ -115,6 +115,15 @@ struct FirebirdLocalState : public LocalTableFunctionState {
     optional_idx slice_offset;
     idx_t rows_skipped = 0;
     idx_t rows_emitted  = 0;
+    // G4 error context - cumulative rows this worker has pulled off its
+    // cursors (across Scan() calls and partition handoffs). Unlike
+    // rows_skipped/rows_emitted it counts EVERY successful Fetch(),
+    // including local-slice skips: the number that matters when a
+    // long-running cursor dies mid-scan is "how far did THIS worker
+    // get". Under parallel scans each worker has its own connection and
+    // cursor, so the count in the error message is per-worker, not the
+    // query-wide total.
+    idx_t rows_read = 0;
 
     ~FirebirdLocalState() override {
         // Order matters: the cursor has to be torn down before the
@@ -497,6 +506,22 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
         }
         else if (key == "numeric_widen_int64") {
             bind->numeric_widen_int64 = val.GetValue<bool>();
+        }
+    }
+    // G4 session stability - keepalive for long fetches. Read at bind
+    // time so the connection opened right below for schema discovery,
+    // every worker connection opened in InitLocal, and the bind data
+    // itself all carry the same interval. 0 (default) = DPB item not
+    // sent. ValidateDummyPacketInterval rejects negative / oversized
+    // values with the unit in the message.
+    {
+        Value keepalive;
+        if (context.TryGetCurrentSetting("firebird_dummy_packet_interval",
+                                         keepalive) &&
+            !keepalive.IsNull()) {
+            const int64_t secs = keepalive.GetValue<int64_t>();
+            ValidateDummyPacketInterval(secs);
+            bind->conn_info.dummy_packet_interval_secs = secs;
         }
     }
     // v0.5 contract: offset requires limit. Pure offset is a "skip then
@@ -1016,7 +1041,31 @@ static void FirebirdScanFunction(ClientContext &ctx,
                 if (!OpenNextPartitionCursor(ctx, data, local)) break;
             }
             auto t0 = std::chrono::steady_clock::now();
-            const bool got = local.cursor->Fetch();
+            const bool got = [&]() {
+                try {
+                    return local.cursor->Fetch();
+                } catch (const std::exception &e) {
+                    // G4 error context - the -504 / -902 fetch-death
+                    // path. Only the data Fetch() of a scan cursor is
+                    // wrapped (OpenCursor has its own catch below; the
+                    // outer catch only records telemetry). Re-throw an
+                    // IOException that keeps the original message and
+                    // attaches what a human needs: which table, how
+                    // far this worker got, the keepalive lever, and
+                    // where the exact remote SQL lives. The outer
+                    // catch then stores this enriched text in
+                    // firebird_last_query().error_message.
+                    throw IOException(
+                        "Firebird fetch failed for table '" + bind.table_name +
+                        "' after " + std::to_string(local.rows_read) +
+                        " rows in this scan. The connection/cursor may have "
+                        "been dropped (idle NAT/firewall timeout on long "
+                        "fetches - consider SET "
+                        "firebird_dummy_packet_interval = 60). Inspect "
+                        "firebird_last_query() for the exact remote SQL. "
+                        "Original error: " + std::string(e.what()));
+                }
+            }();
             auto t1 = std::chrono::steady_clock::now();
             fetch_us += std::chrono::duration_cast<std::chrono::microseconds>(
                             t1 - t0).count();
@@ -1024,6 +1073,7 @@ static void FirebirdScanFunction(ClientContext &ctx,
                 local.cursor.reset();
                 continue;
             }
+            ++local.rows_read;
             // Local-slice fallback (case 4 of the pagination decision
             // order): no ROWS clause was pushed for this scan, so
             // row_limit/row_offset must be enforced here instead of

@@ -1000,6 +1000,53 @@ Controls the maximum number of idle connections kept by the pool.
 
 Controls how long idle pooled connections may remain reusable.
 
+### `SET firebird_dummy_packet_interval = SECONDS`
+
+Keepalive for long-running fetches. When set above `0`, **every**
+connection the extension opens — `firebird_scan()` per-call connections
+and `ATTACH` connections, pooled or fresh — sends
+`isc_dpb_dummy_packet_interval` in the attach DPB, asking Firebird to
+emit a dummy packet on the wire every `SECONDS` so a connection silently
+dropped by a NAT gateway / stateful firewall is detected during the
+fetch instead of surfacing later as a dead cursor
+(`-504 Unable to complete request... cursor lost`) or connection
+shutdown (`-902`).
+
+- **Unit: seconds** — the same unit as `DummyPacketInterval` in the
+  server's `firebird.conf` and the Firebird wire-protocol docs.
+- **Default `0` = disabled**: the DPB item is not sent and the attach
+  is byte-for-byte identical to previous versions.
+- Read at `firebird_scan()` bind time and at `ATTACH` time. For an
+  existing attachment a later `SET` does not apply — `DETACH` + `ATTACH`
+  again (the pool templates its connections from the info captured at
+  attach).
+- Negative values (or values past the 32-bit DPB payload) are rejected
+  with a Binder Exception naming the unit:
+  `firebird_dummy_packet_interval must be >= 0 (0 = disabled), got -5 (unit: seconds)`.
+
+Example — arm the keepalive before a long WAN extract:
+
+```sql
+SET firebird_dummy_packet_interval = 60;   -- seconds
+ATTACH 'firebird://srv:/data/erp.fdb' AS erp (TYPE firebird);
+COPY (SELECT * FROM erp.main.BIG_TABLE) TO 'load.parquet';
+
+SET firebird_dummy_packet_interval = 0;    -- back to default in-session
+```
+
+When a fetch does die mid-scan despite this, the scanner raises an
+`IO Error` with actionable context (table, rows already read by the
+worker, this setting as the remedy, and a pointer to
+`firebird_last_query()`) — see [observability](observability.md).
+Honest caveat: the per-attachment DPB value depends on the server
+honoring it. Firebird issue
+[#8266](https://github.com/FirebirdSQL/firebird/issues/8266) reports
+that on some server versions the value is parsed but not acted upon,
+and the server-side `DummyPacketInterval` configuration is what
+actually schedules dummy packets. Setting it here is still the correct
+client-side ask and is harmless on servers that ignore it; the
+error-context message (below) is the reliable half of the diagnosis.
+
 ## Type mapping notes
 
 ### Type handling policy

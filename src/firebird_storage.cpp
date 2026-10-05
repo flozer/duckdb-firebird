@@ -869,6 +869,16 @@ FirebirdAttach(optional_ptr<StorageExtensionInfo> /*info*/,
     auto conn = BuildConnectionInfo(attach_info.path, attach_info,
                                     none_encoding, none_pushdown,
                                     numeric_widen_int64);
+    // G4 session stability - keepalive for long fetches. Read from the
+    // session settings at ATTACH time (same lifecycle as the pool
+    // settings: a later SET does not retune an existing attachment).
+    // Storing it on FirebirdConnectionInfo propagates everywhere the
+    // catalog clones the struct: the pool's template connection, the
+    // metadata lease, schema/table catalog entries, and every scanner
+    // connection this attachment ever opens.
+    conn.dummy_packet_interval_secs =
+        ReadPoolInt64Setting(context, "firebird_dummy_packet_interval", 0);
+    ValidateDummyPacketInterval(conn.dummy_packet_interval_secs);
     auto pool_config = BuildPoolConfig(context);
     return make_uniq<FirebirdCatalog>(db, std::move(conn), none_encoding,
                                       none_pushdown, numeric_widen_int64,

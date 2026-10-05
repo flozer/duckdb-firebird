@@ -164,6 +164,11 @@ Security note: connection strings may end up in shell history, notebooks,
 DuckDB logs, or BI configuration. Use least-privilege Firebird users and avoid
 committing real credentials.
 
+Long fetches getting killed by NAT/firewall idle timeouts (`-504` cursor
+lost)? `SET firebird_dummy_packet_interval = 60;` arms a wire-level
+keepalive (seconds) on every connection; see the function manual's
+session options.
+
 ## Named Parameters
 
 ```sql
