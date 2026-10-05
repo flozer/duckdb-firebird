@@ -143,6 +143,17 @@ std::string RedactBindValue(const Value &v);
 // cannot leak the password.
 std::string SanitizeErrorMessage(std::string msg);
 
+// G2 (none_pushdown) — make a telemetry string safe for DuckDB VARCHAR
+// Value construction. Pushed `=` / IN filters on CHARACTER SET NONE
+// columns intentionally carry non-UTF-8 bytes (the re-encoded storage
+// bytes behind a charset introducer), and `Value(std::string)` validates
+// UTF-8 and would throw. Valid UTF-8 sequences pass through byte-identical
+// (normal SQL is untouched); every byte that is not part of a valid UTF-8
+// sequence is escaped as `\xNN` (literal backslash, 'x', two hex digits),
+// so the display form still shows exactly which bytes went to the server.
+// The wire SQL itself is NOT touched — Firebird receives the real bytes.
+std::string MakeTelemetrySafeUtf8(const std::string &in);
+
 // firebird_last_query() table function. Returns at most one row, with the
 // most recently captured FirebirdQueryTelemetry FOR THIS CONNECTION.
 // Empty result when no query has been captured yet on this context.

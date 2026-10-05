@@ -97,6 +97,10 @@ Parametros nomeados:
 - `row_limit`: limita linhas usando `ROWS` no Firebird.
 - `row_offset`: offset global; exige `row_limit`.
 - `none_encoding`: estrategia para colunas `CHARACTER SET NONE`.
+- `none_pushdown`: opt-in de pushdown de `=` / `IN` sobre colunas
+  CHAR/VARCHAR `CHARACTER SET NONE` quando `none_encoding` e `win1252` ou
+  `iso8859_1` (padrao `false`; veja "Tratamento de filtros de texto
+  CHARACTER SET NONE" nas notas de mapeamento de tipos).
 
 Internamente, a extensao usa `libfbclient` para abrir cursor no Firebird e
 entrega os chunks ao DuckDB como table function. O DuckDB continua responsavel
@@ -353,6 +357,16 @@ ATTACH 'C:/dados/empresa.fdb' AS fb
 SELECT *
 FROM fb.main.CLIENTES
 WHERE IDCLIENTE = 10;
+```
+
+As opcoes espelham os parametros nomeados do `firebird_scan` — `user`,
+`password`, `charset`, `role`, `dialect`, `none_encoding` e `none_pushdown`
+(opt-in de pushdown de `=` / `IN` sobre colunas CHAR/VARCHAR
+`CHARACTER SET NONE`):
+
+```sql
+ATTACH 'C:/dados/empresa.fdb' AS fb
+(TYPE firebird, none_encoding 'win1252', none_pushdown true);
 ```
 
 Internamente, o storage extension do DuckDB resolve scans de tabelas remotas e
@@ -1147,7 +1161,7 @@ estavel):
 
 | Motivo | Significado | Remedio |
 |---|---|---|
-| `NONE_CHARSET` | Colunas declaradas `CHARACTER SET NONE` nunca empurram filtros de texto; o decode e transcodificado no cliente. | Considere `none_encoding='strict'` ou, em versao futura, `none_pushdown`; confirme com `firebird_explain_pushdown` / `firebird_last_query()`. |
+| `NONE_CHARSET` | O filtro mira uma coluna de texto `CHARACTER SET NONE` e nao foi empurrado. Com `none_pushdown=true` isso significa que o literal nao tem byte no encoding alvo (ex. `'€'` em `iso8859_1`) ou a coluna e BLOB de texto NONE; sem a flag, todo filtro de texto em colunas NONE e barrado. | Use `none_encoding='strict'` para dados ja em UTF-8, ou ative `none_pushdown=true` (parametro do `firebird_scan` ou opcao do ATTACH) para empurrar `=` / `IN` sobre CHAR/VARCHAR NONE; ranges, `LIKE` e `NOT IN` permanecem sempre no cliente. Confirme com `firebird_explain_pushdown`. |
 | `UNSUPPORTED_OP` | O operador/forma/tipo de constante do filtro ainda nao tem traducao para SQL Firebird. | Simplifique o predicado ou aceite o filtro do lado DuckDB. |
 | `ROWID_OR_INVALID_COLUMN` | O filtro mira o rowid virtual ou coluna fora do schema resolvido. | Filtre por colunas reais em vez de `rowid`. |
 | `UNSUPPORTED_PROJECTION_MAPPING` | A coluna projetada do filtro nao pode ser mapeada de volta para uma coluna de origem. | Confira a lista de colunas / forma da projecao da query. |
@@ -1790,6 +1804,76 @@ Uma excecao conhecida e rastreada a essa politica existe hoje:
 segmentos de `ReadBlob` — foi corrigida; `ReadBlob` agora continua lendo
 segmentos ate `isc_segstr_eof`, o unico sinal real de fim de BLOB, em
 vez de parar erroneamente no primeiro `rc == 0`.)
+
+### Tratamento de filtros de texto `CHARACTER SET NONE`
+
+Por padrao, filtros de texto que tocam coluna CHAR/VARCHAR (ou BLOB de
+texto) `CHARACTER SET NONE` nao sao empurrados ao Firebird, exceto quando
+`none_encoding='strict'`: literais DuckDB sao UTF-8 enquanto o servidor
+armazena e compara bytes brutos, entao um literal UTF-8 empurrado poderia
+silenciosamente nao encontrar linhas (`'São Paulo'` e `53 E3 6F ...` num
+disco Windows-1252 mas `53 C3 A3 6F ...` em UTF-8). O predicado e aplicado
+pelo DuckDB apos a transcodificacao, entao o resultado fica correto nos
+dois caminhos.
+
+`none_pushdown=true` (parametro nomeado do `firebird_scan` ou opcao do
+ATTACH) habilita o pushdown de **`=` e `IN (constantes)`** sobre colunas
+**CHAR/VARCHAR** NONE quando `none_encoding` e `win1252` ou
+`iso8859_1`/`latin1`:
+
+```sql
+SELECT *
+FROM firebird_scan('C:/legado/erp.fdb', 'CLIENTES',
+                   none_pushdown=true)
+WHERE CITY = 'São Paulo';
+
+ATTACH 'C:/legado/erp.fdb' AS erp
+    (TYPE firebird, none_encoding 'win1252', none_pushdown true);
+
+SELECT COUNT(*) FROM erp.main.CLIENTES
+WHERE CITY IN ('São Paulo', 'Resende');
+```
+
+Por que e sem perda:
+
+- O Firebird compara valores `CHARACTER SET NONE` **byte a byte** (semantica
+  binaria, sem collation). Cada literal UTF-8 e re-codificado para os bytes
+  brutos do encoding alvo — identicos aos que um escritor Windows-1252 /
+  Latin-1 gravou — entao uma linha casa exatamente quando seu valor
+  transcodificado e igual ao literal.
+- O SQL remoto carrega esses bytes atras de um introduzidor de charset
+  (`"CITY" = _WIN1252 '...'` / `_ISO8859_1 '...'`). O introduzidor e
+  obrigatorio: sem ele, o `isc_dsql_prepare` valida os literais do
+  statement contra o charset de conexao UTF-8 e falha com
+  "Malformed string".
+- A codificacao WIN1252 mapeia `codepoint < 0x80` e `0xA0..0xFF` direto para
+  o byte identico, mais a tabela fixa do Windows-1252 para os 27 codepoints
+  alocados em `0x80–0x9F` (Euro, aspas curvas, tracos, ...). ISO-8859-1
+  mapeia `codepoint <= 0xFF` direto para o byte. Sem dependencias novas.
+
+Fallback conservador e escopo:
+
+- **Qualquer literal nao-codificavel** (ex. `'€'` em `iso8859_1`, cirilico
+  em `win1252`) deixa o filtro inteiro no DuckDB — reaplicado acima do scan —
+  e registra a razao estavel `NONE_CHARSET`, entao
+  `firebird_unpushed_mode='warn' | 'error'` reage exatamente como nos outros
+  casos barrados.
+- **Escopo e so `=` e `IN`.** Comparacoes de intervalo nunca sao empurradas
+  por aqui (a ordem de bytes num encoding de um byte nao coincide sempre com
+  a ordem de codepoints Unicode), e `NOT IN` / `LIKE` mantem o gating
+  NONE_CHARSET existente. BLOBs de texto NONE tambem ficam de fora (o
+  Firebird nao avalia `=` / IN sobre valores BLOB).
+- Com `none_encoding='strict'` ou `'blob'` a flag nao tem **efeito algum**:
+  dados strict sao UTF-8 valido e ja empurram; colunas blob sao `BLOB` do
+  DuckDB. Combinar nao e erro.
+
+Nota de telemetria: o fragmento empurrado (e o `remote_sql` exibido por
+`firebird_last_query()` / `firebird_query_log()` /
+`firebird_explain_pushdown()`) contem intencionalmente os bytes
+re-codificados, que nao sao UTF-8 valido. O DuckDB valida valores
+`VARCHAR`, entao essas superficies exibem cada byte desse escapado como
+`\xNN` — ex. `"CITY" = _WIN1252 'S\xE3o Paulo'`. O SQL de fato enviado ao
+Firebird carrega o byte real (`0xE3`).
 
 ### `DECFLOAT(16)` / `DECFLOAT(34)`
 

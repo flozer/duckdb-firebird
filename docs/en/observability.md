@@ -67,16 +67,22 @@ The reasons are factual and coarse, not a planner trace:
   is recorded for lifted complex predicates (`NOT IN`, and `LIKE` when it
   reaches the complex-filter path) that the scanner would otherwise push;
   the gated complex filter surfaces as a `complex_filter[none_gated]` entry
-  in `residual_filters`.
+  in `residual_filters`. With `none_pushdown=true` it additionally records
+  the conservative fallback of the new `=` / IN pushdown: a literal with no
+  byte in the target encoding (e.g. `'€'` under `iso8859_1`), or an `=` / IN
+  over a NONE text BLOB (Firebird cannot compare BLOB values at all).
 
-  Known limitation: a *simple* comparison (`col = 'x'`, `col > 'x'`) on a
-  `CHARACTER SET NONE` text column is often applied by DuckDB above the scan
-  and never offered to the connector as a pushable filter, so it does not
-  appear in `residual_filters` / `not_pushed_reasons` at all. A prefix
-  `LIKE 'x%'` is likewise rewritten by DuckDB into a range comparison
-  upstream and follows the same invisible path. Today the reliably-captured
-  NONE gate is the complex `NOT IN` (and complex `LIKE`) case. Making the
-  simple-comparison gate observable is future work.
+  Known limitation (without the flag): a *simple* comparison (`col = 'x'`,
+  `col > 'x'`) on a `CHARACTER SET NONE` text column is applied by DuckDB
+  above the scan and never offered to the connector as a pushable filter, so
+  it does not appear in `residual_filters` / `not_pushed_reasons` at all. A
+  prefix `LIKE 'x%'` is likewise rewritten by DuckDB into a range comparison
+  upstream and follows the same invisible path. The opt-in fix is
+  `none_pushdown=true`, which pushes `=` / IN over NONE CHAR/VARCHAR
+  columns (re-encoding each literal to the storage bytes); ranges and
+  `LIKE` remain client-side. Note `firebird_explain_pushdown` reports the
+  builder-level view, so it does surface the NONE gate for simple
+  comparisons that the post-run telemetry cannot see.
 - `UNSUPPORTED_OP` — the filter shape/operator/constant type is not one the
   builder translates to a Firebird predicate.
 - `ROWID_OR_INVALID_COLUMN` — the filter targets the virtual rowid or a
@@ -90,7 +96,7 @@ The codes above are a stable API. Each maps to one factual remedy:
 
 | Reason | Meaning | Remedy |
 |---|---|---|
-| `NONE_CHARSET` | The column is text declared `CHARACTER SET NONE`: `=` / `IN` / `LIKE` / `NOT IN` on it never push down. The decode is transcoded client-side, and a UTF-8 literal cannot be compared against the raw stored bytes server-side. | Columns declared `CHARACTER SET NONE` never push text filters; the decode is transcoded client-side — consider `none_encoding='strict'` or the upcoming `none_pushdown`; confirm with `firebird_explain_pushdown` / `firebird_last_query()`. |
+| `NONE_CHARSET` | The filter targets a `CHARACTER SET NONE` text column and was not pushed: either the flag is off (all text filters gated), the column is a NONE text BLOB, or — with `none_pushdown=true` — a literal has no byte in the target encoding. | Use `none_encoding='strict'` for known-UTF-8 data, or set `none_pushdown=true` (`firebird_scan` parameter / ATTACH option) to push `=` / IN over NONE CHAR/VARCHAR; ranges, `LIKE` and `NOT IN` always stay client-side. Confirm with `firebird_explain_pushdown` / `firebird_last_query()`. |
 | `UNSUPPORTED_OP` | The filter operator, shape, or constant type has no Firebird SQL translation yet. | Simplify the predicate or accept DuckDB-side filtering for that term. |
 | `ROWID_OR_INVALID_COLUMN` | The filter targets the virtual `rowid` or a column outside the resolved schema. | Filter on real columns instead of `rowid`. |
 | `UNSUPPORTED_PROJECTION_MAPPING` | The filter's projected column index could not be mapped back to a source column. | Check the query's column list / projection shape. |
@@ -130,18 +136,35 @@ COPY (SELECT * FROM fb.main.BIG_TABLE WHERE NAME NOT IN ('X','Y'))
   TO 'load.parquet';
 -- Invalid Input Error: firebird_unpushed_mode='error': this scan kept 1
 -- filter(s) in DuckDB instead of pushing them down to Firebird.
---  NONE_CHARSET (1): columns declared CHARACTER SET NONE never push text
---  filters; ... Verify with firebird_explain_pushdown() /
---  firebird_last_query(). Reset with SET firebird_unpushed_mode = 'silent'.
+--  NONE_CHARSET (1): columns declared CHARACTER SET NONE only push text
+--  filters under none_encoding='strict' or, for '=' / IN on CHAR /
+--  VARCHAR, with the none_pushdown=true opt-in - ranges, LIKE and NOT IN
+--  are always transcoded client-side. Verify with
+--  firebird_explain_pushdown() / firebird_last_query(). Reset with
+--  SET firebird_unpushed_mode = 'silent'.
 
 SET firebird_unpushed_mode = 'silent';  -- back to default in-session
 ```
 
 Known limitation (pre-existing, see the `NONE_CHARSET` bullet above):
 simple comparisons (`col = 'x'`) on `CHARACTER SET NONE` text columns are
-usually applied by DuckDB above the scan and never offered to the
-connector, so they do not surface as residual filters and do not trigger
-the guard. `NOT IN` on such a column is the reliably-captured trigger.
+applied by DuckDB above the scan and never offered to the connector, so
+they do not surface as residual filters and do not trigger the guard.
+`NOT IN` on such a column is the reliably-captured trigger. With the
+`none_pushdown=true` opt-in, `=` / IN over NONE CHAR/VARCHAR columns are
+pushed instead of remaining invisible; the guard still fires for the
+fallback cases (unencodable literal, NONE text BLOB).
+
+### Re-encoded literals in telemetry (none_pushdown)
+
+Pushed `=` / IN fragments over `CHARACTER SET NONE` columns carry the
+re-encoded storage bytes (for example `_WIN1252 'S\xE3o Paulo'`-shaped
+SQL whose byte between `S` and `o` is `0xE3`, not valid UTF-8). DuckDB
+validates `VARCHAR` on value construction, so `firebird_last_query()`,
+`firebird_query_log()`, and `firebird_explain_pushdown()` display each
+such byte escaped as `\xNN`. This is display-only: the SQL actually sent
+to Firebird contains the real bytes, which is exactly what makes the
+server-side byte-wise comparison lossless.
 
 ### Bind redaction
 

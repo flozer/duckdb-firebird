@@ -55,9 +55,11 @@ such as GizmoSQL.
 - **Projection pushdown** - only requested columns are fetched.
 - **Predicate pushdown** - comparisons, `IS NULL`, `BETWEEN`, `IN`, `NOT IN`,
   `NOT bool`, `AND` / `OR`, and safe `LIKE 'prefix%'` cases. `=` / `IN` push
-  down except on `CHARACTER SET NONE` text columns — those filters stay in
-  DuckDB (see `none_encoding`), optionally guarded via
-  `SET firebird_unpushed_mode = 'warn' | 'error'`.
+  down except on `CHARACTER SET NONE` text columns — those stay in DuckDB
+  (see `none_encoding`), optionally guarded via
+  `SET firebird_unpushed_mode = 'warn' | 'error'`; the `none_pushdown=true`
+  opt-in pushes `=` / `IN` over NONE CHAR/VARCHAR columns by re-encoding
+  each literal to the storage bytes (lossless byte-wise comparison).
 - **Streaming batches** - rows flow into DuckDB `DataChunk`s instead of a
   whole-table in-memory copy.
 - **Prepared statements + bind variables** - string/date/numeric filters avoid
@@ -206,9 +208,12 @@ ATTACH 'C:/legacy/erp.fdb' AS erp
      none_encoding 'win1252');
 ```
 
-When `none_encoding` is not `strict`, text filter pushdown on NONE columns is
-disabled deliberately. DuckDB applies those filters after transcoding so query
-results remain correct.
+When `none_encoding` is not `strict`, text filter pushdown on NONE columns
+is disabled deliberately: DuckDB applies those filters after transcoding so
+query results remain correct. To push `=` / `IN` over NONE CHAR/VARCHAR
+columns anyway — re-encoding each UTF-8 literal to the stored bytes behind a
+charset introducer, lossless under Firebird's byte-wise NONE comparison —
+pass `none_pushdown=true` to `firebird_scan` or the ATTACH options.
 
 ## Metadata
 

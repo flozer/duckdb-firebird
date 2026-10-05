@@ -13,6 +13,7 @@
 #include "firebird_explain_pushdown.hpp"
 #include "firebird_scanner.hpp"
 #include "firebird_query.hpp"
+#include "firebird_observability.hpp" // MakeTelemetrySafeUtf8
 #include "firebird_view_analysis.hpp" // LookupObjectType, ViewAnalysis, AnalyzeViewSource
 
 #include "duckdb/common/exception.hpp"
@@ -302,6 +303,28 @@ static void WalkPlan(LogicalOperator &op,
                 column_ids.push_back(ci.GetPrimaryIndex());
             }
 
+            // LogicalGet::table_filters keys are ABSOLUTE source column ids
+            // (the physical planner's CreateTableFilterSet in plan_get.cpp
+            // converts them to column_ids-relative positions before handing
+            // them to the scan). Build() expects the relative form; passing
+            // the absolute keys mis-attributed filters whenever a column's
+            // absolute id differed from its position in the projected list
+            // (e.g. a LABEL predicate was reported as `"ID" = ?`). Mirror
+            // the physical planner's conversion so the explain row matches
+            // the scanner's real telemetry.
+            unique_ptr<TableFilterSet> scan_filters;
+            if (!get.table_filters.filters.empty()) {
+                scan_filters = make_uniq<TableFilterSet>();
+                for (auto &entry : get.table_filters.filters) {
+                    for (idx_t i = 0; i < column_ids.size(); ++i) {
+                        if (column_ids[i] == entry.first) {
+                            scan_filters->filters[i] = entry.second->Copy();
+                            break;
+                        }
+                    }
+                }
+            }
+
             // Capture-only Build — serial WHERE, no PK bounds, no extra
             // predicate string (extra_predicates are appended below as
             // pushed_filters telemetry, exactly as the scanner does).
@@ -319,7 +342,7 @@ static void WalkPlan(LogicalOperator &op,
                 bd.column_names,
                 bd.column_types,
                 column_ids,
-                &get.table_filters,
+                scan_filters.get(),
                 real_limit,
                 /*extra_predicate=*/"",
                 &bd.column_descs,
@@ -330,7 +353,10 @@ static void WalkPlan(LogicalOperator &op,
             ExplainRow r;
             r.scan_ordinal = next_ordinal++;
             r.table_name   = bd.table_name;
-            r.remote_sql   = result.sql;
+            // G2 (none_pushdown): re-encoded NONE-column literals carry
+            // non-UTF-8 bytes; escape them for display (see
+            // MakeTelemetrySafeUtf8) so Value construction cannot throw.
+            r.remote_sql   = MakeTelemetrySafeUtf8(result.sql);
 
             // projected_columns: map column_ids -> column_names; rowid sentinel
             // surfaces as "<rowid>".
@@ -348,7 +374,7 @@ static void WalkPlan(LogicalOperator &op,
             // pushdown-complex time.
             r.pushed_filters = result.pushed_filter_sql;
             for (auto &ep : bd.extra_predicates) {
-                r.pushed_filters.push_back(ep.sql);
+                r.pushed_filters.push_back(MakeTelemetrySafeUtf8(ep.sql));
             }
 
             // residual_filters: one placeholder per residual TableFilterSet

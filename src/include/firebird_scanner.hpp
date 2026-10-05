@@ -114,6 +114,19 @@ struct FirebirdBindData : public TableFunctionData {
     // (raw bytes). Aligned with fb-cdc-rust's `charset_for_none_fields`
     // default. See enum NoneEncoding.
     NoneEncoding none_encoding = NoneEncoding::WIN1252;
+    // G2 opt-in: when true AND none_encoding is WIN1252 or ISO_8859_1,
+    // constant `=` and `IN` text filters on CHARACTER SET NONE CHAR/VARCHAR
+    // columns are pushed down to Firebird. Each UTF-8 literal is re-encoded
+    // to the target encoding's raw bytes and inlined in the remote SQL
+    // (Firebird compares NONE columns byte-by-byte, so the match is
+    // lossless for encodable literals). A literal that cannot be encoded
+    // (e.g. '€' under ISO_8859_1, Cyrillic under WIN1252) leaves the
+    // filter in DuckDB — re-applied above the scan — and records the
+    // stable NONE_CHARSET residual reason, so the
+    // firebird_unpushed_mode guard reacts exactly like the other gated
+    // cases. Has no effect with 'strict' (filters already push as valid
+    // UTF-8) or 'blob' (columns are DuckDB BLOBs). Default false.
+    bool none_pushdown = false;
     // True when RDB$DATABASE.RDB$CHARACTER_SET_NAME = NONE. Drives
     // the warning + influences pushdown safety (text-filter literals
     // are UTF-8 in DuckDB and may not round-trip against NONE bytes).

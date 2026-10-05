@@ -32,6 +32,14 @@ void FirebirdObservabilityState::RecordQuery(const FirebirdQueryTelemetry &rec,
     std::lock_guard<std::mutex> g(lock_);
     last_ = rec;
     last_.valid = true;
+    // G2 (none_pushdown): pushed NONE-column filters / remote SQL may
+    // intentionally contain non-UTF-8 bytes (re-encoded literals). DuckDB
+    // Value construction validates UTF-8, so escape invalid bytes for
+    // display before the record is stored. See MakeTelemetrySafeUtf8.
+    last_.remote_sql = MakeTelemetrySafeUtf8(last_.remote_sql);
+    for (auto &f : last_.pushed_filters) {
+        f = MakeTelemetrySafeUtf8(f);
+    }
     start_ = std::chrono::steady_clock::now();
 
     if (log_size <= 0) {
@@ -110,10 +118,10 @@ shared_ptr<FirebirdObservabilityState> GetObservabilityState(ClientContext &ctx)
 
 static const char *RemedyForReason(const std::string &reason) {
     if (reason == "NONE_CHARSET") {
-        return "columns declared CHARACTER SET NONE never push text "
-               "filters; the decode is transcoded client-side - use "
-               "none_encoding='strict' or, in the next release, "
-               "none_pushdown";
+        return "columns declared CHARACTER SET NONE only push text filters "
+               "under none_encoding='strict' or, for '=' / IN on CHAR / "
+               "VARCHAR, with the none_pushdown=true opt-in - ranges, LIKE "
+               "and NOT IN are always transcoded client-side";
     }
     if (reason == "UNSUPPORTED_OP") {
         return "the filter operator/shape/constant type has no Firebird SQL "
@@ -195,6 +203,76 @@ void HandleUnpushedFilters(ClientContext &ctx,
 // ---------------------------------------------------------------------------
 //  Redaction
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+//  Telemetry-safe UTF-8 (G2 none_pushdown)
+// ---------------------------------------------------------------------------
+//
+// Walks the input as UTF-8. Valid sequences are copied byte-identical;
+// any byte that starts an invalid sequence is emitted as `\xNN`. This
+// keeps firebird_last_query() / firebird_query_log() /
+// firebird_explain_pushdown() renderable (DuckDB validates VARCHAR on
+// Value construction) while still showing the exact bytes that were sent
+// to Firebird for re-encoded NONE-column literals.
+
+std::string MakeTelemetrySafeUtf8(const std::string &in) {
+    // Fast path: pure ASCII / already-valid UTF-8 is by far the common
+    // case for every filter the extension pushes.
+    bool all_valid = true;
+    for (unsigned char c : in) {
+        if (c >= 0x80) {
+            all_valid = false;
+            break;
+        }
+    }
+    if (all_valid) return in;
+
+    std::string out;
+    out.reserve(in.size() + 8);
+    const auto cont = [&](size_t i) {
+        return (static_cast<unsigned char>(in[i]) & 0xC0) == 0x80;
+    };
+    size_t i = 0;
+    while (i < in.size()) {
+        const unsigned char lead = static_cast<unsigned char>(in[i]);
+        size_t len = 0;
+        uint32_t cp = 0;
+        if (lead < 0x80) {
+            len = 1;
+            cp = lead;
+        } else if ((lead & 0xE0) == 0xC0 && i + 1 < in.size() && cont(i + 1)) {
+            len = 2;
+            cp = (lead & 0x1F) << 6 | (in[i + 1] & 0x3F);
+        } else if ((lead & 0xF0) == 0xE0 && i + 2 < in.size() &&
+                   cont(i + 1) && cont(i + 2)) {
+            len = 3;
+            cp = (lead & 0x0F) << 12 | (in[i + 1] & 0x3F) << 6 |
+                 (in[i + 2] & 0x3F);
+        } else if ((lead & 0xF8) == 0xF0 && i + 3 < in.size() &&
+                   cont(i + 1) && cont(i + 2) && cont(i + 3)) {
+            len = 4;
+            cp = (lead & 0x07) << 18 | (in[i + 1] & 0x3F) << 12 |
+                 (in[i + 2] & 0x3F) << 6 | (in[i + 3] & 0x3F);
+        }
+        // Reject overlong / surrogate / out-of-range forms as invalid.
+        static const uint32_t kMinCp[] = {0, 1, 0x80, 0x800, 0x10000};
+        const bool valid =
+            len != 0 && cp >= kMinCp[len] && cp <= 0x10FFFF &&
+            !(cp >= 0xD800 && cp <= 0xDFFF);
+        if (valid) {
+            out.append(in, i, len);
+            i += len;
+        } else {
+            const char hex[] = "0123456789ABCDEF";
+            out += '\\';
+            out += 'x';
+            out += hex[(lead >> 4) & 0xF];
+            out += hex[lead & 0xF];
+            i += 1;
+        }
+    }
+    return out;
+}
 
 // ---------------------------------------------------------------------------
 //  Error-message sanitizer

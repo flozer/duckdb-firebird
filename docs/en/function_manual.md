@@ -63,6 +63,10 @@ Supported named parameters include:
 - `row_limit`
 - `row_offset`
 - `partitions`
+- `none_pushdown` — opt-in pushdown of `=` / `IN` over `CHARACTER SET NONE`
+  CHAR/VARCHAR columns when `none_encoding` is `win1252` or `iso8859_1`
+  (default `false`; see [Charset handling of `CHARACTER SET NONE`
+  text filters](#charset-handling-of-character-set-none-text-filters))
 - charset-related options documented in the usage guide
 
 Use this when you need one direct table scan without attaching the whole
@@ -148,6 +152,15 @@ ATTACH 'database=C:/data/erp.fdb user=APP_READONLY password=secret'
 
 SELECT *
 FROM fb.main.CUSTOMER;
+```
+
+Options mirror the `firebird_scan` named parameters — `user`, `password`,
+`charset`, `role`, `dialect`, `none_encoding`, and `none_pushdown` (opt-in
+pushdown of `=` / `IN` over `CHARACTER SET NONE` CHAR/VARCHAR columns):
+
+```sql
+ATTACH 'database=C:/data/erp.fdb user=APP_READONLY password=secret'
+  AS fb (TYPE firebird, none_encoding 'win1252', none_pushdown true);
 ```
 
 Prefer `ATTACH` for analytics sessions that query multiple Firebird tables.
@@ -625,7 +638,7 @@ Remedy per `not_pushed_reasons` code (the codes are a stable API):
 
 | Reason | Meaning | Remedy |
 |---|---|---|
-| `NONE_CHARSET` | Columns declared `CHARACTER SET NONE` never push text filters; the decode is transcoded client-side. | Consider `none_encoding='strict'` or the upcoming `none_pushdown`; confirm with `firebird_explain_pushdown`. |
+| `NONE_CHARSET` | The filter targets a `CHARACTER SET NONE` text column and was not pushed. With `none_pushdown=true` this means the literal had no byte in the target encoding (e.g. `'€'` under `iso8859_1`) or the column is a NONE text BLOB; without the flag, every text filter on NONE columns is gated. | Use `none_encoding='strict'` for known-UTF-8 data, or set `none_pushdown=true` (direct `firebird_scan` parameter or ATTACH option) to push `=` / `IN` over NONE CHAR/VARCHAR; ranges, `LIKE` and `NOT IN` always stay client-side. Confirm with `firebird_explain_pushdown`. |
 | `UNSUPPORTED_OP` | The filter operator/shape/constant type has no Firebird SQL translation yet. | Simplify the predicate or accept DuckDB-side filtering. |
 | `ROWID_OR_INVALID_COLUMN` | The filter targets the virtual rowid or a column outside the resolved schema. | Filter on real columns instead of `rowid`. |
 | `UNSUPPORTED_PROJECTION_MAPPING` | The filter's projected column could not be mapped back to a source column. | Check the query's column list / projection shape. |
@@ -999,6 +1012,75 @@ One known, tracked exception to this policy exists today:
 `ReadBlob` — is fixed; `ReadBlob` now keeps reading segments until
 `isc_segstr_eof`, the only real end-of-blob signal, instead of
 incorrectly stopping on the first `rc == 0`.)
+
+### Charset handling of `CHARACTER SET NONE` text filters
+
+By default, text filters that touch a `CHARACTER SET NONE` CHAR/VARCHAR (or
+NONE text BLOB) column are **not** pushed to Firebird unless
+`none_encoding='strict'`: DuckDB literals are UTF-8 while the server stores
+and compares raw bytes, so a pushed UTF-8 literal could silently miss rows
+(`'São Paulo'` is `53 E3 6F ...` on a Windows-1252 disk but
+`53 C3 A3 6F ...` in UTF-8). The filtered predicate is applied by DuckDB
+after transcoding, so results stay correct either way.
+
+`none_pushdown=true` (a `firebird_scan` named parameter or an ATTACH
+option) opts into pushing **`=` and `IN (constants)`** over NONE
+**CHAR/VARCHAR** columns when `none_encoding` is `win1252` or
+`iso8859_1`/`latin1`:
+
+```sql
+SELECT *
+FROM firebird_scan('C:/legacy/erp.fdb', 'CLIENTES',
+                   none_pushdown=true)
+WHERE CITY = 'São Paulo';
+
+ATTACH 'C:/legacy/erp.fdb' AS erp
+    (TYPE firebird, none_encoding 'win1252', none_pushdown true);
+
+SELECT COUNT(*) FROM erp.main.CLIENTES
+WHERE CITY IN ('São Paulo', 'Resende');
+```
+
+How it stays lossless:
+
+- Firebird compares `CHARACTER SET NONE` values **byte-by-byte** (binary
+  semantics, no collation). Each UTF-8 literal is re-encoded to the target
+  encoding's raw bytes — byte-identical to what a Windows-1252 / Latin-1
+  writer stored — so a row matches exactly when its transcoded value equals
+  the literal.
+- The remote SQL carries those bytes behind a charset introducer
+  (`"CITY" = _WIN1252 '...'` / `_ISO8859_1 '...'`). The introducer is
+  required: without it, `isc_dsql_prepare` validates the statement's
+  literals against the UTF-8 connection charset and fails with
+  "Malformed string".
+- WIN1252 encoding maps `codepoint < 0x80` and `0xA0..0xFF` straight to the
+  identical byte, plus the fixed Windows-1252 table for the 27 allocated
+  codepoints in `0x80–0x9F` (Euro, curly quotes, en/em dash, ...). ISO-8859-1
+  maps `codepoint <= 0xFF` straight to the byte. No new dependencies.
+
+Conservative fallback and scope:
+
+- **Any unencodable literal** (e.g. `'€'` under `iso8859_1`, Cyrillic under
+  `win1252`) leaves the whole filter in DuckDB — re-applied above the scan —
+  and records the stable `NONE_CHARSET` reason, so
+  `firebird_unpushed_mode='warn' | 'error'` reacts exactly as for the other
+  gated cases.
+- **Scope is `=` and `IN` only.** Range comparisons are never pushed this
+  way (byte order in a single-byte encoding does not always agree with
+  Unicode code-point order), and `NOT IN` / `LIKE` keep the existing
+  NONE_CHARSET gating. NONE text **BLOB** columns are excluded too
+  (Firebird cannot evaluate `=` / IN on BLOB values at all).
+- With `none_encoding='strict'` or `'blob'` the flag has **no effect**:
+  strict data is valid UTF-8 and already pushes; blob columns are DuckDB
+  `BLOB`s. It is not an error to combine them.
+
+Telemetry note: the pushed fragment (and the `remote_sql` shown by
+`firebird_last_query()` / `firebird_query_log()` /
+`firebird_explain_pushdown()`) intentionally contains the re-encoded
+non-UTF-8 bytes. DuckDB validates `VARCHAR` values, so these surfaces
+display each such byte escaped as `\xNN` — e.g.
+`"CITY" = _WIN1252 'S\xE3o Paulo'`. The SQL actually sent to Firebird
+carries the real byte (`0xE3`).
 
 ### `DECFLOAT(16)` / `DECFLOAT(34)`
 
