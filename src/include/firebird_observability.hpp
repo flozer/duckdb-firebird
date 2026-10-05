@@ -106,6 +106,26 @@ private:
 // Always returns a non-null shared_ptr; lifetime is tied to the context.
 shared_ptr<FirebirdObservabilityState> GetObservabilityState(ClientContext &ctx);
 
+// G1 observability wave — react to a scan that has residual (not pushed)
+// filters, according to the firebird_unpushed_mode session setting:
+//
+//   'silent' (default) — no-op, returns immediately;
+//   'warn'             — emits a warning through DuckDB's native logging
+//                        channel (the same mechanism the engine uses for
+//                        its own deprecation notices; the DuckDB CLI prints
+//                        it to the console out of the box);
+//   'error'            — throws InvalidInputException with an actionable
+//                        per-reason message (count, codes, remedies).
+//
+// `reasons` is the scan's not_pushed_reasons set. The caller (scanner)
+// guards this with a once-per-query atomic and only calls it when
+// `reasons` is non-empty, so the silent path costs nothing per row or per
+// partition. An unknown setting value throws InvalidInputException as soon
+// as there is something to report — a typo must not silently disable the
+// guard the user asked for.
+void HandleUnpushedFilters(ClientContext &ctx,
+                           const std::vector<std::string> &reasons);
+
 // Redact a single bind value for surface in observability output.
 //
 // PM-approved Phase 1 policy:

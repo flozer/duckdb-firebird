@@ -226,6 +226,22 @@ static void LoadInternal(ExtensionLoader &loader) {
         "0 = no expiry (default). Clock starts at Release().",
         LogicalType::BIGINT,
         Value::BIGINT(0));
+
+    // G1 observability wave - unpushed-filter guard. Read by the scanner
+    // once per scan, at the first partition cursor open that ends up with
+    // residual (not pushed) filters — the same signal telemetry records in
+    // firebird_last_query().not_pushed_reasons. 'silent' (default) keeps
+    // the historical behaviour at zero cost; 'warn' emits a DuckDB
+    // warning; 'error' fails the query with an actionable message.
+    config.AddExtensionOption(
+        "firebird_unpushed_mode",
+        "What to do when a Firebird scan keeps filters in DuckDB that were "
+        "not pushed down to Firebird (see not_pushed_reasons in "
+        "firebird_last_query()). 'silent' (default) does nothing, 'warn' "
+        "emits a warning, 'error' fails the query with an actionable "
+        "message.",
+        LogicalType::VARCHAR,
+        Value("silent"));
 }
 
 void FirebirdExtension::Load(ExtensionLoader &loader) {

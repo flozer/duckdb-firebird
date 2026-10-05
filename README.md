@@ -54,7 +54,10 @@ such as GizmoSQL.
   `information_schema.tables` / `information_schema.columns`.
 - **Projection pushdown** - only requested columns are fetched.
 - **Predicate pushdown** - comparisons, `IS NULL`, `BETWEEN`, `IN`, `NOT IN`,
-  `NOT bool`, `AND` / `OR`, and safe `LIKE 'prefix%'` cases.
+  `NOT bool`, `AND` / `OR`, and safe `LIKE 'prefix%'` cases. `=` / `IN` push
+  down except on `CHARACTER SET NONE` text columns — those filters stay in
+  DuckDB (see `none_encoding`), optionally guarded via
+  `SET firebird_unpushed_mode = 'warn' | 'error'`.
 - **Streaming batches** - rows flow into DuckDB `DataChunk`s instead of a
   whole-table in-memory copy.
 - **Prepared statements + bind variables** - string/date/numeric filters avoid

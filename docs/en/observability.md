@@ -84,6 +84,65 @@ The reasons are factual and coarse, not a planner trace:
 - `UNSUPPORTED_PROJECTION_MAPPING` — the filter's projected column index
   could not be mapped back to a source column.
 
+#### Remedy per reason
+
+The codes above are a stable API. Each maps to one factual remedy:
+
+| Reason | Meaning | Remedy |
+|---|---|---|
+| `NONE_CHARSET` | The column is text declared `CHARACTER SET NONE`: `=` / `IN` / `LIKE` / `NOT IN` on it never push down. The decode is transcoded client-side, and a UTF-8 literal cannot be compared against the raw stored bytes server-side. | Columns declared `CHARACTER SET NONE` never push text filters; the decode is transcoded client-side — consider `none_encoding='strict'` or the upcoming `none_pushdown`; confirm with `firebird_explain_pushdown` / `firebird_last_query()`. |
+| `UNSUPPORTED_OP` | The filter operator, shape, or constant type has no Firebird SQL translation yet. | Simplify the predicate or accept DuckDB-side filtering for that term. |
+| `ROWID_OR_INVALID_COLUMN` | The filter targets the virtual `rowid` or a column outside the resolved schema. | Filter on real columns instead of `rowid`. |
+| `UNSUPPORTED_PROJECTION_MAPPING` | The filter's projected column index could not be mapped back to a source column. | Check the query's column list / projection shape. |
+
+#### Unpushed-filter guard — `firebird_unpushed_mode`
+
+Telemetry is passive by default. To make residual filters **act** instead
+of only report, arm the guard:
+
+```sql
+SET firebird_unpushed_mode = 'silent';  -- default: telemetry only
+SET firebird_unpushed_mode = 'warn';    -- one warning per scan
+SET firebird_unpushed_mode = 'error';   -- fail the scan
+```
+
+- `silent` (default) — no behaviour change; at most one setting read per
+  query.
+- `warn` — emits one warning per scan that kept filters, through DuckDB's
+  native warning channel (the same mechanism the engine uses for its own
+  deprecation notices). The DuckDB CLI prints it to the console out of the
+  box; embedded hosts receive it through the logging subsystem, and
+  `SET warnings_as_errors = true` promotes it to an exception.
+- `error` — the scan fails with an Invalid Input Error listing the residual
+  filter count, the reason codes present, and the per-reason remedy. It
+  fires **before any row is fetched**, so arming it before a long load
+  fails fast instead of after the fact.
+
+One report per scan: parallel scans (`partitions > 1`) report once, at the
+first partition cursor open — the residual set is identical for every
+partition.
+
+Example — arm the guard before a long load:
+
+```sql
+SET firebird_unpushed_mode = 'error';
+COPY (SELECT * FROM fb.main.BIG_TABLE WHERE NAME NOT IN ('X','Y'))
+  TO 'load.parquet';
+-- Invalid Input Error: firebird_unpushed_mode='error': this scan kept 1
+-- filter(s) in DuckDB instead of pushing them down to Firebird.
+--  NONE_CHARSET (1): columns declared CHARACTER SET NONE never push text
+--  filters; ... Verify with firebird_explain_pushdown() /
+--  firebird_last_query(). Reset with SET firebird_unpushed_mode = 'silent'.
+
+SET firebird_unpushed_mode = 'silent';  -- back to default in-session
+```
+
+Known limitation (pre-existing, see the `NONE_CHARSET` bullet above):
+simple comparisons (`col = 'x'`) on `CHARACTER SET NONE` text columns are
+usually applied by DuckDB above the scan and never offered to the
+connector, so they do not surface as residual filters and do not trigger
+the guard. `NOT IN` on such a column is the reliably-captured trigger.
+
 ### Bind redaction
 
 | Input | Surfaced as |
@@ -258,11 +317,16 @@ SELECT COUNT(*) FROM firebird_query_log()
 | Setting | Type | Default | Effect |
 |---|---|---|---|
 | `firebird_query_log_size` | BIGINT | 0 | Ring-buffer size. `0` disables and clears the log. |
+| `firebird_unpushed_mode` | VARCHAR | `silent` | Reaction when a scan keeps filters un-pushed: `silent` (telemetry only), `warn` (one warning), or `error` (fail the scan). See the guard section above. |
 
 ```sql
 SELECT current_setting('firebird_query_log_size');
 SET firebird_query_log_size = 16;
 RESET firebird_query_log_size;
+
+SELECT current_setting('firebird_unpushed_mode');
+SET firebird_unpushed_mode = 'error';
+RESET firebird_unpushed_mode;
 ```
 
 ---

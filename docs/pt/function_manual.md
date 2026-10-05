@@ -1142,6 +1142,20 @@ coarse, nao um trace de planner:
 - `UNSUPPORTED_PROJECTION_MAPPING`: o indice de coluna projetada do filtro
   nao pode ser mapeado de volta para uma coluna de origem.
 
+Remedio por codigo de `not_pushed_reasons` (os codigos sao uma API
+estavel):
+
+| Motivo | Significado | Remedio |
+|---|---|---|
+| `NONE_CHARSET` | Colunas declaradas `CHARACTER SET NONE` nunca empurram filtros de texto; o decode e transcodificado no cliente. | Considere `none_encoding='strict'` ou, em versao futura, `none_pushdown`; confirme com `firebird_explain_pushdown` / `firebird_last_query()`. |
+| `UNSUPPORTED_OP` | O operador/forma/tipo de constante do filtro ainda nao tem traducao para SQL Firebird. | Simplifique o predicado ou aceite o filtro do lado DuckDB. |
+| `ROWID_OR_INVALID_COLUMN` | O filtro mira o rowid virtual ou coluna fora do schema resolvido. | Filtre por colunas reais em vez de `rowid`. |
+| `UNSUPPORTED_PROJECTION_MAPPING` | A coluna projetada do filtro nao pode ser mapeada de volta para uma coluna de origem. | Confira a lista de colunas / forma da projecao da query. |
+
+Para fazer filtros residuais agirem em vez de so reportar, use
+`SET firebird_unpushed_mode = 'warn' | 'error'` - veja
+[Nivel 5 - Opcoes de sessao](#nivel-5---opcoes-de-sessao).
+
 Seguranca:
 
 - Texto e blob em binds viram `<text:redacted>`.
@@ -1613,6 +1627,50 @@ Limpar/desligar:
 
 ```sql
 SET firebird_query_log_size = 0;
+```
+
+### `SET firebird_unpushed_mode = 'silent' | 'warn' | 'error'`
+
+#### O que faz e como funciona
+
+Controla o que acontece quando um scan Firebird mantem filtros no DuckDB
+que **nao foram empurrados** ao Firebird - o mesmo sinal que a telemetria
+mostra em `not_pushed_reasons` (`NONE_CHARSET`, `UNSUPPORTED_OP`,
+`ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING`).
+
+- `silent` (padrao) - comportamento atual: so telemetria, sem custo extra.
+- `warn` - um aviso por scan pelo canal nativo de warnings do DuckDB (o
+  CLI imprime no console; hosts embarcados recebem pelo subsystem de
+  logging, e `warnings_as_errors` promove o aviso a excecao).
+- `error` - o scan falha com Invalid Input Error listando a quantidade de
+  filtros residuais, os codigos presentes e o remedio de cada um. A
+  checagem roda uma vez por scan, antes de buscar qualquer linha, entao
+  armar antes de uma carga longa falha rapido.
+
+Padrao:
+
+```sql
+SET firebird_unpushed_mode = 'silent';
+```
+
+Valor desconhecido (`'warnn'`, ...) e rejeitado com Invalid Input Error
+assim que um scan tiver filtros residuais a reportar - um typo nunca
+desliga silenciosamente uma guarda que voce pediu.
+
+#### Para que serve
+
+- Falhar rapido em carga longa (COPY / CREATE TABLE AS) quando o pushdown
+  esperado nao aconteceu, em vez de descobrir depois pelos numeros.
+- Auditoria de performance: levantar warnings em sessoes de analise.
+
+#### Uso no dia a dia
+
+```sql
+SET firebird_unpushed_mode = 'error';
+COPY (SELECT * FROM fb.main.TABELA_GRANDE) TO 'carga.parquet';
+-- falha aqui se algum filtro ficou residual, com motivo + remedio
+
+SET firebird_unpushed_mode = 'silent';   -- de volta ao padrao na sessao
 ```
 
 ### `SET firebird_pool_enabled = true|false`

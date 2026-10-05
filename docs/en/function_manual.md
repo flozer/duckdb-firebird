@@ -621,6 +621,19 @@ pushdown-explainability columns (`limit_pushed`, `offset_pushed`,
 filter stayed local. See `docs/en/observability.md` for the full column
 reference and the reason vocabulary.
 
+Remedy per `not_pushed_reasons` code (the codes are a stable API):
+
+| Reason | Meaning | Remedy |
+|---|---|---|
+| `NONE_CHARSET` | Columns declared `CHARACTER SET NONE` never push text filters; the decode is transcoded client-side. | Consider `none_encoding='strict'` or the upcoming `none_pushdown`; confirm with `firebird_explain_pushdown`. |
+| `UNSUPPORTED_OP` | The filter operator/shape/constant type has no Firebird SQL translation yet. | Simplify the predicate or accept DuckDB-side filtering. |
+| `ROWID_OR_INVALID_COLUMN` | The filter targets the virtual rowid or a column outside the resolved schema. | Filter on real columns instead of `rowid`. |
+| `UNSUPPORTED_PROJECTION_MAPPING` | The filter's projected column could not be mapped back to a source column. | Check the query's column list / projection shape. |
+
+To make residual filters act instead of only report, set
+`SET firebird_unpushed_mode = 'warn' | 'error'` — see
+[Level 5 - Session options](#level-5---session-options).
+
 ### `firebird_explain_pushdown(sql)`
 
 Returns an a-priori, plan-only analysis of what a `SELECT` statement would
@@ -690,6 +703,9 @@ Rejected input (raises an error):
   scanner are considered for pushdown.
 - `pk_range_column` is `NULL` whenever `pk_range_eligible` is `false`.
 - `planned_partitions` is `NULL` whenever `pk_range_eligible` is `false`.
+
+Each `not_pushed_reasons` code maps to a documented remedy — see the table
+in the [`firebird_last_query()`](#firebird_last_query) section above.
 
 #### Notes on `view_heavy`, `charset_pushdown_blocked`, and `planned_partitions`
 
@@ -917,6 +933,36 @@ FROM firebird_health('fb');
 ### `SET firebird_query_log_size = N`
 
 Controls the maximum number of query telemetry entries kept in memory.
+
+### `SET firebird_unpushed_mode = 'silent' | 'warn' | 'error'`
+
+Controls what happens when a Firebird scan keeps filters in DuckDB that
+were **not pushed down** to Firebird — the same signal telemetry surfaces
+in `not_pushed_reasons` (`NONE_CHARSET`, `UNSUPPORTED_OP`,
+`ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING`).
+
+- `silent` (default) — current behaviour: telemetry only, zero extra cost.
+- `warn` — one warning per scan through DuckDB's native warning channel
+  (the CLI prints it to the console; embedded hosts receive it through the
+  logging subsystem, and `warnings_as_errors` promotes it to an exception).
+- `error` — the scan fails with an Invalid Input Error that lists the
+  residual filter count, the reason codes present, and the per-reason
+  remedy. The check runs once per scan, before any row is fetched, so
+  arming it before a long load fails fast.
+
+Example — arm the guard before a long load:
+
+```sql
+SET firebird_unpushed_mode = 'error';
+COPY (SELECT * FROM fb.main.BIG_TABLE) TO 'load.parquet';
+-- fails here if any filter stayed residual, with the reason + remedy
+
+SET firebird_unpushed_mode = 'silent';   -- back to default in-session
+```
+
+An unknown value (`'warnn'`, ...) is rejected with an Invalid Input Error
+as soon as a scan has residual filters to report — a typo never silently
+disables a guard you asked for.
 
 ### `SET firebird_pool_enabled = true|false`
 

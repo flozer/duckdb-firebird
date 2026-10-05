@@ -1,11 +1,15 @@
 #include "firebird_observability.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context.hpp"
 
 #include <algorithm>
+#include <map>
 #include <regex>
+#include <sstream>
 
 namespace duckdb {
 
@@ -93,6 +97,99 @@ void FirebirdObservabilityState::SetError(const std::string &msg) {
 shared_ptr<FirebirdObservabilityState> GetObservabilityState(ClientContext &ctx) {
     return ctx.registered_state->GetOrCreate<FirebirdObservabilityState>(
         FirebirdObservabilityState::KEY);
+}
+
+// ---------------------------------------------------------------------------
+//  firebird_unpushed_mode — residual-filter guard (G1 observability wave)
+// ---------------------------------------------------------------------------
+//
+// The scanner calls HandleUnpushedFilters once per scan when a scan ends up
+// with residual (not pushed) filters — the same codes telemetry surfaces in
+// not_pushed_reasons. The codes are a stable API; the table below only adds
+// a human-facing remedy on top of each one.
+
+static const char *RemedyForReason(const std::string &reason) {
+    if (reason == "NONE_CHARSET") {
+        return "columns declared CHARACTER SET NONE never push text "
+               "filters; the decode is transcoded client-side - use "
+               "none_encoding='strict' or, in the next release, "
+               "none_pushdown";
+    }
+    if (reason == "UNSUPPORTED_OP") {
+        return "the filter operator/shape/constant type has no Firebird SQL "
+               "translation yet; simplify the predicate or accept "
+               "DuckDB-side filtering";
+    }
+    if (reason == "ROWID_OR_INVALID_COLUMN") {
+        return "the filter targets the virtual rowid or a column outside "
+               "the resolved schema; filter on real columns instead";
+    }
+    if (reason == "UNSUPPORTED_PROJECTION_MAPPING") {
+        return "the filter's projected column could not be mapped back to "
+               "a source column; check the query's column list";
+    }
+    return "unknown reason; inspect firebird_last_query()";
+}
+
+void HandleUnpushedFilters(ClientContext &ctx,
+                           const std::vector<std::string> &reasons) {
+    // Load the mode. A missing setting (a stripped-down embed that never
+    // registered the option) behaves exactly like 'silent'.
+    std::string mode = "silent";
+    Value setting_val;
+    if (ctx.TryGetCurrentSetting("firebird_unpushed_mode", setting_val) &&
+        !setting_val.IsNull()) {
+        mode = StringUtil::Lower(setting_val.ToString());
+    }
+    if (mode == "silent") {
+        return;
+    }
+    if (mode != "warn" && mode != "error") {
+        // Fail loud rather than silently ignoring a typo'd value: the
+        // user believes a guard is armed when it is not. This only ever
+        // fires when residual filters exist, i.e. when the mode matters.
+        throw InvalidInputException(
+            "firebird_unpushed_mode='%s' is not valid; use 'silent', "
+            "'warn' or 'error'", mode);
+    }
+
+    // Count occurrences per code, preserving first-seen order so the
+    // message is deterministic across parallel workers.
+    std::vector<std::string> order;
+    std::map<std::string, idx_t> counts;
+    for (const auto &reason : reasons) {
+        if (counts.find(reason) == counts.end()) {
+            order.push_back(reason);
+        }
+        ++counts[reason];
+    }
+
+    std::ostringstream msg;
+    msg << "firebird_unpushed_mode='" << mode << "': this scan kept "
+        << reasons.size() << " filter(s) in DuckDB instead of pushing them "
+                           "down to Firebird.";
+    for (const auto &reason : order) {
+        msg << " " << reason << " (" << counts[reason]
+            << "): " << RemedyForReason(reason) << ".";
+    }
+    msg << " Verify with firebird_explain_pushdown() / "
+           "firebird_last_query(). Reset with SET firebird_unpushed_mode = "
+           "'silent'.";
+
+    if (mode == "error") {
+        throw InvalidInputException(msg.str());
+    }
+    // 'warn': DuckDB's native warning channel — the exact mechanism the
+    // engine itself uses for deprecation notices (see
+    // duckdb/logging/logger.hpp, DUCKDB_LOG_WARNING). The DuckDB CLI
+    // registers a stdout log storage at LOG_WARNING level, so the warning
+    // prints to the console out of the box; embedded hosts receive it
+    // through the logging subsystem, and can promote it to an error with
+    // warnings_as_errors. Limitation: hosts that never enable logging
+    // (default NopLogger) do not see the warning — that is DuckDB's
+    // platform behaviour, not something the extension can bypass without
+    // falling back to raw Printer output.
+    DUCKDB_LOG_WARNING(ctx, msg.str());
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 #include "firebird_scanner.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <limits>
@@ -57,6 +58,12 @@ struct FirebirdGlobalState : public GlobalTableFunctionState {
     std::vector<PartitionSpec> partitions;
     idx_t next_partition = 0;
     idx_t max_threads = 1;
+
+    // G1 observability — firebird_unpushed_mode fires at most once per
+    // scan. The first partition cursor open that sees residual filters
+    // wins the exchange(); every other worker (and every later partition
+    // of this same query) observes true and skips straight past.
+    std::atomic<bool> unpushed_reported{false};
 
     // Pushdown context captured at init time.
     std::vector<column_t>       column_ids;
@@ -892,6 +899,26 @@ static bool OpenNextPartitionCursor(ClientContext &ctx,
             }
         }
         GetObservabilityState(ctx)->RecordQuery(rec, log_size);
+
+        // G1 observability — firebird_unpushed_mode check point.
+        //
+        // Deterministic per-query point: the residual set is fully known
+        // here (Build() result + gated complex filters) and is identical
+        // for every partition of this scan, because gstate.filters,
+        // gstate.column_ids and bind.gated_complex_reasons are per-query,
+        // not per-partition. The atomic on the global state lets exactly
+        // one worker report per query. Costs:
+        //   * no residual filters -> one vector::empty() test, nothing else;
+        //   * silent mode (default) -> one setting read per QUERY (the
+        //     exchange() makes later partitions skip the read entirely);
+        //   * warn/error -> fires once, BEFORE OpenCursor, so 'error'
+        //     fails the query before any row is fetched (fail-fast for
+        //     long loads). Covers the direct firebird_scan() path and the
+        //     ATTACH path alike — both run through this function.
+        if (!rec.not_pushed_reasons.empty() &&
+            !gstate.unpushed_reported.exchange(true)) {
+            HandleUnpushedFilters(ctx, rec.not_pushed_reasons);
+        }
     }
 
     {
