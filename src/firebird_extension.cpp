@@ -154,7 +154,8 @@ static void LoadInternal(ExtensionLoader &loader) {
     loader.RegisterFunction(DescribedTableFunction(
         GetFirebirdTypeAuditFunction(), {"catalog_name"},
         "Reports per-column type and charset fidelity findings (NONE charset, "
-        "DECFLOAT as VARCHAR, INT128, timezone types, text BLOBs) for an attached "
+        "DECFLOAT as VARCHAR, widenable int64 NUMERIC/DECIMAL, INT128, "
+        "timezone types, text BLOBs) for an attached "
         "catalog; only columns with a caveat are emitted.",
         "SELECT * FROM firebird_type_audit('fb');",
         {"firebird", "diagnostics"}));

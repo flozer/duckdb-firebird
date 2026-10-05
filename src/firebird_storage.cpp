@@ -83,6 +83,7 @@ public:
                        std::shared_ptr<FirebirdConnectionPool> pool,
                        NoneEncoding none_encoding,
                        bool none_pushdown,
+                       bool numeric_widen_int64,
                        duckdb::vector<FirebirdColumnDesc> column_descs,
                        PrimaryKeyDescriptor pk_descriptor)
         : TableCatalogEntry(catalog, schema, info),
@@ -90,6 +91,7 @@ public:
           pool_(std::move(pool)),
           none_encoding_(none_encoding),
           none_pushdown_(none_pushdown),
+          numeric_widen_int64_(numeric_widen_int64),
           cached_column_descs_(std::move(column_descs)),
           pk_descriptor_(std::move(pk_descriptor)) {
         // Mirror the column list out of CreateTableInfo so we can hand
@@ -123,6 +125,7 @@ public:
         data->column_descs = cached_column_descs_;
         data->none_encoding = none_encoding_;
         data->none_pushdown = none_pushdown_;
+        data->numeric_widen_int64 = numeric_widen_int64_;
         data->pool = pool_;
         data->pk_descriptor = pk_descriptor_; // cached at ATTACH, zero I/O
 
@@ -158,6 +161,7 @@ private:
     std::shared_ptr<FirebirdConnectionPool> pool_;
     NoneEncoding none_encoding_;
     bool none_pushdown_;
+    bool numeric_widen_int64_;
     duckdb::vector<FirebirdColumnDesc> cached_column_descs_;
     duckdb::vector<std::string> cached_column_names_;
     duckdb::vector<LogicalType> cached_column_types_;
@@ -179,12 +183,14 @@ public:
                         FirebirdConnectionInfo conn_info,
                         std::shared_ptr<FirebirdConnectionPool> pool,
                         NoneEncoding none_encoding,
-                        bool none_pushdown)
+                        bool none_pushdown,
+                        bool numeric_widen_int64)
         : SchemaCatalogEntry(catalog, info),
           conn_info_(std::move(conn_info)),
           pool_(std::move(pool)),
           none_encoding_(none_encoding),
-          none_pushdown_(none_pushdown) {}
+          none_pushdown_(none_pushdown),
+          numeric_widen_int64_(numeric_widen_int64) {}
 
     // -- discovery (the only non-stub members) -------------------------------
 
@@ -396,7 +402,8 @@ private:
             // time — nothing downstream needs to mutate a shared entry.
             if (is_view) {
                 ReconcileViewColumnTypes(conn, table_name, col_names,
-                                         col_types, col_descs);
+                                         col_types, col_descs,
+                                         numeric_widen_int64_);
             }
             CreateTableInfo info(catalog.GetName(), this->name, table_name);
             for (size_t i = 0; i < col_names.size(); ++i) {
@@ -468,7 +475,7 @@ private:
             }
             auto entry = make_uniq<FirebirdTableEntry>(
                 catalog, *this, info, conn_info_, pool_,
-                none_encoding_, none_pushdown_,
+                none_encoding_, none_pushdown_, numeric_widen_int64_,
                 std::move(col_descs), std::move(pk_desc));
             tables_.emplace(ToUpper(table_name), std::move(entry));
         };
@@ -482,7 +489,8 @@ private:
         bool batch_ok = false;
         std::string batch_error;
         try {
-            auto schemas = LoadAllTableSchemas(conn, none_encoding_);
+            auto schemas = LoadAllTableSchemas(conn, none_encoding_,
+                                               numeric_widen_int64_);
             for (auto &ts : schemas) {
                 add_entry(ts.table_name, ts.names, ts.types,
                           std::move(ts.descs), ts.is_view);
@@ -543,7 +551,7 @@ private:
                     duckdb::vector<FirebirdColumnDesc> col_descs;
                     LoadTableSchema(conn, table_name,
                                     col_names, col_types, col_descs,
-                                    none_encoding_);
+                                    none_encoding_, numeric_widen_int64_);
                     add_entry(table_name, col_names, col_types,
                               std::move(col_descs), table_is_view[ti]);
                 } catch (std::exception &) {
@@ -579,6 +587,7 @@ private:
     std::shared_ptr<FirebirdConnectionPool> pool_;
     NoneEncoding none_encoding_;
     bool none_pushdown_;
+    bool numeric_widen_int64_;
     std::mutex load_lock_;
     bool loaded_ = false;
     std::unordered_map<std::string, std::unique_ptr<FirebirdTableEntry>> tables_;
@@ -600,12 +609,14 @@ class FirebirdCatalog final : public Catalog {
 public:
     FirebirdCatalog(AttachedDatabase &db, FirebirdConnectionInfo conn_info,
                     NoneEncoding none_encoding, bool none_pushdown,
+                    bool numeric_widen_int64,
                     FirebirdConnectionPoolConfig pool_config = {})
         : Catalog(db),
           conn_info_(std::move(conn_info)),
           pool_(std::make_shared<FirebirdConnectionPool>(conn_info_, pool_config)),
           none_encoding_(none_encoding),
-          none_pushdown_(none_pushdown) {}
+          none_pushdown_(none_pushdown),
+          numeric_widen_int64_(numeric_widen_int64) {}
 
     // Allow the dbt-sources metadata-extraction helper to lease a
     // connection from this catalog's pool without exposing
@@ -632,7 +643,8 @@ public:
         info.on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
         main_schema_ = make_uniq<FirebirdSchemaEntry>(*this, info, conn_info_,
                                                       pool_, none_encoding_,
-                                                      none_pushdown_);
+                                                      none_pushdown_,
+                                                      numeric_widen_int64_);
     }
 
     bool InMemory() override { return false; }
@@ -715,6 +727,7 @@ private:
     std::shared_ptr<FirebirdConnectionPool> pool_;
     NoneEncoding none_encoding_;
     bool none_pushdown_;
+    bool numeric_widen_int64_;
     std::unique_ptr<FirebirdSchemaEntry> main_schema_;
 };
 
@@ -772,17 +785,19 @@ private:
 
 // Parses the ATTACH path + (TYPE firebird, key=value, …) options into a
 // FirebirdConnectionInfo and (optionally) a NoneEncoding choice plus the
-// G2 `none_pushdown` opt-in.
+// G2 `none_pushdown` and G3 `numeric_widen_int64` opt-ins.
 static FirebirdConnectionInfo BuildConnectionInfo(const std::string &path,
                                                   AttachInfo &info,
                                                   NoneEncoding &out_none,
-                                                  bool &out_none_pushdown) {
+                                                  bool &out_none_pushdown,
+                                                  bool &out_numeric_widen) {
     auto conn = FirebirdConnectionInfo::Parse(path);
     // Match the firebird_scan default — most NONE-storage databases we
     // see in the wild (Athenas-ERP, IBExpert exports, Delphi-era apps)
     // wrote through a Windows-1252 client.
     out_none = NoneEncoding::WIN1252;
     out_none_pushdown = false;
+    out_numeric_widen = false;
     for (auto &kv : info.options) {
         const auto &key = kv.first;
         const auto &val = kv.second;
@@ -793,6 +808,7 @@ static FirebirdConnectionInfo BuildConnectionInfo(const std::string &path,
         else if (key == "dialect")  conn.dialect  = static_cast<int>(val.GetValue<int32_t>());
         else if (key == "none_encoding") out_none  = ParseNoneEncoding(val.ToString());
         else if (key == "none_pushdown") out_none_pushdown = val.GetValue<bool>();
+        else if (key == "numeric_widen_int64") out_numeric_widen = val.GetValue<bool>();
         // unrecognised keys (including "type") are ignored — DuckDB has
         // already routed us here based on TYPE firebird.
     }
@@ -849,11 +865,14 @@ FirebirdAttach(optional_ptr<StorageExtensionInfo> /*info*/,
                AttachOptions & /*options*/) {
     NoneEncoding none_encoding;
     bool none_pushdown = false;
+    bool numeric_widen_int64 = false;
     auto conn = BuildConnectionInfo(attach_info.path, attach_info,
-                                    none_encoding, none_pushdown);
+                                    none_encoding, none_pushdown,
+                                    numeric_widen_int64);
     auto pool_config = BuildPoolConfig(context);
     return make_uniq<FirebirdCatalog>(db, std::move(conn), none_encoding,
-                                      none_pushdown, pool_config);
+                                      none_pushdown, numeric_widen_int64,
+                                      pool_config);
 }
 
 // ---------------------------------------------------------------------------

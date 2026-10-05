@@ -68,7 +68,12 @@ such as GizmoSQL.
 - **Parallel PK-range scans** - opt in with `partitions=N`.
 - **Firebird 3/4/5 type mapping** - including `INT128`, `DECIMAL(38)`,
   `TIMESTAMP WITH TIME ZONE`, text BLOBs, binary BLOBs, booleans, dates, and
-  timestamps.
+  timestamps. Int64-backed `NUMERIC(18,s)` defaults to `DECIMAL(18,s)`; the
+  `numeric_widen_int64=true` opt-in (`firebird_scan` parameter or ATTACH
+  option) projects those columns as `DECIMAL(38,s)` so values beyond
+  DuckDB's 18-digit domain (e.g. the scaled-`INT64_MIN` sentinel) survive
+  losslessly. `firebird_type_audit` flags every affected column with the
+  `int64_numeric_widenable` finding.
 - **Diagnostics and metadata bridge** - inspect constraints, indexes,
   generators, domains, dependencies, comments, health, type-fidelity findings
   (`firebird_type_audit`), index profile, table profile alerts, and

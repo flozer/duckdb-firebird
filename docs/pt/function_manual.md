@@ -101,6 +101,11 @@ Parametros nomeados:
   CHAR/VARCHAR `CHARACTER SET NONE` quando `none_encoding` e `win1252` ou
   `iso8859_1` (padrao `false`; veja "Tratamento de filtros de texto
   CHARACTER SET NONE" nas notas de mapeamento de tipos).
+- `numeric_widen_int64`: opt-in que projeta colunas `NUMERIC`/`DECIMAL`
+  com escala armazenadas como int64 de 64 bits (precisao 10-18, ou seja,
+  `NUMERIC(18,s)` e afins) como `DECIMAL(38,s)` em vez de `DECIMAL(18,s)`,
+  para que toda a faixa escalada do int64 do Firebird sobreviva (padrao
+  `false`; veja "Notas de mapeamento de tipos").
 
 Internamente, a extensao usa `libfbclient` para abrir cursor no Firebird e
 entrega os chunks ao DuckDB como table function. O DuckDB continua responsavel
@@ -360,13 +365,15 @@ WHERE IDCLIENTE = 10;
 ```
 
 As opcoes espelham os parametros nomeados do `firebird_scan` — `user`,
-`password`, `charset`, `role`, `dialect`, `none_encoding` e `none_pushdown`
+`password`, `charset`, `role`, `dialect`, `none_encoding`, `none_pushdown`
 (opt-in de pushdown de `=` / `IN` sobre colunas CHAR/VARCHAR
-`CHARACTER SET NONE`):
+`CHARACTER SET NONE`) e `numeric_widen_int64` (opt-in de projecao
+`DECIMAL(38,s)` para numericos escalados com backing int64):
 
 ```sql
 ATTACH 'C:/dados/empresa.fdb' AS fb
-(TYPE firebird, none_encoding 'win1252', none_pushdown true);
+(TYPE firebird, none_encoding 'win1252', none_pushdown true,
+ numeric_widen_int64 true);
 ```
 
 Internamente, o storage extension do DuckDB resolve scans de tabelas remotas e
@@ -1491,6 +1498,7 @@ Codigos de finding:
 | Codigo | Significado |
 | --- | --- |
 | `decfloat_as_varchar` | DECFLOAT(16/34) projetado como VARCHAR via `CAST` server-side; semantica textual se aplica a comparacoes de filtro |
+| `int64_numeric_widenable` | `NUMERIC`/`DECIMAL` com escala e backing int64; a faixa escalada fisica do int64 excede o dominio de `DECIMAL(18,s)` — passe `numeric_widen_int64=true` (parametro do `firebird_scan` ou opcao do ATTACH) para projetar `DECIMAL(38,s)` sem perda |
 | `int128` | INT128 nativo ou NUMERIC/DECIMAL(19-38) sem casa decimal projetado como HUGEINT (sem perda); algumas ferramentas BI nao suportam INT128 |
 | `time_tz` | TIME WITH TIME ZONE; ressalva de tratamento de offset de sessao e zone-id |
 | `timestamp_tz` | TIMESTAMP WITH TIME ZONE; ressalva de tratamento de offset de sessao e zone-id |
@@ -1507,9 +1515,11 @@ Codigos de finding:
   e emitido sempre que o character set for NONE, independentemente do valor
   de `none_encoding`.
 - `int128` sinaliza `INT128` nativo e `NUMERIC`/`DECIMAL` de precisao 19-38
-  com escala 0 (todos projetados como HUGEINT). `NUMERIC`/`DECIMAL` com
-  escala diferente de 0 mapeia de forma lossless para `DECIMAL` do DuckDB e
-  nao e sinalizado.
+  com escala 0 (todos projetados como HUGEINT). `int64_numeric_widenable`
+  cobre os numericos escalados com backing int64 (precisao 10-18, escala
+  diferente de 0); numericos escalados mais estreitos (precisao 1-9,
+  backing SMALLINT/INTEGER) sempre cabem em seu `DECIMAL` DuckDB e nao sao
+  sinalizados.
 
 ### `firebird_health(alias)`
 
@@ -1804,6 +1814,54 @@ Uma excecao conhecida e rastreada a essa politica existe hoje:
 segmentos de `ReadBlob` — foi corrigida; `ReadBlob` agora continua lendo
 segmentos ate `isc_segstr_eof`, o unico sinal real de fim de BLOB, em
 vez de parar erroneamente no primeiro `rc == 0`.)
+
+### `NUMERIC(18,s)` / `DECIMAL(18,s)` — o dominio do int64 escalado
+
+O Firebird armazena `NUMERIC`/`DECIMAL` de dialect 3 com precisao 10-18
+como um **inteiro escalado de 64 bits**. Esse int64 fisico carrega valores
+ate +/- (2^63-1) escalados, enquanto a projecao default do DuckDB para
+essas colunas, `DECIMAL(18,s)`, termina em 10^18-1 escalado — uma ordem de
+grandeza mais estreita. Valores acima do teto do DuckDB sao escritos sem
+alteracao no vector `DECIMAL(18,s)` (fisicamente int64), e entao:
+
+- o valor **e exibido** com mais digitos de precisao do que o tipo
+  declarado permite (o dominio do tipo e violado silenciosamente);
+- aritmetica inocente **falha ruidosamente** nos valores extremos — por
+  exemplo, o sentinela classico `NUMERIC(18,6) = -9223372036854.775808`
+  (valor escalado `INT64_MIN`) levanta `Out of Range Error: Overflow in
+  multiplication of DECIMAL(18)` para `col * 2` e `Overflow in negation`
+  para `abs(col)`;
+- consumidores que confiam na precisao `DECIMAL(18,s)` declarada (models
+  dbt, ferramentas BI, alvos de CTAS) tratam mal as linhas fora do dominio.
+
+`numeric_widen_int64=true` — parametro nomeado do `firebird_scan` ou
+opcao do ATTACH — projeta essas colunas como **`DECIMAL(38,s)`**, que tem
+backing hugeint e e sem perda para toda a faixa escalada do int64:
+
+```sql
+SELECT N18_6 FROM firebird_scan('C:/dados/erp.fdb', 'LEDGER',
+                                numeric_widen_int64=true)
+WHERE N18_6 <= -9223372036854.775808;
+
+ATTACH 'C:/dados/erp.fdb' AS erp
+    (TYPE firebird, numeric_widen_int64 true);
+```
+
+Escopo e comportamento:
+
+- Aplica-se **apenas** a numericos escalados com backing int64 (precisao
+  10-18, escala diferente de 0). `NUMERIC(18,0)` continua `BIGINT`;
+  numericos escalados mais estreitos (precisao 1-9) ja cabem em seus
+  `DECIMAL(4,s)`/`DECIMAL(9,s)`; numericos com backing INT128 (precisao
+  19+) ja eram `DECIMAL(38,s)`.
+- O **tipo declarado da coluna** e o **vector de fetch** mudam juntos (o
+  fetch faz a extensao de sinal do int64 escalado para o vector hugeint),
+  inclusive pela reconciliacao de tipos de views.
+- O default e `false`: sem a flag, o mapeamento e o fetch `DECIMAL(18,s)`
+  sao byte a byte o comportamento historico.
+- O `firebird_type_audit` sinaliza cada coluna afetada por esta opcao com
+  o finding estavel `int64_numeric_widenable` (veja acima), permitindo
+  dimensionar o impacto num schema real antes de ativar a flag.
 
 ### Tratamento de filtros de texto `CHARACTER SET NONE`
 

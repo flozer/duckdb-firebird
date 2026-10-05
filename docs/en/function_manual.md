@@ -67,6 +67,11 @@ Supported named parameters include:
   CHAR/VARCHAR columns when `none_encoding` is `win1252` or `iso8859_1`
   (default `false`; see [Charset handling of `CHARACTER SET NONE`
   text filters](#charset-handling-of-character-set-none-text-filters))
+- `numeric_widen_int64` — opt-in: projects int64-backed `NUMERIC`/`DECIMAL`
+  columns with a scale (precision 10–18, i.e. `NUMERIC(18,s)` and friends)
+  as `DECIMAL(38,s)` instead of `DECIMAL(18,s)`, so Firebird's full scaled
+  int64 range survives (default `false`; see [Type mapping
+  notes](#type-mapping-notes))
 - charset-related options documented in the usage guide
 
 Use this when you need one direct table scan without attaching the whole
@@ -155,12 +160,15 @@ FROM fb.main.CUSTOMER;
 ```
 
 Options mirror the `firebird_scan` named parameters — `user`, `password`,
-`charset`, `role`, `dialect`, `none_encoding`, and `none_pushdown` (opt-in
-pushdown of `=` / `IN` over `CHARACTER SET NONE` CHAR/VARCHAR columns):
+`charset`, `role`, `dialect`, `none_encoding`, `none_pushdown` (opt-in
+pushdown of `=` / `IN` over `CHARACTER SET NONE` CHAR/VARCHAR columns), and
+`numeric_widen_int64` (opt-in `DECIMAL(38,s)` projection for int64-backed
+scaled numerics):
 
 ```sql
 ATTACH 'database=C:/data/erp.fdb user=APP_READONLY password=secret'
-  AS fb (TYPE firebird, none_encoding 'win1252', none_pushdown true);
+  AS fb (TYPE firebird, none_encoding 'win1252', none_pushdown true,
+         numeric_widen_int64 true);
 ```
 
 Prefer `ATTACH` for analytics sessions that query multiple Firebird tables.
@@ -842,6 +850,7 @@ Finding codes:
 | Code | Meaning |
 | --- | --- |
 | `decfloat_as_varchar` | DECFLOAT(16/34) projected as VARCHAR via server-side `CAST`; text semantics apply to filter comparisons |
+| `int64_numeric_widenable` | int64-backed `NUMERIC`/`DECIMAL` with scale ≠ 0; the physical int64 scaled range exceeds `DECIMAL(18,s)`'s domain — pass `numeric_widen_int64=true` (`firebird_scan` parameter or ATTACH option) to project `DECIMAL(38,s)` losslessly |
 | `int128` | Native INT128 or scale-0 NUMERIC/DECIMAL(19–38) projected as HUGEINT (lossless); some BI tools lack INT128 support |
 | `time_tz` | TIME WITH TIME ZONE; session offset / zone-id handling caveat |
 | `timestamp_tz` | TIMESTAMP WITH TIME ZONE; session offset / zone-id handling caveat |
@@ -857,8 +866,10 @@ Notes:
   catalog schema, not that setting, so the finding is emitted whenever the
   character set is NONE regardless of what `none_encoding` is configured to.
 - `int128` flags native `INT128` and scale-0 `NUMERIC`/`DECIMAL` with
-  precision 19–38 (all projected as HUGEINT). Scaled `NUMERIC`/`DECIMAL`
-  (scale ≠ 0) maps losslessly to DuckDB `DECIMAL` and is not flagged.
+  precision 19–38 (all projected as HUGEINT). `int64_numeric_widenable`
+  covers the scaled int64-backed numerics (precision 10–18, scale ≠ 0);
+  narrower scaled numerics (precision 1–9, SMALLINT/INTEGER-backed) always
+  fit their DuckDB `DECIMAL` and are not flagged.
 
 ### `firebird_health(alias)`
 
@@ -1012,6 +1023,51 @@ One known, tracked exception to this policy exists today:
 `ReadBlob` — is fixed; `ReadBlob` now keeps reading segments until
 `isc_segstr_eof`, the only real end-of-blob signal, instead of
 incorrectly stopping on the first `rc == 0`.)
+
+### `NUMERIC(18,s)` / `DECIMAL(18,s)` — the int64 scaled-integer domain
+
+Firebird stores dialect-3 `NUMERIC`/`DECIMAL` with precision 10–18 as a
+**64-bit scaled integer**. That physical int64 carries values up to
+±(2^63−1) scaled, while DuckDB's default projection for these columns,
+`DECIMAL(18,s)`, tops out at 10^18−1 scaled — a full order of magnitude
+narrower. Values past the DuckDB ceiling are written unchanged into the
+int64-backed `DECIMAL(18,s)` vector, so:
+
+- the value **displays** with more precision digits than the declared type
+  allows (the type's domain is silently violated);
+- innocent arithmetic **fails loudly** on the extreme values — e.g. the
+  classic sentinel `NUMERIC(18,6) = -9223372036854.775808` (scaled value
+  `INT64_MIN`) raises `Out of Range Error: Overflow in multiplication of
+  DECIMAL(18)` for `col * 2` and `Overflow in negation` for `abs(col)`;
+- downstream consumers that trust the declared `DECIMAL(18,s)` precision
+  (dbt models, BI tools, CTAS targets) mis-handle the out-of-domain rows.
+
+`numeric_widen_int64=true` — a `firebird_scan` named parameter or an
+ATTACH option — projects these columns as **`DECIMAL(38,s)`** instead,
+which is hugeint-backed and lossless for the entire int64 scaled range:
+
+```sql
+SELECT N18_6 FROM firebird_scan('C:/data/erp.fdb', 'LEDGER',
+                                numeric_widen_int64=true)
+WHERE N18_6 <= -9223372036854.775808;
+
+ATTACH 'C:/data/erp.fdb' AS erp (TYPE firebird, numeric_widen_int64 true);
+```
+
+Scope and behavior:
+
+- Applies **only** to int64-backed scaled numerics (precision 10–18,
+  scale ≠ 0). `NUMERIC(18,0)` stays `BIGINT`; narrower scaled numerics
+  (precision 1–9) already fit their `DECIMAL(4,s)`/`DECIMAL(9,s)`;
+  INT128-backed numerics (precision 19+) were already `DECIMAL(38,s)`.
+- Both the **declared column type** and the **fetch vector** change
+  together (the fetch sign-extends the scaled int64 into the hugeint
+  vector), including through view type reconciliation.
+- Default is `false`: without the flag the `DECIMAL(18,s)` mapping and
+  fetch are byte-for-byte the historical behavior.
+- `firebird_type_audit` flags every column affected by this option with
+  the stable `int64_numeric_widenable` finding (see above), so you can
+  size the impact across a real schema before flipping the flag.
 
 ### Charset handling of `CHARACTER SET NONE` text filters
 

@@ -174,7 +174,7 @@ bool DatabaseCharsetIsNone(FirebirdConnection &conn) {
 static std::pair<FirebirdColumnDesc, LogicalType> MapFirebirdColumn(
     std::string name, int16_t field_type, int16_t sub_type, int16_t scale,
     int16_t length, int16_t charset_id, int16_t null_flag,
-    NoneEncoding none_encoding) {
+    NoneEncoding none_encoding, bool numeric_widen_int64) {
     FirebirdColumnDesc desc;
     desc.name             = std::move(name);
     desc.sqltype          = field_type;
@@ -226,7 +226,7 @@ static std::pair<FirebirdColumnDesc, LogicalType> MapFirebirdColumn(
         (is_text || is_blob_subtype_text)) {
         lt = LogicalType::BLOB;
     } else {
-        lt = FirebirdToDuckDBType(desc);
+        lt = FirebirdToDuckDBType(desc, numeric_widen_int64);
     }
     return {std::move(desc), lt};
 }
@@ -236,7 +236,8 @@ void LoadTableSchema(FirebirdConnection &conn,
                      duckdb::vector<std::string> &out_names,
                      duckdb::vector<LogicalType> &out_types,
                      duckdb::vector<FirebirdColumnDesc> &out_descs,
-                     NoneEncoding none_encoding) {
+                     NoneEncoding none_encoding,
+                     bool numeric_widen_int64) {
     // Firebird stores identifiers upper-cased unless quoted at creation; we
     // upper-case here so callers can pass either form.
     std::string upper = table_name;
@@ -269,7 +270,7 @@ void LoadTableSchema(FirebirdConnection &conn,
         auto mapped = MapFirebirdColumn(
             cursor->GetText(0), cursor->GetShort(1), cursor->GetShort(2),
             cursor->GetShort(3), cursor->GetShort(4), cursor->GetShort(5),
-            cursor->GetShort(6), none_encoding);
+            cursor->GetShort(6), none_encoding, numeric_widen_int64);
         out_names.push_back(mapped.first.name);
         out_types.push_back(mapped.second);
         out_descs.push_back(std::move(mapped.first));
@@ -287,7 +288,8 @@ void LoadTableSchema(FirebirdConnection &conn,
 // grouping; rows are ORDER BY relation so each table's columns arrive
 // contiguously.
 duckdb::vector<FirebirdTableSchema> LoadAllTableSchemas(
-    FirebirdConnection &conn, NoneEncoding none_encoding) {
+    FirebirdConnection &conn, NoneEncoding none_encoding,
+    bool numeric_widen_int64) {
     // Same projection as LoadTableSchema's per-table query, plus the relation
     // name as the grouping key and a JOIN to RDB$RELATIONS so we apply the
     // identical user-relation filter the catalog discovery query uses
@@ -319,7 +321,7 @@ duckdb::vector<FirebirdTableSchema> LoadAllTableSchemas(
         auto mapped = MapFirebirdColumn(
             cursor->GetText(1), cursor->GetShort(2), cursor->GetShort(3),
             cursor->GetShort(4), cursor->GetShort(5), cursor->GetShort(6),
-            cursor->GetShort(7), none_encoding);
+            cursor->GetShort(7), none_encoding, numeric_widen_int64);
         if (!current || current->table_name != rel) {
             FirebirdTableSchema ts;
             ts.table_name = rel;
@@ -493,6 +495,9 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
         else if (key == "none_pushdown") {
             bind->none_pushdown = val.GetValue<bool>();
         }
+        else if (key == "numeric_widen_int64") {
+            bind->numeric_widen_int64 = val.GetValue<bool>();
+        }
     }
     // v0.5 contract: offset requires limit. Pure offset is a "skip then
     // drain" pattern that is both expensive (Firebird still streams the
@@ -560,7 +565,7 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
     bind->db_charset_none = DatabaseCharsetIsNone(conn);
     LoadTableSchema(conn, bind->table_name,
                     bind->column_names, bind->column_types, bind->column_descs,
-                    bind->none_encoding);
+                    bind->none_encoding, bind->numeric_widen_int64);
 
     // PK probe is only worth its three RDB$ round-trips if we might actually
     // parallelize, OR if we're paging and need a safe, cheap ORDER BY
@@ -599,7 +604,8 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
     // "might be a view" rather than a hard guarantee.
     bind->is_view = ReconcileViewColumnTypes(
         conn, bind->table_name, bind->column_names,
-        bind->column_types, bind->column_descs);
+        bind->column_types, bind->column_descs,
+        bind->numeric_widen_int64);
 
     // Pagination-safety view-shape analysis (Smart Scan Planning Report) —
     // still gated to the paginated, PK-less case only; expensive
@@ -2004,6 +2010,7 @@ TableFunction GetFirebirdScanFunction() {
     fn.named_parameters["row_offset"]    = LogicalType::BIGINT;
     fn.named_parameters["none_encoding"] = LogicalType::VARCHAR;
     fn.named_parameters["none_pushdown"] = LogicalType::BOOLEAN;
+    fn.named_parameters["numeric_widen_int64"] = LogicalType::BOOLEAN;
 
     // Pushdown advertisements — DuckDB's planner now knows it can hand us
     // narrowed column lists and TableFilterSet entries.

@@ -127,6 +127,19 @@ struct FirebirdBindData : public TableFunctionData {
     // cases. Has no effect with 'strict' (filters already push as valid
     // UTF-8) or 'blob' (columns are DuckDB BLOBs). Default false.
     bool none_pushdown = false;
+    // G3 opt-in: when true, NUMERIC/DECIMAL columns physically stored as a
+    // 64-bit scaled integer (SQL_INT64, scale != 0) project as DECIMAL(38,
+    // scale) instead of DECIMAL(18, scale) — both the declared column type
+    // and the fetch vector. Firebird's int64 carries scaled values up to
+    // ±(2^63−1) while DECIMAL(18,s) tops out at 10^18−1 scaled, so extreme
+    // values (e.g. NUMERIC(18,6) = -9223372036854.775808, scaled = INT64_MIN)
+    // are silently corrupted in the narrow projection; DECIMAL(38,s) is
+    // hugeint-backed and lossless for the whole int64 range. The fetch path
+    // sign-extends the scaled int64 into the hugeint vector. Default false —
+    // without the flag the DECIMAL(18,s) mapping and fetch are byte-for-byte
+    // the historical behaviour. Must be the same value on both the schema
+    // load (declared type) and the fetch (vector write) for every scan.
+    bool numeric_widen_int64 = false;
     // True when RDB$DATABASE.RDB$CHARACTER_SET_NAME = NONE. Drives
     // the warning + influences pushdown safety (text-filter literals
     // are UTF-8 in DuckDB and may not round-trip against NONE bytes).
@@ -157,12 +170,17 @@ struct FirebirdBindData : public TableFunctionData {
 //
 // `out_descs` carries the raw Firebird per-column metadata; the caller
 // uses it to detect NONE columns and gate filter pushdown accordingly.
+//
+// `numeric_widen_int64` is the G3 opt-in (see FirebirdBindData): true
+// projects int64-backed NUMERIC/DECIMAL(scale!=0) as DECIMAL(38,s). Both
+// out_types and out_descs stay consistent with whichever value is passed.
 void LoadTableSchema(FirebirdConnection &conn,
                      const std::string &table_name,
                      duckdb::vector<std::string> &out_names,
                      duckdb::vector<LogicalType> &out_types,
                      duckdb::vector<FirebirdColumnDesc> &out_descs,
-                     NoneEncoding none_encoding = NoneEncoding::WIN1252);
+                     NoneEncoding none_encoding = NoneEncoding::WIN1252,
+                     bool numeric_widen_int64 = false);
 
 // One resolved table schema, as produced by LoadAllTableSchemas. The three
 // column vectors are parallel (same length / ordering), matching the
@@ -186,7 +204,8 @@ struct FirebirdTableSchema {
 // mirroring the RDB$RELATIONS filter used by the catalog discovery query.
 duckdb::vector<FirebirdTableSchema> LoadAllTableSchemas(
     FirebirdConnection &conn,
-    NoneEncoding none_encoding = NoneEncoding::WIN1252);
+    NoneEncoding none_encoding = NoneEncoding::WIN1252,
+    bool numeric_widen_int64 = false);
 
 // Reads `RDB$DATABASE.RDB$CHARACTER_SET_NAME`. Returns true when the
 // database-level default is NONE. Best-effort: any RDB$ error returns
