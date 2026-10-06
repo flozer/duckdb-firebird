@@ -1,6 +1,7 @@
 #include "firebird_scanner.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <limits>
@@ -14,6 +15,7 @@
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
@@ -57,6 +59,12 @@ struct FirebirdGlobalState : public GlobalTableFunctionState {
     std::vector<PartitionSpec> partitions;
     idx_t next_partition = 0;
     idx_t max_threads = 1;
+
+    // G1 observability — firebird_unpushed_mode fires at most once per
+    // scan. The first partition cursor open that sees residual filters
+    // wins the exchange(); every other worker (and every later partition
+    // of this same query) observes true and skips straight past.
+    std::atomic<bool> unpushed_reported{false};
 
     // Pushdown context captured at init time.
     std::vector<column_t>       column_ids;
@@ -107,6 +115,23 @@ struct FirebirdLocalState : public LocalTableFunctionState {
     optional_idx slice_offset;
     idx_t rows_skipped = 0;
     idx_t rows_emitted  = 0;
+    // G4 error context - cumulative rows this worker has pulled off its
+    // cursors (across Scan() calls and partition handoffs). Unlike
+    // rows_skipped/rows_emitted it counts EVERY successful Fetch(),
+    // including local-slice skips: the number that matters when a
+    // long-running cursor dies mid-scan is "how far did THIS worker
+    // get". Under parallel scans each worker has its own connection and
+    // cursor, so the count in the error message is per-worker, not the
+    // query-wide total.
+    idx_t rows_read = 0;
+    // G5 — payload-byte estimate drained from the active cursor since
+    // the last flush into the per-query telemetry record (and, on the
+    // ATTACH path, into the catalog pool's lifetime counter). The
+    // statement counts RowWidthBytes() per Fetch() plus actual BLOB
+    // segment bytes; we drain (TakeBytesRead) before every cursor
+    // handoff/reset and at the end of every Scan() call so partition
+    // handoffs and multi-partition workers never lose bytes.
+    int64_t bytes_fetched = 0;
 
     ~FirebirdLocalState() override {
         // Order matters: the cursor has to be torn down before the
@@ -166,7 +191,7 @@ bool DatabaseCharsetIsNone(FirebirdConnection &conn) {
 static std::pair<FirebirdColumnDesc, LogicalType> MapFirebirdColumn(
     std::string name, int16_t field_type, int16_t sub_type, int16_t scale,
     int16_t length, int16_t charset_id, int16_t null_flag,
-    NoneEncoding none_encoding) {
+    NoneEncoding none_encoding, bool numeric_widen_int64) {
     FirebirdColumnDesc desc;
     desc.name             = std::move(name);
     desc.sqltype          = field_type;
@@ -218,7 +243,7 @@ static std::pair<FirebirdColumnDesc, LogicalType> MapFirebirdColumn(
         (is_text || is_blob_subtype_text)) {
         lt = LogicalType::BLOB;
     } else {
-        lt = FirebirdToDuckDBType(desc);
+        lt = FirebirdToDuckDBType(desc, numeric_widen_int64);
     }
     return {std::move(desc), lt};
 }
@@ -228,7 +253,8 @@ void LoadTableSchema(FirebirdConnection &conn,
                      duckdb::vector<std::string> &out_names,
                      duckdb::vector<LogicalType> &out_types,
                      duckdb::vector<FirebirdColumnDesc> &out_descs,
-                     NoneEncoding none_encoding) {
+                     NoneEncoding none_encoding,
+                     bool numeric_widen_int64) {
     // Firebird stores identifiers upper-cased unless quoted at creation; we
     // upper-case here so callers can pass either form.
     std::string upper = table_name;
@@ -261,7 +287,7 @@ void LoadTableSchema(FirebirdConnection &conn,
         auto mapped = MapFirebirdColumn(
             cursor->GetText(0), cursor->GetShort(1), cursor->GetShort(2),
             cursor->GetShort(3), cursor->GetShort(4), cursor->GetShort(5),
-            cursor->GetShort(6), none_encoding);
+            cursor->GetShort(6), none_encoding, numeric_widen_int64);
         out_names.push_back(mapped.first.name);
         out_types.push_back(mapped.second);
         out_descs.push_back(std::move(mapped.first));
@@ -279,7 +305,8 @@ void LoadTableSchema(FirebirdConnection &conn,
 // grouping; rows are ORDER BY relation so each table's columns arrive
 // contiguously.
 duckdb::vector<FirebirdTableSchema> LoadAllTableSchemas(
-    FirebirdConnection &conn, NoneEncoding none_encoding) {
+    FirebirdConnection &conn, NoneEncoding none_encoding,
+    bool numeric_widen_int64) {
     // Same projection as LoadTableSchema's per-table query, plus the relation
     // name as the grouping key and a JOIN to RDB$RELATIONS so we apply the
     // identical user-relation filter the catalog discovery query uses
@@ -311,7 +338,7 @@ duckdb::vector<FirebirdTableSchema> LoadAllTableSchemas(
         auto mapped = MapFirebirdColumn(
             cursor->GetText(1), cursor->GetShort(2), cursor->GetShort(3),
             cursor->GetShort(4), cursor->GetShort(5), cursor->GetShort(6),
-            cursor->GetShort(7), none_encoding);
+            cursor->GetShort(7), none_encoding, numeric_widen_int64);
         if (!current || current->table_name != rel) {
             FirebirdTableSchema ts;
             ts.table_name = rel;
@@ -482,6 +509,28 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
             // accepted spellings.
             bind->none_encoding = ParseNoneEncoding(val.ToString());
         }
+        else if (key == "none_pushdown") {
+            bind->none_pushdown = val.GetValue<bool>();
+        }
+        else if (key == "numeric_widen_int64") {
+            bind->numeric_widen_int64 = val.GetValue<bool>();
+        }
+    }
+    // G4 session stability - keepalive for long fetches. Read at bind
+    // time so the connection opened right below for schema discovery,
+    // every worker connection opened in InitLocal, and the bind data
+    // itself all carry the same interval. 0 (default) = DPB item not
+    // sent. ValidateDummyPacketInterval rejects negative / oversized
+    // values with the unit in the message.
+    {
+        Value keepalive;
+        if (context.TryGetCurrentSetting("firebird_dummy_packet_interval",
+                                         keepalive) &&
+            !keepalive.IsNull()) {
+            const int64_t secs = keepalive.GetValue<int64_t>();
+            ValidateDummyPacketInterval(secs);
+            bind->conn_info.dummy_packet_interval_secs = secs;
+        }
     }
     // v0.5 contract: offset requires limit. Pure offset is a "skip then
     // drain" pattern that is both expensive (Firebird still streams the
@@ -549,7 +598,7 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
     bind->db_charset_none = DatabaseCharsetIsNone(conn);
     LoadTableSchema(conn, bind->table_name,
                     bind->column_names, bind->column_types, bind->column_descs,
-                    bind->none_encoding);
+                    bind->none_encoding, bind->numeric_widen_int64);
 
     // PK probe is only worth its three RDB$ round-trips if we might actually
     // parallelize, OR if we're paging and need a safe, cheap ORDER BY
@@ -588,7 +637,8 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
     // "might be a view" rather than a hard guarantee.
     bind->is_view = ReconcileViewColumnTypes(
         conn, bind->table_name, bind->column_names,
-        bind->column_types, bind->column_descs);
+        bind->column_types, bind->column_descs,
+        bind->numeric_widen_int64);
 
     // Pagination-safety view-shape analysis (Smart Scan Planning Report) —
     // still gated to the paginated, PK-less case only; expensive
@@ -892,6 +942,26 @@ static bool OpenNextPartitionCursor(ClientContext &ctx,
             }
         }
         GetObservabilityState(ctx)->RecordQuery(rec, log_size);
+
+        // G1 observability — firebird_unpushed_mode check point.
+        //
+        // Deterministic per-query point: the residual set is fully known
+        // here (Build() result + gated complex filters) and is identical
+        // for every partition of this scan, because gstate.filters,
+        // gstate.column_ids and bind.gated_complex_reasons are per-query,
+        // not per-partition. The atomic on the global state lets exactly
+        // one worker report per query. Costs:
+        //   * no residual filters -> one vector::empty() test, nothing else;
+        //   * silent mode (default) -> one setting read per QUERY (the
+        //     exchange() makes later partitions skip the read entirely);
+        //   * warn/error -> fires once, BEFORE OpenCursor, so 'error'
+        //     fails the query before any row is fetched (fail-fast for
+        //     long loads). Covers the direct firebird_scan() path and the
+        //     ATTACH path alike — both run through this function.
+        if (!rec.not_pushed_reasons.empty() &&
+            !gstate.unpushed_reported.exchange(true)) {
+            HandleUnpushedFilters(ctx, rec.not_pushed_reasons);
+        }
     }
 
     {
@@ -979,14 +1049,42 @@ static void FirebirdScanFunction(ClientContext &ctx,
                 if (!OpenNextPartitionCursor(ctx, data, local)) break;
             }
             auto t0 = std::chrono::steady_clock::now();
-            const bool got = local.cursor->Fetch();
+            const bool got = [&]() {
+                try {
+                    return local.cursor->Fetch();
+                } catch (const std::exception &e) {
+                    // G4 error context - the -504 / -902 fetch-death
+                    // path. Only the data Fetch() of a scan cursor is
+                    // wrapped (OpenCursor has its own catch below; the
+                    // outer catch only records telemetry). Re-throw an
+                    // IOException that keeps the original message and
+                    // attaches what a human needs: which table, how
+                    // far this worker got, the keepalive lever, and
+                    // where the exact remote SQL lives. The outer
+                    // catch then stores this enriched text in
+                    // firebird_last_query().error_message.
+                    throw IOException(
+                        "Firebird fetch failed for table '" + bind.table_name +
+                        "' after " + std::to_string(local.rows_read) +
+                        " rows in this scan. The connection/cursor may have "
+                        "been dropped (idle NAT/firewall timeout on long "
+                        "fetches - consider SET "
+                        "firebird_dummy_packet_interval = 60). Inspect "
+                        "firebird_last_query() for the exact remote SQL. "
+                        "Original error: " + std::string(e.what()));
+                }
+            }();
             auto t1 = std::chrono::steady_clock::now();
             fetch_us += std::chrono::duration_cast<std::chrono::microseconds>(
                             t1 - t0).count();
             if (!got) {
+                // G5 — cursor exhausted: keep its byte count before the
+                // statement is destroyed.
+                local.bytes_fetched += local.cursor->TakeBytesRead();
                 local.cursor.reset();
                 continue;
             }
+            ++local.rows_read;
             // Local-slice fallback (case 4 of the pagination decision
             // order): no ROWS clause was pushed for this scan, so
             // row_limit/row_offset must be enforced here instead of
@@ -999,6 +1097,8 @@ static void FirebirdScanFunction(ClientContext &ctx,
                 }
                 if (local.slice_limit.IsValid() &&
                     local.rows_emitted >= local.slice_limit.GetIndex()) {
+                    // G5 — drain before dropping the slice-capped cursor.
+                    local.bytes_fetched += local.cursor->TakeBytesRead();
                     local.cursor.reset();
                     break;
                 }
@@ -1021,9 +1121,25 @@ static void FirebirdScanFunction(ClientContext &ctx,
     local.fetch_chunk.SetCardinality(row);
 
     {
+        // G5 — fold this Scan() call's drained payload-byte estimate into
+        // the per-query telemetry record, and (ATTACH path only) into the
+        // catalog pool's lifetime counter. Direct firebird_scan() has no
+        // pool, so it updates only the per-query record — it belongs to
+        // no catalog. Scans through an attached catalog land in BOTH:
+        // the per-query estimate and the per-catalog accumulation.
+        if (local.cursor) {
+            local.bytes_fetched += local.cursor->TakeBytesRead();
+        }
         auto obs = GetObservabilityState(ctx);
         if (row > 0) {
             obs->AddRows(static_cast<int64_t>(row));
+        }
+        if (local.bytes_fetched > 0) {
+            obs->AddBytes(local.bytes_fetched);
+            if (bind.pool) {
+                bind.pool->AddBytesReadEstimate(local.bytes_fetched);
+            }
+            local.bytes_fetched = 0;
         }
         if (fetch_us > 0) {
             obs->AddFirebirdTimeUs(fetch_us);
@@ -1470,6 +1586,253 @@ static bool FirebirdScanSupportsPushdownType(const FunctionData &bind_data,
     return !is_text_or_text_blob;
 }
 
+// ---------------------------------------------------------------------------
+//  G2 — `none_pushdown`: opt-in pushdown of `=` / IN on CHARACTER SET NONE
+//  CHAR/VARCHAR columns under WIN1252 / ISO-8859-1 transcoding.
+// ---------------------------------------------------------------------------
+//
+// Firebird stores NONE text as raw bytes and compares those bytes
+// byte-by-byte (binary collation). DuckDB literals are UTF-8, so a plain
+// bind or inline UTF-8 literal cannot match, say, Windows-1252 stored bytes
+// ('São Paulo' is `53 E3 6F ...` on disk vs `53 C3 A3 6F ...` in UTF-8).
+// The fix is simple and lossless for encodable text: re-encode each UTF-8
+// filter literal into the *target storage encoding's bytes* and inline
+// those bytes in the remote SQL literal. The server then compares the
+// stored bytes with the literal bytes directly.
+//
+// Scope (deliberate):
+//   * `=` and `IN (constants)` only. Ranges (`<`, `<=`, `>`, `>=`) are NOT
+//     pushed: byte order in a single-byte encoding does not always agree
+//     with Unicode code-point order (the CP1252 0x80–0x9F hole), so a
+//     transcoded range predicate could match a different row set than
+//     DuckDB's code-point semantics. NOT IN / LIKE keep the existing
+//     NONE_CHARSET gating.
+//   * CHAR / VARCHAR only (SQL_TEXT / SQL_VARYING). Firebird cannot compare
+//     BLOB values with `=` / IN at all, so NONE text BLOBs never take this
+//     path.
+//   * WIN1252 and ISO_8859_1 modes only. STRICT already pushes valid UTF-8
+//     through the TableFilter path; BLOB columns are DuckDB BLOBs whose
+//     filters never reach the text matcher below.
+//
+// Fallback: any literal that cannot be represented in the target encoding
+// (e.g. '€' under ISO-8859-1, Cyrillic under WIN1252) leaves the filter in
+// DuckDB — the planner re-applies it above the scan — and records the
+// stable NONE_CHARSET reason so telemetry and the firebird_unpushed_mode
+// guard stay truthful.
+
+// Windows-1252 maps the 0x80–0x9F range to a fixed set of Unicode
+// codepoints (the "CP1252 hole"). Five byte slots are unallocated; bytes
+// stored there have no round-trippable Unicode value and make literals
+// containing them unencodable.
+struct Win1252Special {
+    uint8_t  byte;
+    uint32_t codepoint;
+};
+
+static constexpr Win1252Special kWin1252Special[] = {
+    {0x80, 0x20AC}, // EURO SIGN
+    {0x82, 0x201A}, // SINGLE LOW-9 QUOTATION MARK
+    {0x83, 0x0192}, // LATIN SMALL LETTER F WITH HOOK
+    {0x84, 0x201E}, // DOUBLE LOW-9 QUOTATION MARK
+    {0x85, 0x2026}, // HORIZONTAL ELLIPSIS
+    {0x86, 0x2020}, // DAGGER
+    {0x87, 0x2021}, // DOUBLE DAGGER
+    {0x88, 0x02C6}, // MODIFIER LETTER CIRCUMFLEX ACCENT
+    {0x89, 0x2030}, // PER MILLE SIGN
+    {0x8A, 0x0160}, // LATIN CAPITAL LETTER S WITH CARON
+    {0x8B, 0x2039}, // SINGLE LEFT-POINTING ANGLE QUOTATION MARK
+    {0x8C, 0x0152}, // LATIN CAPITAL LIGATURE OE
+    {0x8E, 0x017D}, // LATIN CAPITAL LETTER Z WITH CARON
+    {0x91, 0x2018}, // LEFT SINGLE QUOTATION MARK
+    {0x92, 0x2019}, // RIGHT SINGLE QUOTATION MARK
+    {0x93, 0x201C}, // LEFT DOUBLE QUOTATION MARK
+    {0x94, 0x201D}, // RIGHT DOUBLE QUOTATION MARK
+    {0x95, 0x2022}, // BULLET
+    {0x96, 0x2013}, // EN DASH
+    {0x97, 0x2014}, // EM DASH
+    {0x98, 0x02DC}, // SMALL TILDE
+    {0x99, 0x2122}, // TRADE MARK SIGN
+    {0x9A, 0x0161}, // LATIN SMALL LETTER S WITH CARON
+    {0x9B, 0x203A}, // SINGLE RIGHT-POINTING ANGLE QUOTATION MARK
+    {0x9C, 0x0153}, // LATIN SMALL LIGATURE OE
+    {0x9E, 0x017E}, // LATIN SMALL LETTER Z WITH CARON
+    {0x9F, 0x0178}, // LATIN CAPITAL LETTER Y WITH DIAERESIS
+};
+
+// Decodes one strict UTF-8 sequence starting at `pos`. On success advances
+// `pos` and returns the codepoint; on any malformed input (bad lead byte,
+// truncated sequence, bad continuation, overlong form, surrogate, or
+// out-of-range codepoint) returns 0xFFFFFFFF and leaves `pos` untouched.
+// DuckDB VARCHAR values are valid UTF-8, but this stays defensive: an
+// unparseable literal must fall back to residual, never crash or emit
+// garbage bytes.
+static bool DecodeUtf8Codepoint(const std::string &s, size_t &pos,
+                                uint32_t &out_cp) {
+    const auto byte_at = [&](size_t i) -> uint32_t {
+        return static_cast<uint8_t>(s[i]);
+    };
+    const uint32_t lead = byte_at(pos);
+    size_t len;
+    uint32_t cp;
+    if (lead < 0x80) {
+        out_cp = lead;
+        pos += 1;
+        return true;
+    } else if ((lead & 0xE0) == 0xC0) {
+        len = 2;
+        cp  = lead & 0x1F;
+    } else if ((lead & 0xF0) == 0xE0) {
+        len = 3;
+        cp  = lead & 0x0F;
+    } else if ((lead & 0xF8) == 0xF0) {
+        len = 4;
+        cp  = lead & 0x07;
+    } else {
+        return false;
+    }
+    if (pos + len > s.size()) return false;
+    for (size_t i = 1; i < len; ++i) {
+        const uint32_t cont = byte_at(pos + i);
+        if ((cont & 0xC0) != 0x80) return false;
+        cp = (cp << 6) | (cont & 0x3F);
+    }
+    // Reject overlong forms, surrogates, and out-of-range codepoints.
+    static constexpr uint32_t kMinCp[] = {0, 0, 0x80, 0x800, 0x10000};
+    if (cp < kMinCp[len] || cp > 0x10FFFF) return false;
+    if (cp >= 0xD800 && cp <= 0xDFFF) return false;
+    out_cp = cp;
+    pos += len;
+    return true;
+}
+
+// Re-encodes a UTF-8 DuckDB literal into the raw bytes of the target NONE
+// transcoding. Returns false when any codepoint has no representation
+// (the caller then leaves the filter residual with reason NONE_CHARSET).
+static bool TryEncodeNoneLiteral(const std::string &utf8, NoneEncoding mode,
+                                 std::string &out_bytes) {
+    out_bytes.clear();
+    out_bytes.reserve(utf8.size());
+    size_t pos = 0;
+    while (pos < utf8.size()) {
+        uint32_t cp;
+        if (!DecodeUtf8Codepoint(utf8, pos, cp)) return false;
+        uint8_t out;
+        if (mode == NoneEncoding::ISO_8859_1) {
+            // Latin-1: every codepoint <= 0xFF is the identical byte
+            // (including the C1 control range); nothing above encodes.
+            if (cp > 0xFF) return false;
+            out = static_cast<uint8_t>(cp);
+        } else { // WIN1252
+            if (cp < 0x80 || (cp >= 0xA0 && cp <= 0xFF)) {
+                out = static_cast<uint8_t>(cp);
+            } else {
+                bool found = false;
+                for (const auto &sp : kWin1252Special) {
+                    if (sp.codepoint == cp) {
+                        out   = sp.byte;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return false;
+            }
+        }
+        out_bytes.push_back(static_cast<char>(out));
+    }
+    return true;
+}
+
+// True when `none_pushdown` opt-in applies for this bind: the caller asked
+// for it and the transcoding target is one of the single-byte encodings
+// where byte-wise comparison is lossless. STRICT needs no help (its filters
+// already push as UTF-8); BLOB columns are not text to DuckDB.
+static bool NonePushdownActive(const FirebirdBindData &bind) {
+    if (!bind.none_pushdown) return false;
+    return bind.none_encoding == NoneEncoding::WIN1252 ||
+           bind.none_encoding == NoneEncoding::ISO_8859_1;
+}
+
+// Firebird charset introducer for the transcoding target. REQUIRED for the
+// inline-literal trick: without an introducer, a DSQL string literal is
+// taken to be in the *connection* charset (UTF8) and isc_dsql_prepare
+// rejects non-UTF-8 bytes with "Malformed string" (verified live). The
+// introducer declares the literal's bytes as WIN1252 / ISO8859_1, skipping
+// connection-charset validation; since the column side is NONE, Firebird
+// then compares byte-by-byte with no transliteration.
+static const char *NonePushdownIntroducer(NoneEncoding mode) {
+    return mode == NoneEncoding::ISO_8859_1 ? "_ISO8859_1 " : "_WIN1252 ";
+}
+
+// True when the column is a NONE *CHAR/VARCHAR* — the only shape the
+// G2 `=` / IN pushdown may target. Text BLOBs are excluded: Firebird does
+// not support `=` / IN comparisons on BLOB values, so an inlined predicate
+// would fail at prepare time on the server.
+static bool IsNoneCharVarcharColumn(const FirebirdColumnDesc &desc) {
+    return desc.character_set_id == 0 &&
+           (desc.sqltype == SQL_TEXT || desc.sqltype == SQL_VARYING);
+}
+
+// Detects `col = 'literal'` (or the flipped `'literal' = col`). DuckDB
+// binds simple comparisons as BoundComparisonExpression COMPARE_EQUAL.
+// Returns the projected column index and the constant's string value.
+// Only VARCHAR constants participate: those are the ones a NONE text
+// column can be compared with under DuckDB's schema for this column.
+static bool TryExtractEquality(Expression &expr, idx_t &out_col,
+                               std::string &out_value) {
+    if (expr.GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) {
+        return false;
+    }
+    auto &cmp = expr.Cast<BoundComparisonExpression>();
+    if (cmp.GetExpressionType() != ExpressionType::COMPARE_EQUAL) return false;
+    auto &lhs = *cmp.left;
+    auto &rhs = *cmp.right;
+    auto *colref = dynamic_cast<BoundColumnRefExpression *>(&lhs);
+    auto *conref = dynamic_cast<BoundConstantExpression *>(&rhs);
+    if (!colref) {
+        // Flipped literal = col.
+        colref = dynamic_cast<BoundColumnRefExpression *>(&rhs);
+        conref = dynamic_cast<BoundConstantExpression *>(&lhs);
+    }
+    if (!colref || !conref) return false;
+    const auto &v = conref->value;
+    if (v.IsNull()) return false;
+    if (v.type().id() != LogicalTypeId::VARCHAR) return false;
+    out_col   = colref->binding.column_index;
+    out_value = v.GetValue<std::string>();
+    return true;
+}
+
+// Detects `col IN ('a', 'b', ...)`. DuckDB emits this as a
+// BoundOperatorExpression with type COMPARE_IN; children[0] is the column,
+// children[1..] are the constants. Only non-NULL VARCHAR constants
+// participate; anything else stays with DuckDB.
+static bool TryExtractInList(Expression &expr, idx_t &out_col,
+                             duckdb::vector<std::string> &out_values) {
+    if (expr.GetExpressionClass() != ExpressionClass::BOUND_OPERATOR) {
+        return false;
+    }
+    auto &op = expr.Cast<BoundOperatorExpression>();
+    if (op.GetExpressionType() != ExpressionType::COMPARE_IN) return false;
+    if (op.children.size() < 2) return false;
+    if (op.children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+        return false;
+    }
+    out_values.clear();
+    for (size_t i = 1; i < op.children.size(); ++i) {
+        auto &child = *op.children[i];
+        if (child.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+            return false;
+        }
+        const auto &v = child.Cast<BoundConstantExpression>().value;
+        if (v.IsNull()) return false;
+        if (v.type().id() != LogicalTypeId::VARCHAR) return false;
+        out_values.push_back(v.GetValue<std::string>());
+    }
+    out_col = op.children[0]->Cast<BoundColumnRefExpression>()
+                  .binding.column_index;
+    return true;
+}
+
 static void FirebirdScanPushdownComplexFilter(
     ClientContext & /*ctx*/, LogicalGet &get, FunctionData *bind_data_p,
     vector<unique_ptr<Expression>> &filters) {
@@ -1556,6 +1919,107 @@ static void FirebirdScanPushdownComplexFilter(
             }
         }
 
+        // --- G2 opt-in: col = 'lit' / col IN ('a','b',...) ----------------
+        // CHARACTER SET NONE CHAR/VARCHAR under WIN1252 / ISO-8859-1
+        // transcoding: re-encode each UTF-8 literal to the storage bytes
+        // and inline it (Firebird compares NONE columns byte-wise, so this
+        // is lossless for encodable literals). Unencodable literals stay in
+        // DuckDB and record NONE_CHARSET. Without the opt-in, or for every
+        // non-equality shape, the pre-existing behaviour is untouched.
+        {
+            idx_t projected_col = 0;
+            std::string eq_value;
+            duckdb::vector<std::string> in_values;
+            const bool is_in   = TryExtractInList(**it, projected_col, in_values);
+            const bool matched = is_in ||
+                TryExtractEquality(**it, projected_col, eq_value);
+            if (matched) {
+                idx_t src;
+                if (!resolve_src_col(projected_col, src)) {
+                    ++it;
+                    continue;
+                }
+                if (!NonePushdownActive(bind)) {
+                    // Opt-in absent: exact pre-G2 behaviour — simple
+                    // comparisons / IN on a NONE text column flow on to
+                    // the TableFilter path, get gated by
+                    // supports_pushdown_type, and are re-applied by DuckDB
+                    // above the scan (invisible to telemetry).
+                    ++it;
+                    continue;
+                }
+                if (src >= bind.column_descs.size()) {
+                    ++it;
+                    continue;
+                }
+                const auto &desc = bind.column_descs[src];
+                if (!IsNoneCharVarcharColumn(desc)) {
+                    if (is_none_text_gated(src)) {
+                        // NONE text BLOB with the opt-in on: Firebird
+                        // cannot evaluate `=` / IN on BLOB values, so this
+                        // can never push. Record the stable gate reason —
+                        // the filter stays in DuckDB (re-applied above).
+                        bind.gated_complex_reasons.push_back("NONE_CHARSET");
+                    }
+                    ++it;
+                    continue;
+                }
+                // Transcode every literal; one failure pushes nothing and
+                // leaves the whole filter with DuckDB.
+                duckdb::vector<std::string> encoded;
+                encoded.reserve(is_in ? in_values.size() : 1);
+                bool all_encoded = true;
+                if (is_in) {
+                    for (const auto &v : in_values) {
+                        std::string bytes;
+                        if (!TryEncodeNoneLiteral(v, bind.none_encoding, bytes)) {
+                            all_encoded = false;
+                            break;
+                        }
+                        encoded.push_back(std::move(bytes));
+                    }
+                } else {
+                    std::string bytes;
+                    all_encoded =
+                        TryEncodeNoneLiteral(eq_value, bind.none_encoding, bytes);
+                    if (all_encoded) encoded.push_back(std::move(bytes));
+                }
+                if (!all_encoded) {
+                    // Conservative fallback: unencodable literal (e.g. '€'
+                    // under ISO-8859-1, Cyrillic under WIN1252). Do NOT
+                    // erase — DuckDB re-applies the original predicate
+                    // above the scan — and record NONE_CHARSET so
+                    // telemetry + firebird_unpushed_mode stay truthful.
+                    bind.gated_complex_reasons.push_back("NONE_CHARSET");
+                    ++it;
+                    continue;
+                }
+                FirebirdBindData::ExtraPredicate ep;
+                const char *introducer =
+                    NonePushdownIntroducer(bind.none_encoding);
+                if (is_in) {
+                    std::string sql = col_expr(src) + " IN (";
+                    for (size_t i = 0; i < encoded.size(); ++i) {
+                        if (i) sql += ", ";
+                        // Doubles embedded single quotes; the payload is
+                        // the re-encoded raw byte string, NOT UTF-8. The
+                        // charset introducer keeps the server from
+                        // validating it as connection-charset UTF-8, so
+                        // the remote SQL intentionally carries those bytes.
+                        sql += std::string(introducer) + SqlLiteral(encoded[i]);
+                    }
+                    sql += ")";
+                    ep.sql = std::move(sql);
+                } else {
+                    ep.sql = col_expr(src) + " = " +
+                             std::string(introducer) + SqlLiteral(encoded[0]);
+                }
+                bind.extra_predicates.push_back(std::move(ep));
+                it = filters.erase(it);
+                continue;
+            }
+        }
+
         // --- col NOT IN (?, ?, ...) --------------------------------------
         {
             idx_t projected_col = 0;
@@ -1624,6 +2088,8 @@ TableFunction GetFirebirdScanFunction() {
     fn.named_parameters["row_limit"]     = LogicalType::BIGINT;
     fn.named_parameters["row_offset"]    = LogicalType::BIGINT;
     fn.named_parameters["none_encoding"] = LogicalType::VARCHAR;
+    fn.named_parameters["none_pushdown"] = LogicalType::BOOLEAN;
+    fn.named_parameters["numeric_widen_int64"] = LogicalType::BOOLEAN;
 
     // Pushdown advertisements — DuckDB's planner now knows it can hand us
     // narrowed column lists and TableFilterSet entries.

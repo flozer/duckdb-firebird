@@ -58,10 +58,17 @@ ViewAnalysis AnalyzeViewSource(FirebirdConnection &conn,
 // view" for other purposes (e.g. pagination-safety decisions) can reuse
 // this return value instead of paying for a second LookupObjectType
 // call.
+//
+// `numeric_widen_int64` (G3) is forwarded to the type mapping so the
+// re-derived view column types use the SAME DECIMAL(38,s) projection the
+// caller's schema load used — otherwise reconciliation would silently
+// narrow a widened int64-backed NUMERIC back to DECIMAL(18,s) and the
+// fetch vector would disagree with the declared type.
 bool ReconcileViewColumnTypes(FirebirdConnection &conn,
                               const std::string &table_name,
                               const duckdb::vector<std::string> &column_names,
                               duckdb::vector<LogicalType> &column_types,
-                              duckdb::vector<FirebirdColumnDesc> &column_descs);
+                              duckdb::vector<FirebirdColumnDesc> &column_descs,
+                              bool numeric_widen_int64 = false);
 
 } // namespace duckdb

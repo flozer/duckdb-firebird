@@ -1,0 +1,247 @@
+# name: test/sql/firebird_none_pushdown.test
+# description: G2 none_pushdown opt-in — push `=` / IN over CHARACTER SET NONE CHAR/VARCHAR
+# group: [firebird]
+#
+# Requires the fixture from scripts/fixture_none_charset.sql applied to a
+# database whose default charset is NONE:
+#   FIREBIRD_NONE_DB    path to the NONE-charset database
+#   ISC_PASSWORD        Firebird SYSDBA password (pattern follows
+#                       firebird_none_charset.test)
+#
+# With none_pushdown=true and none_encoding in {win1252, iso8859_1}, constant
+# `=` and IN literals on NONE CHAR/VARCHAR columns are re-encoded to the
+# storage bytes and pushed behind a charset introducer (_WIN1252/_ISO8859_1):
+# Firebird compares NONE columns byte-by-byte, so the match is lossless for
+# encodable literals. Unencodable literals (e.g. '€' under ISO-8859-1) fall
+# back to DuckDB and record the stable NONE_CHARSET residual reason, so the
+# firebird_unpushed_mode guard reacts.
+#
+# Telemetry note: pushed fragments carry the re-encoded NON-UTF-8 bytes.
+# DuckDB validates VARCHAR on Value construction, so the observability
+# surfaces escape each such byte as `\xNN` (display-only; the wire SQL keeps
+# the real bytes). That is why this test asserts pushed filters via hex().
+#
+# NOT added to the CI workflows (same status as firebird_none_charset.test).
+
+require firebird
+
+require-env FIREBIRD_NONE_DB
+
+require-env ISC_PASSWORD
+
+# --- `=` accented: opt-in pushdown returns the same row as client-side --
+
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_pushdown=true)
+ WHERE LABEL = 'São Paulo';
+----
+2	São Paulo
+
+# The pushed fragment is recorded in telemetry with the re-encoded bytes:
+# "LABEL" = _WIN1252 'S\xE3o Paulo'  (0xE3 = 'ã' in Windows-1252 display).
+query T
+SELECT contains(remote_sql, '_WIN1252') FROM firebird_last_query();
+----
+true
+
+query T
+SELECT hex(pushed_filters[1]) FROM firebird_last_query();
+----
+224C4142454C22203D205F57494E313235322027535C7845336F205061756C6F27
+
+# Without the flag the predicate is filtered by DuckDB above the scan and
+# never reaches the connector — same row, no pushed fragment.
+
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT')
+ WHERE LABEL = 'São Paulo';
+----
+2	São Paulo
+
+query T
+SELECT coalesce(list_contains(pushed_filters, '"LABEL" = ?'), false)
+  FROM firebird_last_query();
+----
+false
+
+# --- IN with several accented values: flag and no-flag agree -----------
+
+query I
+SELECT ID FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_pushdown=true)
+ WHERE LABEL IN ('São Paulo', 'pure ascii', '“hi”')
+ ORDER BY ID;
+----
+1
+2
+3
+
+# Every element transcodes and rides the same pushed IN fragment
+# (display form escapes the raw bytes: \xE3, \x93, \x94).
+query T
+SELECT contains(pushed_filters[1], '_WIN1252 ''S\xE3o Paulo''')
+   AND contains(pushed_filters[1], '_WIN1252 ''pure ascii''')
+   AND contains(pushed_filters[1], '_WIN1252 ''\x93hi\x94''')
+  FROM firebird_last_query();
+----
+true
+
+query I
+SELECT ID FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT')
+ WHERE LABEL IN ('São Paulo', 'pure ascii', '“hi”')
+ ORDER BY ID;
+----
+1
+2
+3
+
+# --- CP1252-specific bytes (curly quotes) transcode through the fixed
+#     0x80-0x9F table ----------------------------------------------------
+
+query I
+SELECT ID FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_pushdown=true)
+ WHERE LABEL = '“hi”';
+----
+3
+
+# --- ISO-8859-1 mode pushes mappable literals too -----------------------
+
+query I
+SELECT ID FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT',
+ none_encoding='iso8859_1', none_pushdown=true)
+ WHERE LABEL = 'São Paulo';
+----
+2
+
+# --- Fallback: unencodable literal stays in DuckDB with the flag on -----
+# '€' (U+20AC) has no ISO-8859-1 byte. The filter must NOT be pushed (it is
+# re-applied above the scan, so results stay correct) and NONE_CHARSET must
+# be recorded so the guard sees it.
+
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT',
+ none_encoding='iso8859_1', none_pushdown=true)
+ WHERE LABEL = '€uro';
+----
+0
+
+query T
+SELECT list_contains(not_pushed_reasons, 'NONE_CHARSET')
+   AND array_length(not_pushed_reasons, 1) = array_length(residual_filters, 1)
+  FROM firebird_last_query();
+----
+true
+
+# --- G1 integration: firebird_unpushed_mode='error' ---------------------
+# The unmappable fallback must fail the scan in error mode...
+
+statement ok
+SET firebird_unpushed_mode = 'error';
+
+statement error
+SELECT ID FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT',
+ none_encoding='iso8859_1', none_pushdown=true)
+ WHERE LABEL = '€uro';
+----
+firebird_unpushed_mode='error'
+
+# ...while the mappable case (pushed!) must NOT fail even in error mode.
+
+query I
+SELECT ID FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_pushdown=true)
+ WHERE LABEL = 'São Paulo';
+----
+2
+
+statement ok
+SET firebird_unpushed_mode = 'silent';
+
+# --- strict: the flag is a no-op (filters already push as valid UTF-8) --
+
+query I
+SELECT ID FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT',
+ none_encoding='strict', none_pushdown=true)
+ WHERE LABEL = 'pure ascii';
+----
+1
+
+# --- blob: the flag is a no-op (NONE columns are DuckDB BLOBs) ----------
+
+query I
+SELECT ID FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT',
+ none_encoding='blob', none_pushdown=true)
+ WHERE LABEL = 'pure ascii';
+----
+1
+
+# --- ATTACH option: none_pushdown true pushes = / IN on NONE columns ----
+
+statement ok
+ATTACH '${FIREBIRD_NONE_DB}' AS att_pd (TYPE firebird, user 'SYSDBA', password 'masterkey',
+ none_encoding 'win1252', none_pushdown true);
+
+query I
+SELECT ID FROM att_pd.main.TXT WHERE LABEL = 'São Paulo';
+----
+2
+
+query T
+SELECT hex(pushed_filters[1]) FROM firebird_last_query();
+----
+224C4142454C22203D205F57494E313235322027535C7845336F205061756C6F27
+
+query I
+SELECT ID FROM att_pd.main.TXT WHERE LABEL IN ('São Paulo', 'pure ascii')
+ ORDER BY ID;
+----
+1
+2
+
+query T
+SELECT hex(pushed_filters[1]) FROM firebird_last_query();
+----
+224C4142454C2220494E20285F57494E313235322027535C7845336F205061756C6F272C205F57494E313235322027707572652061736369692729
+
+# --- firebird_explain_pushdown: a-priori view ---------------------------
+# With the flag the plan shows the re-encoded fragment in pushed_filters...
+
+query T
+SELECT hex(pushed_filters[1]) FROM firebird_explain_pushdown(
+ 'SELECT ID FROM att_pd.main.TXT WHERE LABEL = ''São Paulo''');
+----
+224C4142454C22203D205F57494E313235322027535C7845336F205061756C6F27
+
+statement ok
+DETACH att_pd;
+
+# ...without the flag the stable trigger (NOT IN) shows the gate.
+
+statement ok
+ATTACH '${FIREBIRD_NONE_DB}' AS att_plain (TYPE firebird, user 'SYSDBA', password 'masterkey',
+ none_encoding 'win1252');
+
+query T
+SELECT list_contains(not_pushed_reasons, 'NONE_CHARSET')
+   AND NOT list_contains(not_pushed_reasons, 'UNSUPPORTED_OP')
+  FROM firebird_explain_pushdown(
+ 'SELECT ID FROM att_plain.main.TXT WHERE LABEL NOT IN (''foo'', ''bar'')');
+----
+true
+
+# And the unmappable `=` under the flag explains the fallback a-priori.
+
+statement ok
+DETACH att_plain;
+
+statement ok
+ATTACH '${FIREBIRD_NONE_DB}' AS att_l1 (TYPE firebird, user 'SYSDBA', password 'masterkey',
+ none_encoding 'iso8859_1', none_pushdown true);
+
+query T
+SELECT charset_pushdown_blocked
+  FROM firebird_explain_pushdown(
+ 'SELECT ID FROM att_l1.main.TXT WHERE LABEL = ''€uro''');
+----
+true
+
+statement ok
+DETACH att_l1;

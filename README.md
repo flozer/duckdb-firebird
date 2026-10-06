@@ -11,7 +11,7 @@
   </p>
   <p>
     <a href="LICENSE"><img alt="license MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
-    <a href="https://github.com/flozer/duckdb-firebird/releases/tag/v1.1.0"><img alt="release v1.1.0" src="https://img.shields.io/badge/release-v1.1.0-blue.svg"></a>
+    <a href="https://github.com/flozer/duckdb-firebird/releases/tag/v1.2.0"><img alt="release v1.2.0" src="https://img.shields.io/badge/release-v1.2.0-blue.svg"></a>
     <a href="https://github.com/flozer/duckdb-firebird/actions/workflows/build-linux-fb-matrix.yml"><img alt="linux matrix" src="https://github.com/flozer/duckdb-firebird/actions/workflows/build-linux-fb-matrix.yml/badge.svg"></a>
     <a href="https://github.com/duckdb/community-extensions/pull/1980"><img alt="community extension merged" src="https://img.shields.io/badge/DuckDB%20community-merged-brightgreen.svg"></a>
     <a href="https://duckdb.org/community_extensions/download_metrics"><img alt="total DuckDB Community downloads for firebird" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fflozer%2Fduckdb-firebird%2Fmain%2F.github%2Fbadges%2Fdownloads.json"></a>
@@ -54,7 +54,12 @@ such as GizmoSQL.
   `information_schema.tables` / `information_schema.columns`.
 - **Projection pushdown** - only requested columns are fetched.
 - **Predicate pushdown** - comparisons, `IS NULL`, `BETWEEN`, `IN`, `NOT IN`,
-  `NOT bool`, `AND` / `OR`, and safe `LIKE 'prefix%'` cases.
+  `NOT bool`, `AND` / `OR`, and safe `LIKE 'prefix%'` cases. `=` / `IN` push
+  down except on `CHARACTER SET NONE` text columns — those stay in DuckDB
+  (see `none_encoding`), optionally guarded via
+  `SET firebird_unpushed_mode = 'warn' | 'error'`; the `none_pushdown=true`
+  opt-in pushes `=` / `IN` over NONE CHAR/VARCHAR columns by re-encoding
+  each literal to the storage bytes (lossless byte-wise comparison).
 - **Streaming batches** - rows flow into DuckDB `DataChunk`s instead of a
   whole-table in-memory copy.
 - **Prepared statements + bind variables** - string/date/numeric filters avoid
@@ -63,7 +68,12 @@ such as GizmoSQL.
 - **Parallel PK-range scans** - opt in with `partitions=N`.
 - **Firebird 3/4/5 type mapping** - including `INT128`, `DECIMAL(38)`,
   `TIMESTAMP WITH TIME ZONE`, text BLOBs, binary BLOBs, booleans, dates, and
-  timestamps.
+  timestamps. Int64-backed `NUMERIC(18,s)` defaults to `DECIMAL(18,s)`; the
+  `numeric_widen_int64=true` opt-in (`firebird_scan` parameter or ATTACH
+  option) projects those columns as `DECIMAL(38,s)` so values beyond
+  DuckDB's 18-digit domain (e.g. the scaled-`INT64_MIN` sentinel) survive
+  losslessly. `firebird_type_audit` flags every affected column with the
+  `int64_numeric_widenable` finding.
 - **Diagnostics and metadata bridge** - inspect constraints, indexes,
   generators, domains, dependencies, comments, health, type-fidelity findings
   (`firebird_type_audit`), index profile, table profile alerts, and
@@ -154,6 +164,11 @@ Security note: connection strings may end up in shell history, notebooks,
 DuckDB logs, or BI configuration. Use least-privilege Firebird users and avoid
 committing real credentials.
 
+Long fetches getting killed by NAT/firewall idle timeouts (`-504` cursor
+lost)? `SET firebird_dummy_packet_interval = 60;` arms a wire-level
+keepalive (seconds) on every connection; see the function manual's
+session options.
+
 ## Named Parameters
 
 ```sql
@@ -203,9 +218,12 @@ ATTACH 'C:/legacy/erp.fdb' AS erp
      none_encoding 'win1252');
 ```
 
-When `none_encoding` is not `strict`, text filter pushdown on NONE columns is
-disabled deliberately. DuckDB applies those filters after transcoding so query
-results remain correct.
+When `none_encoding` is not `strict`, text filter pushdown on NONE columns
+is disabled deliberately: DuckDB applies those filters after transcoding so
+query results remain correct. To push `=` / `IN` over NONE CHAR/VARCHAR
+columns anyway — re-encoding each UTF-8 literal to the stored bytes behind a
+charset introducer, lossless under Firebird's byte-wise NONE comparison —
+pass `none_pushdown=true` to `firebird_scan` or the ATTACH options.
 
 ## Metadata
 
@@ -229,24 +247,22 @@ DuckDB behavior.
 
 ## Current Status
 
-Published community release: **v1.0.1** (`INSTALL firebird FROM community`);
-the v1.0.2 descriptor update is submitted as
-[duckdb/community-extensions#2849](https://github.com/duckdb/community-extensions/pull/2849)
-(fully green, awaiting maintainer merge), and the v1.1.0 bump is prepared
-and stacked on top of it. The copy in
+Published community release: **v1.1.0** (`INSTALL firebird FROM
+community`; descriptor merged as
+[duckdb/community-extensions#2888](https://github.com/duckdb/community-extensions/pull/2888)
+on 2026-10-02); the v1.2.0 descriptor update is prepared and gated on
+maintainer authorization. The copy in
 [`community-extensions/description.yml`](community-extensions/description.yml)
-mirrors the latest prepared descriptor.
+mirrors the latest prepared descriptor. Descriptors pin an immutable
+commit SHA in `repo.ref` (catalog convention).
 
-`main` is at **v1.1.0** (see
-[docs/en/release_notes_v1.1.0.md](docs/en/release_notes_v1.1.0.md)):
-v1.0.2's in-band function documentation (all 19 `firebird_*` table
-functions discoverable via `duckdb_functions()`, issue #63) plus row
-estimates and structured required-filter alerts in
-`firebird_profile_table`, active leases and a sanitized `last_error` in
-`firebird_pool_stats`, DECFLOAT coverage in the main CI suite, real
-`partitions > 1` CI coverage, and a validated DuckDB v1.5.6 compatibility
-record (build pin stays v1.5.3 until the community catalog moves its
-target).
+`main` is at **v1.2.0** (see
+[docs/en/release_notes_v1.2.0.md](docs/en/release_notes_v1.2.0.md)):
+v1.1.0 plus the G-queue — `none_pushdown` (`=`/`IN` over CHARACTER SET
+NONE columns), the `firebird_unpushed_mode` guard,
+`numeric_widen_int64` (NUMERIC(18,s) → DECIMAL(38,s)),
+`firebird_dummy_packet_interval` keepalive with fetch-failure context,
+and `bytes_read_estimate` telemetry.
 
 v1.0.1 (see
 [docs/en/release_notes_v1.0.1.md](docs/en/release_notes_v1.0.1.md))
@@ -300,6 +316,11 @@ for full detail.
 | `DECFLOAT(16/34)` lossless fallback (VARCHAR via server-side `CAST`) | Done |
 | Adaptive parallel scan recommendations (shared with scanner planning) | Done |
 | All 19 functions documented in-band in `duckdb_functions()` | Done (v1.0.2) |
+| `none_pushdown`: `=`/`IN` pushdown over CHARACTER SET NONE text | Done (v1.2.0) |
+| `firebird_unpushed_mode` residual-filter guard (silent/warn/error) | Done (v1.2.0) |
+| `numeric_widen_int64`: NUMERIC(18,s) as DECIMAL(38,s), opt-in | Done (v1.2.0) |
+| Keepalive DPB (`firebird_dummy_packet_interval`) + fetch-failure context | Done (v1.2.0) |
+| `bytes_read_estimate` telemetry + per-catalog lifetime total | Done (v1.2.0) |
 
 `firebird_pool_stats('fb')` reports one attached catalog's pool state
 (config + idle queue + active leases + lifetime counters + last error) by

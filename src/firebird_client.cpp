@@ -3,10 +3,12 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/time.hpp"
 #include "duckdb/common/types/timestamp.hpp"
@@ -218,6 +220,28 @@ void FirebirdConnection::Check(const ISC_STATUS *status, const std::string &cont
     throw IOException(msg);
 }
 
+// --- keepalive validation ----------------------------------------------------
+
+// Unit is SECONDS — matches Firebird's DummyPacketInterval in
+// firebird.conf and the isc_dpb_dummy_packet_interval wire item. The
+// DPB payload is a 4-byte integer, so anything past INT32_MAX cannot be
+// encoded and is rejected here rather than silently truncated.
+void ValidateDummyPacketInterval(int64_t seconds) {
+    if (seconds < 0) {
+        throw BinderException(
+            "firebird_dummy_packet_interval must be >= 0 (0 = disabled), "
+            "got %lld (unit: seconds)",
+            static_cast<long long>(seconds));
+    }
+    if (seconds > static_cast<int64_t>(std::numeric_limits<ISC_LONG>::max())) {
+        throw BinderException(
+            "firebird_dummy_packet_interval must fit in a 32-bit DPB "
+            "integer, got %lld (unit: seconds; max %d)",
+            static_cast<long long>(seconds),
+            static_cast<int>(std::numeric_limits<ISC_LONG>::max()));
+    }
+}
+
 // --- DPB / TPB helpers -------------------------------------------------------
 
 static void DpbAppend(std::vector<char> &dpb, char tag, const std::string &val) {
@@ -393,6 +417,21 @@ void FirebirdConnection::Attach() {
         dpb.push_back(isc_dpb_sql_dialect);
         dpb.push_back(1);
         dpb.push_back(static_cast<char>(info_.dialect));
+    }
+    if (info_.dummy_packet_interval_secs > 0) {
+        // G4 session stability — per-attachment keepalive (isc_dpb_dummy_packet_interval).
+        // Numeric DPB item: 1-byte length tag + 4-byte little-endian ISC_LONG,
+        // the canonical encoding for Firebird's numeric DPB parameters.
+        // Unit is seconds (same unit as DummyPacketInterval in firebird.conf).
+        // Default 0 leaves the DPB byte-for-byte identical to the historical
+        // attach — the item is simply never appended.
+        dpb.push_back(isc_dpb_dummy_packet_interval);
+        dpb.push_back(4);
+        const ISC_LONG secs =
+            static_cast<ISC_LONG>(info_.dummy_packet_interval_secs);
+        for (size_t shift = 0; shift < sizeof(ISC_LONG); ++shift) {
+            dpb.push_back(static_cast<char>((secs >> (shift * 8)) & 0xFF));
+        }
     }
 
     ISC_STATUS status[20] = {};
@@ -690,6 +729,14 @@ void FirebirdStatement::AllocateBuffers() {
     buffers_.resize(n);
     indicators_.assign(n, 0);
     columns_.resize(n);
+    // G5 — row width for the bytes_read_estimate: the sum of the
+    // per-column fetch buffer sizes allocated below. These are exactly
+    // the descriptor widths libfbclient fills per fetched row (CHAR
+    // sqllen, VARCHAR sqllen + 2-byte length prefix, fixed numeric /
+    // temporal / tz widths, 8-byte BLOB id frame), so rows_read x
+    // row_width_bytes_ is a stable lower-bound-ish payload estimate.
+    // Computed once here — prepare/describe time — never per fetch.
+    int64_t width = 0;
 
     for (int i = 0; i < n; ++i) {
         XSQLVAR &v = out_sqlda_->sqlvar[i];
@@ -759,11 +806,13 @@ void FirebirdStatement::AllocateBuffers() {
         default:            bufsz = v.sqllen > 0 ? v.sqllen : 8;
         }
         buffers_[i].assign(bufsz, 0);
+        width += static_cast<int64_t>(bufsz);
         v.sqldata = buffers_[i].data();
         // Force nullable so libfbclient writes into our indicator slot.
         v.sqltype = c.sqltype | 1;
         v.sqlind  = &indicators_[i];
     }
+    row_width_bytes_ = width;
 }
 
 bool FirebirdStatement::Fetch() {
@@ -773,6 +822,9 @@ bool FirebirdStatement::Fetch() {
     if (rc != 0) {
         FirebirdConnection::Check(status, "isc_dsql_fetch");
     }
+    // G5 — one row crossed the wire; add this cursor's fixed payload
+    // width. BLOB content is added separately, where ReadBlob() runs.
+    bytes_read_ += row_width_bytes_;
     return true;
 }
 
@@ -899,6 +951,11 @@ std::string FirebirdStatement::ReadBlob(idx_t col) const {
     }
     std::memset(status, 0, sizeof(status));
     isc_close_blob(status, &blob);
+    // G5 — BLOB content does not travel in the XSQLDA row frame (only
+    // its 8-byte id does); it arrives through these isc_get_segment
+    // calls. Count the bytes actually received so scans of BLOB-bearing
+    // tables do not grossly understate the transfer.
+    bytes_read_ += static_cast<int64_t>(out.size());
     return out;
 }
 

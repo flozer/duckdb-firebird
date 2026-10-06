@@ -63,6 +63,15 @@ Supported named parameters include:
 - `row_limit`
 - `row_offset`
 - `partitions`
+- `none_pushdown` — opt-in pushdown of `=` / `IN` over `CHARACTER SET NONE`
+  CHAR/VARCHAR columns when `none_encoding` is `win1252` or `iso8859_1`
+  (default `false`; see [Charset handling of `CHARACTER SET NONE`
+  text filters](#charset-handling-of-character-set-none-text-filters))
+- `numeric_widen_int64` — opt-in: projects int64-backed `NUMERIC`/`DECIMAL`
+  columns with a scale (precision 10–18, i.e. `NUMERIC(18,s)` and friends)
+  as `DECIMAL(38,s)` instead of `DECIMAL(18,s)`, so Firebird's full scaled
+  int64 range survives (default `false`; see [Type mapping
+  notes](#type-mapping-notes))
 - charset-related options documented in the usage guide
 
 Use this when you need one direct table scan without attaching the whole
@@ -148,6 +157,18 @@ ATTACH 'database=C:/data/erp.fdb user=APP_READONLY password=secret'
 
 SELECT *
 FROM fb.main.CUSTOMER;
+```
+
+Options mirror the `firebird_scan` named parameters — `user`, `password`,
+`charset`, `role`, `dialect`, `none_encoding`, `none_pushdown` (opt-in
+pushdown of `=` / `IN` over `CHARACTER SET NONE` CHAR/VARCHAR columns), and
+`numeric_widen_int64` (opt-in `DECIMAL(38,s)` projection for int64-backed
+scaled numerics):
+
+```sql
+ATTACH 'database=C:/data/erp.fdb user=APP_READONLY password=secret'
+  AS fb (TYPE firebird, none_encoding 'win1252', none_pushdown true,
+         numeric_widen_int64 true);
 ```
 
 Prefer `ATTACH` for analytics sessions that query multiple Firebird tables.
@@ -612,14 +633,65 @@ Useful fields include:
   `NULL` when none)
 - elapsed time
 - rows read
+- estimated bytes read from Firebird (`bytes_read_estimate`)
 - parallel scan details
 - connection reuse details
 
-The schema is 18 columns (shared with `firebird_query_log()`). The
+The schema is 19 columns (shared with `firebird_query_log()`). The
 pushdown-explainability columns (`limit_pushed`, `offset_pushed`,
 `not_pushed_reasons`) make it explicit what reached Firebird and why a
-filter stayed local. See `docs/en/observability.md` for the full column
-reference and the reason vocabulary.
+filter stayed local, and `bytes_read_estimate` (added last, G5) supports
+network budgeting before a long scan. See `docs/en/observability.md` for
+the full column reference and the reason vocabulary.
+
+#### `bytes_read_estimate` — what it is and what it counts
+
+fbclient does not expose a wire-traffic meter, so the extension
+**estimates** the transferred payload:
+
+```
+bytes_read_estimate = rows_read × XSQLDA row width + BLOB segment bytes
+```
+
+- **XSQLDA row width** is the sum of the per-column fetch descriptor
+  sizes, fixed once at prepare time: `CHAR(n)` counts `n` bytes,
+  `VARCHAR(n)` counts `n + 2` (length prefix), numerics/temporals count
+  their fixed widths, and a BLOB column counts its 8-byte id frame.
+- **BLOB content** is counted where it is actually read: the segment
+  bytes returned per BLOB are added to the estimate as they cross
+  `isc_get_segment`.
+- **Deterministic**: two identical runs of the same query report the
+  same estimate (same row width, same row count).
+
+It does **not** include: protocol headers and per-row framing, the
+prepare/execute/bind round-trips, paging (`ROWS`) metadata, or the
+connection/attachment handshake. Treat it as a payload lower-bound-ish
+estimate for network budgeting — e.g. "this scan will move roughly X MB"
+— not as an exact byte meter.
+
+Network-budget example (WAN at ~0.3 MB/s — is this scan minutes or
+hours?):
+
+```sql
+SELECT * FROM fb.main.BIG_TABLE LIMIT 0;   -- or any probe scan
+SELECT rows_read, bytes_read_estimate,
+       bytes_read_estimate / rows_read AS bytes_per_row,
+       1.0 * bytes_read_estimate / 1024 / 1024 AS est_mb
+FROM firebird_last_query();
+```
+
+Remedy per `not_pushed_reasons` code (the codes are a stable API):
+
+| Reason | Meaning | Remedy |
+|---|---|---|
+| `NONE_CHARSET` | The filter targets a `CHARACTER SET NONE` text column and was not pushed. With `none_pushdown=true` this means the literal had no byte in the target encoding (e.g. `'€'` under `iso8859_1`) or the column is a NONE text BLOB; without the flag, every text filter on NONE columns is gated. | Use `none_encoding='strict'` for known-UTF-8 data, or set `none_pushdown=true` (direct `firebird_scan` parameter or ATTACH option) to push `=` / `IN` over NONE CHAR/VARCHAR; ranges, `LIKE` and `NOT IN` always stay client-side. Confirm with `firebird_explain_pushdown`. |
+| `UNSUPPORTED_OP` | The filter operator/shape/constant type has no Firebird SQL translation yet. | Simplify the predicate or accept DuckDB-side filtering. |
+| `ROWID_OR_INVALID_COLUMN` | The filter targets the virtual rowid or a column outside the resolved schema. | Filter on real columns instead of `rowid`. |
+| `UNSUPPORTED_PROJECTION_MAPPING` | The filter's projected column could not be mapped back to a source column. | Check the query's column list / projection shape. |
+
+To make residual filters act instead of only report, set
+`SET firebird_unpushed_mode = 'warn' | 'error'` — see
+[Level 5 - Session options](#level-5---session-options).
 
 ### `firebird_explain_pushdown(sql)`
 
@@ -691,6 +763,9 @@ Rejected input (raises an error):
 - `pk_range_column` is `NULL` whenever `pk_range_eligible` is `false`.
 - `planned_partitions` is `NULL` whenever `pk_range_eligible` is `false`.
 
+Each `not_pushed_reasons` code maps to a documented remedy — see the table
+in the [`firebird_last_query()`](#firebird_last_query) section above.
+
 #### Notes on `view_heavy`, `charset_pushdown_blocked`, and `planned_partitions`
 
 - `planned_partitions` is the exact value `firebird_scan` would use for this
@@ -726,6 +801,10 @@ FROM firebird_explain_pushdown(
 
 Returns the in-memory query log for the current DuckDB session.
 
+Each row carries the same 19-column telemetry schema as
+`firebird_last_query()` — including `bytes_read_estimate`, so a rotated
+log keeps the per-query transfer estimates of the session.
+
 The log is bounded by `firebird_query_log_size` and is intended for
 debugging, diagnostics, and support.
 
@@ -744,7 +823,7 @@ SELECT EMP_ID FROM fb.main.EMPLOYEE WHERE EMP_ID = 1;
 SELECT * FROM firebird_pool_stats('fb');
 ```
 
-Output columns (10):
+Output columns (11):
 
 | Column | Type | Notes |
 |---|---|---|
@@ -758,6 +837,7 @@ Output columns (10):
 | `total_discarded` | BIGINT | Lifetime connections destroyed (pool disabled, or idle cap/expiry hit) |
 | `active_connections` | BIGINT | Connections currently leased out and not yet returned via Release |
 | `last_error` | VARCHAR | Sanitized message of the most recent failed connection creation (`NULL` when none); the password is redacted before storage |
+| `bytes_read_estimate` | BIGINT | G5 — lifetime estimate of Firebird payload bytes fetched by scans that ran **inside this catalog** (ATTACH path). Same semantics as the other lifetime counters: process-relative, never reset. Direct `firebird_scan()` calls are **not** included — they belong to no catalog. Estimate definition: see [`firebird_last_query()`](#firebird_last_query) |
 
 It reads only counters and config the pool already tracks, and it does
 **not** lease a connection — calling it never perturbs the pool it reports
@@ -765,8 +845,16 @@ on. The configured values mirror the pool settings read at `ATTACH` time;
 a later `SET` does not retune an existing pool (re-`ATTACH` to apply).
 
 Use it to confirm pooling is actually reusing connections, to size
-`firebird_pool_max_size`, or to verify a `firebird_pool_enabled = false`
-catalog never parks idle connections.
+`firebird_pool_max_size`, to verify a `firebird_pool_enabled = false`
+catalog never parks idle connections — or, with `bytes_read_estimate`,
+to watch how much Firebird payload a whole working session has pulled
+through one catalog (e.g. before/after a heavy extraction):
+
+```sql
+SELECT bytes_read_estimate,
+       1.0 * bytes_read_estimate / 1024 / 1024 AS est_mb_total
+FROM firebird_pool_stats('fb');
+```
 
 `last_error` is populated only for post-`ATTACH` connection-creation
 failures (a failure during `ATTACH` itself never registers a catalog) —
@@ -813,6 +901,7 @@ Finding codes:
 | Code | Meaning |
 | --- | --- |
 | `decfloat_as_varchar` | DECFLOAT(16/34) projected as VARCHAR via server-side `CAST`; text semantics apply to filter comparisons |
+| `int64_numeric_widenable` | int64-backed `NUMERIC`/`DECIMAL` with scale ≠ 0; the physical int64 scaled range exceeds `DECIMAL(18,s)`'s domain — pass `numeric_widen_int64=true` (`firebird_scan` parameter or ATTACH option) to project `DECIMAL(38,s)` losslessly |
 | `int128` | Native INT128 or scale-0 NUMERIC/DECIMAL(19–38) projected as HUGEINT (lossless); some BI tools lack INT128 support |
 | `time_tz` | TIME WITH TIME ZONE; session offset / zone-id handling caveat |
 | `timestamp_tz` | TIMESTAMP WITH TIME ZONE; session offset / zone-id handling caveat |
@@ -828,8 +917,10 @@ Notes:
   catalog schema, not that setting, so the finding is emitted whenever the
   character set is NONE regardless of what `none_encoding` is configured to.
 - `int128` flags native `INT128` and scale-0 `NUMERIC`/`DECIMAL` with
-  precision 19–38 (all projected as HUGEINT). Scaled `NUMERIC`/`DECIMAL`
-  (scale ≠ 0) maps losslessly to DuckDB `DECIMAL` and is not flagged.
+  precision 19–38 (all projected as HUGEINT). `int64_numeric_widenable`
+  covers the scaled int64-backed numerics (precision 10–18, scale ≠ 0);
+  narrower scaled numerics (precision 1–9, SMALLINT/INTEGER-backed) always
+  fit their DuckDB `DECIMAL` and are not flagged.
 
 ### `firebird_health(alias)`
 
@@ -918,6 +1009,36 @@ FROM firebird_health('fb');
 
 Controls the maximum number of query telemetry entries kept in memory.
 
+### `SET firebird_unpushed_mode = 'silent' | 'warn' | 'error'`
+
+Controls what happens when a Firebird scan keeps filters in DuckDB that
+were **not pushed down** to Firebird — the same signal telemetry surfaces
+in `not_pushed_reasons` (`NONE_CHARSET`, `UNSUPPORTED_OP`,
+`ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING`).
+
+- `silent` (default) — current behaviour: telemetry only, zero extra cost.
+- `warn` — one warning per scan through DuckDB's native warning channel
+  (the CLI prints it to the console; embedded hosts receive it through the
+  logging subsystem, and `warnings_as_errors` promotes it to an exception).
+- `error` — the scan fails with an Invalid Input Error that lists the
+  residual filter count, the reason codes present, and the per-reason
+  remedy. The check runs once per scan, before any row is fetched, so
+  arming it before a long load fails fast.
+
+Example — arm the guard before a long load:
+
+```sql
+SET firebird_unpushed_mode = 'error';
+COPY (SELECT * FROM fb.main.BIG_TABLE) TO 'load.parquet';
+-- fails here if any filter stayed residual, with the reason + remedy
+
+SET firebird_unpushed_mode = 'silent';   -- back to default in-session
+```
+
+An unknown value (`'warnn'`, ...) is rejected with an Invalid Input Error
+as soon as a scan has residual filters to report — a typo never silently
+disables a guard you asked for.
+
 ### `SET firebird_pool_enabled = true|false`
 
 Enables or disables the ATTACH connection pool for future attaches.
@@ -929,6 +1050,53 @@ Controls the maximum number of idle connections kept by the pool.
 ### `SET firebird_pool_idle_timeout_ms = MS`
 
 Controls how long idle pooled connections may remain reusable.
+
+### `SET firebird_dummy_packet_interval = SECONDS`
+
+Keepalive for long-running fetches. When set above `0`, **every**
+connection the extension opens — `firebird_scan()` per-call connections
+and `ATTACH` connections, pooled or fresh — sends
+`isc_dpb_dummy_packet_interval` in the attach DPB, asking Firebird to
+emit a dummy packet on the wire every `SECONDS` so a connection silently
+dropped by a NAT gateway / stateful firewall is detected during the
+fetch instead of surfacing later as a dead cursor
+(`-504 Unable to complete request... cursor lost`) or connection
+shutdown (`-902`).
+
+- **Unit: seconds** — the same unit as `DummyPacketInterval` in the
+  server's `firebird.conf` and the Firebird wire-protocol docs.
+- **Default `0` = disabled**: the DPB item is not sent and the attach
+  is byte-for-byte identical to previous versions.
+- Read at `firebird_scan()` bind time and at `ATTACH` time. For an
+  existing attachment a later `SET` does not apply — `DETACH` + `ATTACH`
+  again (the pool templates its connections from the info captured at
+  attach).
+- Negative values (or values past the 32-bit DPB payload) are rejected
+  with a Binder Exception naming the unit:
+  `firebird_dummy_packet_interval must be >= 0 (0 = disabled), got -5 (unit: seconds)`.
+
+Example — arm the keepalive before a long WAN extract:
+
+```sql
+SET firebird_dummy_packet_interval = 60;   -- seconds
+ATTACH 'firebird://srv:/data/erp.fdb' AS erp (TYPE firebird);
+COPY (SELECT * FROM erp.main.BIG_TABLE) TO 'load.parquet';
+
+SET firebird_dummy_packet_interval = 0;    -- back to default in-session
+```
+
+When a fetch does die mid-scan despite this, the scanner raises an
+`IO Error` with actionable context (table, rows already read by the
+worker, this setting as the remedy, and a pointer to
+`firebird_last_query()`) — see [observability](observability.md).
+Honest caveat: the per-attachment DPB value depends on the server
+honoring it. Firebird issue
+[#8266](https://github.com/FirebirdSQL/firebird/issues/8266) reports
+that on some server versions the value is parsed but not acted upon,
+and the server-side `DummyPacketInterval` configuration is what
+actually schedules dummy packets. Setting it here is still the correct
+client-side ask and is harmless on servers that ignore it; the
+error-context message (below) is the reliable half of the diagnosis.
 
 ## Type mapping notes
 
@@ -953,6 +1121,120 @@ One known, tracked exception to this policy exists today:
 `ReadBlob` — is fixed; `ReadBlob` now keeps reading segments until
 `isc_segstr_eof`, the only real end-of-blob signal, instead of
 incorrectly stopping on the first `rc == 0`.)
+
+### `NUMERIC(18,s)` / `DECIMAL(18,s)` — the int64 scaled-integer domain
+
+Firebird stores dialect-3 `NUMERIC`/`DECIMAL` with precision 10–18 as a
+**64-bit scaled integer**. That physical int64 carries values up to
+±(2^63−1) scaled, while DuckDB's default projection for these columns,
+`DECIMAL(18,s)`, tops out at 10^18−1 scaled — a full order of magnitude
+narrower. Values past the DuckDB ceiling are written unchanged into the
+int64-backed `DECIMAL(18,s)` vector, so:
+
+- the value **displays** with more precision digits than the declared type
+  allows (the type's domain is silently violated);
+- innocent arithmetic **fails loudly** on the extreme values — e.g. the
+  classic sentinel `NUMERIC(18,6) = -9223372036854.775808` (scaled value
+  `INT64_MIN`) raises `Out of Range Error: Overflow in multiplication of
+  DECIMAL(18)` for `col * 2` and `Overflow in negation` for `abs(col)`;
+- downstream consumers that trust the declared `DECIMAL(18,s)` precision
+  (dbt models, BI tools, CTAS targets) mis-handle the out-of-domain rows.
+
+`numeric_widen_int64=true` — a `firebird_scan` named parameter or an
+ATTACH option — projects these columns as **`DECIMAL(38,s)`** instead,
+which is hugeint-backed and lossless for the entire int64 scaled range:
+
+```sql
+SELECT N18_6 FROM firebird_scan('C:/data/erp.fdb', 'LEDGER',
+                                numeric_widen_int64=true)
+WHERE N18_6 <= -9223372036854.775808;
+
+ATTACH 'C:/data/erp.fdb' AS erp (TYPE firebird, numeric_widen_int64 true);
+```
+
+Scope and behavior:
+
+- Applies **only** to int64-backed scaled numerics (precision 10–18,
+  scale ≠ 0). `NUMERIC(18,0)` stays `BIGINT`; narrower scaled numerics
+  (precision 1–9) already fit their `DECIMAL(4,s)`/`DECIMAL(9,s)`;
+  INT128-backed numerics (precision 19+) were already `DECIMAL(38,s)`.
+- Both the **declared column type** and the **fetch vector** change
+  together (the fetch sign-extends the scaled int64 into the hugeint
+  vector), including through view type reconciliation.
+- Default is `false`: without the flag the `DECIMAL(18,s)` mapping and
+  fetch are byte-for-byte the historical behavior.
+- `firebird_type_audit` flags every column affected by this option with
+  the stable `int64_numeric_widenable` finding (see above), so you can
+  size the impact across a real schema before flipping the flag.
+
+### Charset handling of `CHARACTER SET NONE` text filters
+
+By default, text filters that touch a `CHARACTER SET NONE` CHAR/VARCHAR (or
+NONE text BLOB) column are **not** pushed to Firebird unless
+`none_encoding='strict'`: DuckDB literals are UTF-8 while the server stores
+and compares raw bytes, so a pushed UTF-8 literal could silently miss rows
+(`'São Paulo'` is `53 E3 6F ...` on a Windows-1252 disk but
+`53 C3 A3 6F ...` in UTF-8). The filtered predicate is applied by DuckDB
+after transcoding, so results stay correct either way.
+
+`none_pushdown=true` (a `firebird_scan` named parameter or an ATTACH
+option) opts into pushing **`=` and `IN (constants)`** over NONE
+**CHAR/VARCHAR** columns when `none_encoding` is `win1252` or
+`iso8859_1`/`latin1`:
+
+```sql
+SELECT *
+FROM firebird_scan('C:/legacy/erp.fdb', 'CLIENTES',
+                   none_pushdown=true)
+WHERE CITY = 'São Paulo';
+
+ATTACH 'C:/legacy/erp.fdb' AS erp
+    (TYPE firebird, none_encoding 'win1252', none_pushdown true);
+
+SELECT COUNT(*) FROM erp.main.CLIENTES
+WHERE CITY IN ('São Paulo', 'Resende');
+```
+
+How it stays lossless:
+
+- Firebird compares `CHARACTER SET NONE` values **byte-by-byte** (binary
+  semantics, no collation). Each UTF-8 literal is re-encoded to the target
+  encoding's raw bytes — byte-identical to what a Windows-1252 / Latin-1
+  writer stored — so a row matches exactly when its transcoded value equals
+  the literal.
+- The remote SQL carries those bytes behind a charset introducer
+  (`"CITY" = _WIN1252 '...'` / `_ISO8859_1 '...'`). The introducer is
+  required: without it, `isc_dsql_prepare` validates the statement's
+  literals against the UTF-8 connection charset and fails with
+  "Malformed string".
+- WIN1252 encoding maps `codepoint < 0x80` and `0xA0..0xFF` straight to the
+  identical byte, plus the fixed Windows-1252 table for the 27 allocated
+  codepoints in `0x80–0x9F` (Euro, curly quotes, en/em dash, ...). ISO-8859-1
+  maps `codepoint <= 0xFF` straight to the byte. No new dependencies.
+
+Conservative fallback and scope:
+
+- **Any unencodable literal** (e.g. `'€'` under `iso8859_1`, Cyrillic under
+  `win1252`) leaves the whole filter in DuckDB — re-applied above the scan —
+  and records the stable `NONE_CHARSET` reason, so
+  `firebird_unpushed_mode='warn' | 'error'` reacts exactly as for the other
+  gated cases.
+- **Scope is `=` and `IN` only.** Range comparisons are never pushed this
+  way (byte order in a single-byte encoding does not always agree with
+  Unicode code-point order), and `NOT IN` / `LIKE` keep the existing
+  NONE_CHARSET gating. NONE text **BLOB** columns are excluded too
+  (Firebird cannot evaluate `=` / IN on BLOB values at all).
+- With `none_encoding='strict'` or `'blob'` the flag has **no effect**:
+  strict data is valid UTF-8 and already pushes; blob columns are DuckDB
+  `BLOB`s. It is not an error to combine them.
+
+Telemetry note: the pushed fragment (and the `remote_sql` shown by
+`firebird_last_query()` / `firebird_query_log()` /
+`firebird_explain_pushdown()`) intentionally contains the re-encoded
+non-UTF-8 bytes. DuckDB validates `VARCHAR` values, so these surfaces
+display each such byte escaped as `\xNN` — e.g.
+`"CITY" = _WIN1252 'S\xE3o Paulo'`. The SQL actually sent to Firebird
+carries the real byte (`0xE3`).
 
 ### `DECFLOAT(16)` / `DECFLOAT(34)`
 

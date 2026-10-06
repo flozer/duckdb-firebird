@@ -8,7 +8,15 @@ namespace duckdb {
 // Maps a Firebird XSQLVAR (sqltype/subtype/scale) to a DuckDB LogicalType.
 // Mirrors the conversion in firebird_peregrine_falcon's extractor.rs but
 // produces native DuckDB types (DATE/TIMESTAMP/DECIMAL) instead of Arrow.
-LogicalType FirebirdToDuckDBType(const FirebirdColumnDesc &col);
+//
+// `numeric_widen_int64` is the G3 opt-in: when true, NUMERIC/DECIMAL columns
+// physically stored as a 64-bit scaled integer (SQL_INT64, precision hint 8)
+// with a non-zero scale project as DECIMAL(38, scale) instead of the default
+// DECIMAL(18, scale), so the full int64 scaled range (±9.22e18) fits without
+// silent overflow. Every caller on one scan/ATTACH must pass the same value
+// so the declared type and the fetch vector always agree.
+LogicalType FirebirdToDuckDBType(const FirebirdColumnDesc &col,
+                                 bool numeric_widen_int64 = false);
 
 // Materializes one cell from a fetched row into the destination Vector slot.
 // Returns false when the cell was NULL (caller still needs to flag the

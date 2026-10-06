@@ -1,11 +1,15 @@
 #include "firebird_observability.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context.hpp"
 
 #include <algorithm>
+#include <map>
 #include <regex>
+#include <sstream>
 
 namespace duckdb {
 
@@ -28,6 +32,14 @@ void FirebirdObservabilityState::RecordQuery(const FirebirdQueryTelemetry &rec,
     std::lock_guard<std::mutex> g(lock_);
     last_ = rec;
     last_.valid = true;
+    // G2 (none_pushdown): pushed NONE-column filters / remote SQL may
+    // intentionally contain non-UTF-8 bytes (re-encoded literals). DuckDB
+    // Value construction validates UTF-8, so escape invalid bytes for
+    // display before the record is stored. See MakeTelemetrySafeUtf8.
+    last_.remote_sql = MakeTelemetrySafeUtf8(last_.remote_sql);
+    for (auto &f : last_.pushed_filters) {
+        f = MakeTelemetrySafeUtf8(f);
+    }
     start_ = std::chrono::steady_clock::now();
 
     if (log_size <= 0) {
@@ -57,6 +69,14 @@ void FirebirdObservabilityState::AddRows(int64_t n) {
     // current query. Older entries are frozen.
     if (!log_.empty()) {
         log_.back().rows_read = last_.rows_read;
+    }
+}
+
+void FirebirdObservabilityState::AddBytes(int64_t bytes) {
+    std::lock_guard<std::mutex> g(lock_);
+    last_.bytes_read_estimate += bytes;
+    if (!log_.empty()) {
+        log_.back().bytes_read_estimate = last_.bytes_read_estimate;
     }
 }
 
@@ -96,8 +116,171 @@ shared_ptr<FirebirdObservabilityState> GetObservabilityState(ClientContext &ctx)
 }
 
 // ---------------------------------------------------------------------------
+//  firebird_unpushed_mode — residual-filter guard (G1 observability wave)
+// ---------------------------------------------------------------------------
+//
+// The scanner calls HandleUnpushedFilters once per scan when a scan ends up
+// with residual (not pushed) filters — the same codes telemetry surfaces in
+// not_pushed_reasons. The codes are a stable API; the table below only adds
+// a human-facing remedy on top of each one.
+
+static const char *RemedyForReason(const std::string &reason) {
+    if (reason == "NONE_CHARSET") {
+        return "columns declared CHARACTER SET NONE only push text filters "
+               "under none_encoding='strict' or, for '=' / IN on CHAR / "
+               "VARCHAR, with the none_pushdown=true opt-in - ranges, LIKE "
+               "and NOT IN are always transcoded client-side";
+    }
+    if (reason == "UNSUPPORTED_OP") {
+        return "the filter operator/shape/constant type has no Firebird SQL "
+               "translation yet; simplify the predicate or accept "
+               "DuckDB-side filtering";
+    }
+    if (reason == "ROWID_OR_INVALID_COLUMN") {
+        return "the filter targets the virtual rowid or a column outside "
+               "the resolved schema; filter on real columns instead";
+    }
+    if (reason == "UNSUPPORTED_PROJECTION_MAPPING") {
+        return "the filter's projected column could not be mapped back to "
+               "a source column; check the query's column list";
+    }
+    return "unknown reason; inspect firebird_last_query()";
+}
+
+void HandleUnpushedFilters(ClientContext &ctx,
+                           const std::vector<std::string> &reasons) {
+    // Load the mode. A missing setting (a stripped-down embed that never
+    // registered the option) behaves exactly like 'silent'.
+    std::string mode = "silent";
+    Value setting_val;
+    if (ctx.TryGetCurrentSetting("firebird_unpushed_mode", setting_val) &&
+        !setting_val.IsNull()) {
+        mode = StringUtil::Lower(setting_val.ToString());
+    }
+    if (mode == "silent") {
+        return;
+    }
+    if (mode != "warn" && mode != "error") {
+        // Fail loud rather than silently ignoring a typo'd value: the
+        // user believes a guard is armed when it is not. This only ever
+        // fires when residual filters exist, i.e. when the mode matters.
+        throw InvalidInputException(
+            "firebird_unpushed_mode='%s' is not valid; use 'silent', "
+            "'warn' or 'error'", mode);
+    }
+
+    // Count occurrences per code, preserving first-seen order so the
+    // message is deterministic across parallel workers.
+    std::vector<std::string> order;
+    std::map<std::string, idx_t> counts;
+    for (const auto &reason : reasons) {
+        if (counts.find(reason) == counts.end()) {
+            order.push_back(reason);
+        }
+        ++counts[reason];
+    }
+
+    std::ostringstream msg;
+    msg << "firebird_unpushed_mode='" << mode << "': this scan kept "
+        << reasons.size() << " filter(s) in DuckDB instead of pushing them "
+                           "down to Firebird.";
+    for (const auto &reason : order) {
+        msg << " " << reason << " (" << counts[reason]
+            << "): " << RemedyForReason(reason) << ".";
+    }
+    msg << " Verify with firebird_explain_pushdown() / "
+           "firebird_last_query(). Reset with SET firebird_unpushed_mode = "
+           "'silent'.";
+
+    if (mode == "error") {
+        throw InvalidInputException(msg.str());
+    }
+    // 'warn': DuckDB's native warning channel — the exact mechanism the
+    // engine itself uses for deprecation notices (see
+    // duckdb/logging/logger.hpp, DUCKDB_LOG_WARNING). The DuckDB CLI
+    // registers a stdout log storage at LOG_WARNING level, so the warning
+    // prints to the console out of the box; embedded hosts receive it
+    // through the logging subsystem, and can promote it to an error with
+    // warnings_as_errors. Limitation: hosts that never enable logging
+    // (default NopLogger) do not see the warning — that is DuckDB's
+    // platform behaviour, not something the extension can bypass without
+    // falling back to raw Printer output.
+    DUCKDB_LOG_WARNING(ctx, msg.str());
+}
+
+// ---------------------------------------------------------------------------
 //  Redaction
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+//  Telemetry-safe UTF-8 (G2 none_pushdown)
+// ---------------------------------------------------------------------------
+//
+// Walks the input as UTF-8. Valid sequences are copied byte-identical;
+// any byte that starts an invalid sequence is emitted as `\xNN`. This
+// keeps firebird_last_query() / firebird_query_log() /
+// firebird_explain_pushdown() renderable (DuckDB validates VARCHAR on
+// Value construction) while still showing the exact bytes that were sent
+// to Firebird for re-encoded NONE-column literals.
+
+std::string MakeTelemetrySafeUtf8(const std::string &in) {
+    // Fast path: pure ASCII / already-valid UTF-8 is by far the common
+    // case for every filter the extension pushes.
+    bool all_valid = true;
+    for (unsigned char c : in) {
+        if (c >= 0x80) {
+            all_valid = false;
+            break;
+        }
+    }
+    if (all_valid) return in;
+
+    std::string out;
+    out.reserve(in.size() + 8);
+    const auto cont = [&](size_t i) {
+        return (static_cast<unsigned char>(in[i]) & 0xC0) == 0x80;
+    };
+    size_t i = 0;
+    while (i < in.size()) {
+        const unsigned char lead = static_cast<unsigned char>(in[i]);
+        size_t len = 0;
+        uint32_t cp = 0;
+        if (lead < 0x80) {
+            len = 1;
+            cp = lead;
+        } else if ((lead & 0xE0) == 0xC0 && i + 1 < in.size() && cont(i + 1)) {
+            len = 2;
+            cp = (lead & 0x1F) << 6 | (in[i + 1] & 0x3F);
+        } else if ((lead & 0xF0) == 0xE0 && i + 2 < in.size() &&
+                   cont(i + 1) && cont(i + 2)) {
+            len = 3;
+            cp = (lead & 0x0F) << 12 | (in[i + 1] & 0x3F) << 6 |
+                 (in[i + 2] & 0x3F);
+        } else if ((lead & 0xF8) == 0xF0 && i + 3 < in.size() &&
+                   cont(i + 1) && cont(i + 2) && cont(i + 3)) {
+            len = 4;
+            cp = (lead & 0x07) << 18 | (in[i + 1] & 0x3F) << 12 |
+                 (in[i + 2] & 0x3F) << 6 | (in[i + 3] & 0x3F);
+        }
+        // Reject overlong / surrogate / out-of-range forms as invalid.
+        static const uint32_t kMinCp[] = {0, 1, 0x80, 0x800, 0x10000};
+        const bool valid =
+            len != 0 && cp >= kMinCp[len] && cp <= 0x10FFFF &&
+            !(cp >= 0xD800 && cp <= 0xDFFF);
+        if (valid) {
+            out.append(in, i, len);
+            i += len;
+        } else {
+            const char hex[] = "0123456789ABCDEF";
+            out += '\\';
+            out += 'x';
+            out += hex[(lead >> 4) & 0xF];
+            out += hex[lead & 0xF];
+            i += 1;
+        }
+    }
+    return out;
+}
 
 // ---------------------------------------------------------------------------
 //  Error-message sanitizer
@@ -164,6 +347,11 @@ std::string RedactBindValue(const Value &v) {
 //   partitions         INTEGER
 //   captured_at        TIMESTAMP
 //   error_message      VARCHAR   - empty when scan ran cleanly
+//   limit_pushed        BIGINT    - SQL NULL when no ROWS was pushed
+//   offset_pushed       BIGINT    - SQL NULL when no ROWS was pushed
+//   not_pushed_reasons  VARCHAR[]
+//   bytes_read_estimate BIGINT    - G5 payload-bytes estimate (rows x
+//                                   XSQLDA width + BLOB segments)
 
 // Forward declarations - shared by firebird_last_query() and
 // firebird_query_log() below.
@@ -205,7 +393,7 @@ static Value VarcharList(const std::vector<std::string> &xs) {
 
 // Emit one FirebirdQueryTelemetry into the output chunk at index `row`.
 // Shared by firebird_last_query() and firebird_query_log() to keep the
-// 18-column schema in lockstep.
+// 19-column schema in lockstep.
 static void EmitTelemetryRow(DataChunk &output, idx_t row,
                               const FirebirdQueryTelemetry &t) {
     output.data[0].SetValue(row, Value(t.remote_sql));
@@ -233,6 +421,10 @@ static void EmitTelemetryRow(DataChunk &output, idx_t row,
         ? Value::BIGINT(static_cast<int64_t>(t.offset_pushed.GetIndex()))
         : Value(LogicalType::BIGINT));
     output.data[17].SetValue(row, VarcharList(t.not_pushed_reasons));
+    // G5 — additive tail column; appended AFTER not_pushed_reasons so the
+    // historical 18-column prefix keeps its order (additive schema
+    // evolution contract documented in docs/*/function_manual.md).
+    output.data[18].SetValue(row, Value::BIGINT(t.bytes_read_estimate));
 }
 
 // Returns the canonical (names, types) the two observability table
@@ -259,6 +451,7 @@ static void TelemetrySchema(vector<string> &names,
         "limit_pushed",
         "offset_pushed",
         "not_pushed_reasons",
+        "bytes_read_estimate",
     };
     types = {
         LogicalType::VARCHAR,
@@ -279,6 +472,7 @@ static void TelemetrySchema(vector<string> &names,
         LogicalType::BIGINT,
         LogicalType::BIGINT,
         LogicalType::LIST(LogicalType::VARCHAR),
+        LogicalType::BIGINT,
     };
 }
 

@@ -26,6 +26,14 @@ struct FirebirdQueryTelemetry {
     std::vector<std::string> pushed_filters;
     std::vector<std::string> residual_filters;
     int64_t rows_read = 0;
+    // G5 — ESTIMATE of Firebird payload bytes pulled by this query:
+    // rows_read x XSQLDA row width (sum of the per-column descriptor
+    // buffer sizes, fixed at prepare time) + actual BLOB segment bytes
+    // read. fbclient exposes no wire-traffic meter, so this is a payload
+    // estimate for network budgeting — protocol headers, prepare/bind
+    // round-trips and paging metadata are NOT included. See
+    // FirebirdStatement::RowWidthBytes()/BytesRead().
+    int64_t bytes_read_estimate = 0;
     int64_t firebird_time_us = 0;
     int64_t total_time_us = 0;
     int64_t connection_id = -1;
@@ -82,6 +90,11 @@ public:
     // is one uncontended lock, called once per fetched chunk (not per
     // row), so it stays off the hot path even for million-row scans.
     void AddRows(int64_t n);
+    // G5 — fold a drained bytes_read_estimate delta (statement-level
+    // row-width x fetches + BLOB segment bytes) into the current record.
+    // Mirrors AddRows: also updates the newest ring-buffer entry so
+    // firebird_query_log() shows in-flight totals.
+    void AddBytes(int64_t bytes);
     void AddFirebirdTimeUs(int64_t us);
     void UpdateTotalTimeUs();
     void SetError(const std::string &msg);
@@ -106,6 +119,26 @@ private:
 // Always returns a non-null shared_ptr; lifetime is tied to the context.
 shared_ptr<FirebirdObservabilityState> GetObservabilityState(ClientContext &ctx);
 
+// G1 observability wave — react to a scan that has residual (not pushed)
+// filters, according to the firebird_unpushed_mode session setting:
+//
+//   'silent' (default) — no-op, returns immediately;
+//   'warn'             — emits a warning through DuckDB's native logging
+//                        channel (the same mechanism the engine uses for
+//                        its own deprecation notices; the DuckDB CLI prints
+//                        it to the console out of the box);
+//   'error'            — throws InvalidInputException with an actionable
+//                        per-reason message (count, codes, remedies).
+//
+// `reasons` is the scan's not_pushed_reasons set. The caller (scanner)
+// guards this with a once-per-query atomic and only calls it when
+// `reasons` is non-empty, so the silent path costs nothing per row or per
+// partition. An unknown setting value throws InvalidInputException as soon
+// as there is something to report — a typo must not silently disable the
+// guard the user asked for.
+void HandleUnpushedFilters(ClientContext &ctx,
+                           const std::vector<std::string> &reasons);
+
 // Redact a single bind value for surface in observability output.
 //
 // PM-approved Phase 1 policy:
@@ -122,6 +155,17 @@ std::string RedactBindValue(const Value &v);
 // libfbclient diagnostic that happened to echo a connection string
 // cannot leak the password.
 std::string SanitizeErrorMessage(std::string msg);
+
+// G2 (none_pushdown) — make a telemetry string safe for DuckDB VARCHAR
+// Value construction. Pushed `=` / IN filters on CHARACTER SET NONE
+// columns intentionally carry non-UTF-8 bytes (the re-encoded storage
+// bytes behind a charset introducer), and `Value(std::string)` validates
+// UTF-8 and would throw. Valid UTF-8 sequences pass through byte-identical
+// (normal SQL is untouched); every byte that is not part of a valid UTF-8
+// sequence is escaped as `\xNN` (literal backslash, 'x', two hex digits),
+// so the display form still shows exactly which bytes went to the server.
+// The wire SQL itself is NOT touched — Firebird receives the real bytes.
+std::string MakeTelemetrySafeUtf8(const std::string &in);
 
 // firebird_last_query() table function. Returns at most one row, with the
 // most recently captured FirebirdQueryTelemetry FOR THIS CONNECTION.

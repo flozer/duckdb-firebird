@@ -189,7 +189,8 @@ bool ReconcileViewColumnTypes(FirebirdConnection &conn,
                               const std::string &table_name,
                               const duckdb::vector<std::string> &column_names,
                               duckdb::vector<LogicalType> &column_types,
-                              duckdb::vector<FirebirdColumnDesc> &column_descs) {
+                              duckdb::vector<FirebirdColumnDesc> &column_descs,
+                              bool numeric_widen_int64) {
     std::string upper = table_name;
     for (auto &c : upper) {
         c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -237,7 +238,8 @@ bool ReconcileViewColumnTypes(FirebirdConnection &conn,
                 FirebirdColumnDesc reconciled = live_cols[i];
                 reconciled.character_set_id = column_descs[i].character_set_id;
                 column_descs[i] = reconciled;
-                column_types[i] = FirebirdToDuckDBType(reconciled);
+                column_types[i] = FirebirdToDuckDBType(reconciled,
+                                                       numeric_widen_int64);
             }
         }
     } catch (...) {

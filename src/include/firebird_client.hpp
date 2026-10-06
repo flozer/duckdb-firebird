@@ -49,9 +49,25 @@ struct FirebirdConnectionInfo {
     std::string role;
     std::string charset = "UTF8";
     int dialect = 3;
+    // G4 session stability — per-attachment keepalive, carried to the
+    // server in the attach DPB as isc_dpb_dummy_packet_interval.
+    // Unit: SECONDS (the unit Firebird's own DummyPacketInterval
+    // firebird.conf entry and the wire-protocol docs use). 0 (default)
+    // = the DPB item is NOT sent, byte-for-byte the historical attach.
+    // The field propagates with every copy of this struct: pool-held
+    // connections, metadata leases, schema/table catalog entries and
+    // scanner connections all attach through FirebirdConnection::Attach().
+    int64_t dummy_packet_interval_secs = 0;
 
     static FirebirdConnectionInfo Parse(const std::string &conn_str);
 };
+
+// Validates a user-supplied dummy packet interval (seconds). 0 is the
+// "off" default and passes. Throws a BinderException with the unit in
+// the message when the value is negative or beyond the 32-bit DPB
+// payload range. Shared by the firebird_scan() bind path and the
+// ATTACH path so both reject identical values with identical text.
+void ValidateDummyPacketInterval(int64_t seconds);
 
 // Throws a BinderException if `charset` would deliver bytes DuckDB's
 // UTF-8-only string vectors can't ingest. UTF8, UTF-8, NONE, OCTETS pass;
@@ -123,6 +139,36 @@ public:
 
     const std::vector<FirebirdColumnDesc> &columns() const { return columns_; }
 
+    // G5 bytes-estimate support. RowWidthBytes() is the sum of the
+    // per-column fetch buffer sizes of the output XSQLDA (each column's
+    // descriptor width: CHAR/VARCHAR sqllen + length prefix, fixed-size
+    // temporal/numeric widths, 8-byte BLOB id frame). Computed once in
+    // AllocateBuffers() (i.e. at prepare/describe time), so it is stable
+    // for the whole cursor and identical for every partition cursor of
+    // the same scan. bytes_estimate() uses it as "payload bytes per
+    // fetched row"; see BytesRead() / TakeBytesRead() for the counter.
+    int64_t RowWidthBytes() const { return row_width_bytes_; }
+
+    // Running estimate of Firebird payload bytes this cursor has pulled:
+    // RowWidthBytes() per successful Fetch() plus the actual BLOB segment
+    // bytes returned by ReadBlob() (BLOB columns carry only an 8-byte id
+    // frame in the XSQLDA — the content arrives through isc_get_segment,
+    // so it is counted where it is actually read). Protocol headers,
+    // prepare/bind round-trips and the paged-rows metadata are NOT
+    // counted; this is a payload estimate, not a wire-traffic meter.
+    int64_t BytesRead() const { return bytes_read_; }
+
+    // Drain variant: returns the accumulated estimate and resets the
+    // counter to zero. The scanner drains per output chunk so the number
+    // can be folded into the per-query telemetry record and (on the
+    // ATTACH path) into the catalog's lifetime pool counter without the
+    // statement having to know about either.
+    int64_t TakeBytesRead() {
+        const int64_t b = bytes_read_;
+        bytes_read_ = 0;
+        return b;
+    }
+
     // Set the character_set_id on column `col`. Used when the caller
     // wants to augment what XSQLDA gives us with metadata pulled
     // from RDB$FIELDS — needed for text BLOBs (sqltype=SQL_BLOB,
@@ -170,6 +216,12 @@ private:
     std::vector<short> indicators_;
     std::vector<short> in_indicators_;
     std::vector<FirebirdColumnDesc> columns_;
+    // G5 — see RowWidthBytes()/BytesRead(). row_width_bytes_ is fixed at
+    // AllocateBuffers time; bytes_read_ is mutable because ReadBlob() is
+    // const (it is called through const-access paths in the value
+    // mapping layer) and still must record the BLOB bytes it pulls.
+    int64_t row_width_bytes_ = 0;
+    mutable int64_t bytes_read_ = 0;
 
     void Prepare(const std::string &sql);
     void AllocateBuffers();
@@ -253,6 +305,23 @@ public:
     // failure during ATTACH itself never registers a catalog).
     std::string LastError();
 
+    // G5 — lifetime estimate of Firebird payload bytes fetched by scans
+    // that ran through THIS pool, i.e. inside one attached catalog
+    // (ATTACH path). Direct firebird_scan() calls have no pool and never
+    // touch this counter — they belong to no catalog. The scanner folds
+    // each drained per-chunk estimate in via AddBytesReadEstimate();
+    // firebird_pool_stats() reads it through BytesReadEstimate().
+    // Process-relative, no decay, never reset (same semantics as
+    // TotalCreated/TotalReused).
+    int64_t BytesReadEstimate() const {
+        return bytes_read_estimate_.load(std::memory_order_relaxed);
+    }
+    void AddBytesReadEstimate(int64_t bytes) {
+        if (bytes > 0) {
+            bytes_read_estimate_.fetch_add(bytes, std::memory_order_relaxed);
+        }
+    }
+
     // Current config snapshot (immutable after construction in Chunk A;
     // settings-driven mutation lands in Chunk B).
     const FirebirdConnectionPoolConfig &Config() const { return config_; }
@@ -273,6 +342,12 @@ private:
     std::atomic<int64_t>         total_reused_{0};
     std::atomic<int64_t>         total_discarded_{0};
     std::atomic<int64_t>         active_{0};
+    // G5 — lifetime bytes_read_estimate accumulated by scans that ran on
+    // this pool's catalog (see BytesReadEstimate above). Lives here, not
+    // in a separate stats object, because the pool is the per-ATTACH
+    // singleton the scanner already holds a shared_ptr to via the bind
+    // data — no new plumbing, same lifetime as the catalog.
+    std::atomic<int64_t>         bytes_read_estimate_{0};
     std::string                  last_error_; // guarded by lock_
 };
 

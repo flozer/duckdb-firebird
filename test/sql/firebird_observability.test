@@ -17,22 +17,23 @@ require-env FIREBIRD_TEST_DB
 require-env ISC_PASSWORD
 
 # ---------------------------------------------------------------------------
-#  Schema sanity: firebird_last_query() always exposes 18 columns, even
+#  Schema sanity: firebird_last_query() always exposes 19 columns, even
 #  with nothing captured yet. (15 base + Phase 4 #3 pushdown explainability:
-#  limit_pushed, offset_pushed, not_pushed_reasons.)
+#  limit_pushed, offset_pushed, not_pushed_reasons + G5 bytes_read_estimate
+#  as the additive tail column.
 # ---------------------------------------------------------------------------
 
 query I
 SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM firebird_last_query());
 ----
-18
+19
 
-# firebird_query_log() shares the exact same schema (18 columns).
+# firebird_query_log() shares the exact same schema (19 columns).
 
 query I
 SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM firebird_query_log());
 ----
-18
+19
 
 # Before any firebird_scan call on THIS context, the slot is empty.
 

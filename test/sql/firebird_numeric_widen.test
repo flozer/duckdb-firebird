@@ -1,0 +1,268 @@
+# name: test/sql/firebird_numeric_widen.test
+# description: G3 numeric_widen_int64 opt-in — int64-backed NUMERIC(18,s)
+#              projects DECIMAL(38,s) so the full Firebird scaled-int64
+#              range survives. The default DECIMAL(18,s) is out of its
+#              domain for those values (the classic sentinel
+#              NUMERIC(18,6) = -9223372036854.775808 has scaled value
+#              INT64_MIN, past DECIMAL(18,s)'s 10^18-1 scaled ceiling): the
+#              raw int64 is written unchanged into the int64-backed
+#              DECIMAL(18,6) vector, so display happens to round-trip but
+#              the value violates the declared precision and innocent
+#              arithmetic fails (observed against the local FB5 fixture:
+#              `N18_6 * 2` → "Out of Range Error: Overflow in
+#              multiplication of DECIMAL(18)"; `abs(N18_6)` / `-N18_6` →
+#              "Out of Range Error: Overflow in negation"). The flag
+#              changes BOTH the declared column type and the fetch vector
+#              (hugeint-backed), making the extremes first-class values.
+# group: [firebird]
+#
+# Requires the NUM18 fixture from scripts/fixture_numerics.sql in a
+# database referenced by FIREBIRD_NUMERICS_DB; the test skips wherever that
+# env var is unset. NUM18 deliberately lives in its own database (the main
+# test.fdb relation lists are pinned by static expectations). The ATTACH
+# legs need ISC_PASSWORD (fbclient default credentials).
+#
+# WITHOUT the flag the sentinel row stays DECIMAL(18,6) whose value domain
+# cannot represent it: display happens to round-trip (both physical types
+# are int64) but the value is out of the declared type's domain and plain
+# arithmetic fails — observed against the local FB5 fixture:
+#   `SELECT N18_6 * 2 ... WHERE ID = 1`  →
+#       Out of Range Error: Overflow in multiplication of DECIMAL(18)
+#       (-9223372036854775808 * 2)
+#   `SELECT abs(N18_6) ... WHERE ID = 1` →
+#       Out of Range Error: Overflow in negation of numeric value!
+# That behaviour is the documented motivation for the flag; the test only
+# pins that the *type* stays DECIMAL(18,6) without the flag (byte-for-byte
+# historical behaviour) and that the value is EXACT with the flag.
+#
+# NOT added to the CI workflows (same status as firebird_decfloat.test /
+# firebird_none_charset.test).
+
+require firebird
+
+require-env FIREBIRD_NUMERICS_DB
+
+require-env ISC_PASSWORD
+
+# ---------------------------------------------------------------------------
+#  Default (no flag): DECIMAL(18,s) — unchanged historical behaviour.
+# ---------------------------------------------------------------------------
+
+query TTTT
+SELECT typeof(ID), typeof(N18_6), typeof(N18_2), typeof(N18_0)
+  FROM firebird_scan('${FIREBIRD_NUMERICS_DB}', 'NUM18')
+ WHERE ID = 3;
+----
+INTEGER	DECIMAL(18,6)	DECIMAL(18,2)	BIGINT
+
+# Ordinary values are correct in the narrow projection.
+query TTT
+SELECT CAST(N18_6 AS VARCHAR), CAST(N18_2 AS VARCHAR), CAST(N18_0 AS VARCHAR)
+  FROM firebird_scan('${FIREBIRD_NUMERICS_DB}', 'NUM18')
+ WHERE ID = 3;
+----
+12345.678901	12345.67	12345
+
+# NULL stays NULL.
+query TTT
+SELECT CAST(N18_6 AS VARCHAR), CAST(N18_2 AS VARCHAR), CAST(N18_0 AS VARCHAR)
+  FROM firebird_scan('${FIREBIRD_NUMERICS_DB}', 'NUM18')
+ WHERE ID = 4;
+----
+NULL	NULL	NULL
+
+# The sentinel row keeps the narrow type without the flag (its VALUE is
+# the documented corruption — see the file header; not asserted here).
+
+query T
+SELECT typeof(N18_6)
+  FROM firebird_scan('${FIREBIRD_NUMERICS_DB}', 'NUM18')
+ WHERE ID = 1;
+----
+DECIMAL(18,6)
+
+# ---------------------------------------------------------------------------
+#  With numeric_widen_int64=true: DECIMAL(38,s), sentinel exact.
+# ---------------------------------------------------------------------------
+
+query TTTT
+SELECT typeof(ID), typeof(N18_6), typeof(N18_2), typeof(N18_0)
+  FROM firebird_scan('${FIREBIRD_NUMERICS_DB}', 'NUM18', numeric_widen_int64=true)
+ WHERE ID = 3;
+----
+INTEGER	DECIMAL(38,6)	DECIMAL(38,2)	BIGINT
+
+# The classic INT64 sentinel comes back EXACT (scaled = INT64_MIN).
+query T
+SELECT CAST(N18_6 AS VARCHAR)
+  FROM firebird_scan('${FIREBIRD_NUMERICS_DB}', 'NUM18', numeric_widen_int64=true)
+ WHERE ID = 1;
+----
+-9223372036854.775808
+
+# One scaled step below the positive extreme (scaled = INT64_MAX).
+query TT
+SELECT CAST(N18_6 AS VARCHAR), CAST(N18_2 AS VARCHAR)
+  FROM firebird_scan('${FIREBIRD_NUMERICS_DB}', 'NUM18', numeric_widen_int64=true)
+ WHERE ID = 2;
+----
+9223372036854.775807	922337203685477.57
+
+# Ordinary value and N18_2 sentinel are exact too.
+query TTT
+SELECT CAST(N18_6 AS VARCHAR), CAST(N18_2 AS VARCHAR), CAST(N18_0 AS VARCHAR)
+  FROM firebird_scan('${FIREBIRD_NUMERICS_DB}', 'NUM18', numeric_widen_int64=true)
+ WHERE ID = 1;
+----
+-9223372036854.775808	-922337203685477.58	-9223372036854775808
+
+# NULL stays NULL under the widened projection.
+query TTT
+SELECT CAST(N18_6 AS VARCHAR), CAST(N18_2 AS VARCHAR), CAST(N18_0 AS VARCHAR)
+  FROM firebird_scan('${FIREBIRD_NUMERICS_DB}', 'NUM18', numeric_widen_int64=true)
+ WHERE ID = 4;
+----
+NULL	NULL	NULL
+
+# Aggregation over the extremes: -INT64_MIN/6 + +INT64_MAX/6 + 12345.678901
+# = -0.000001 + 12345.678901 = 12345.678900.
+query T
+SELECT CAST(SUM(N18_6) AS VARCHAR)
+  FROM firebird_scan('${FIREBIRD_NUMERICS_DB}', 'NUM18', numeric_widen_int64=true);
+----
+12345.678900
+
+# N18_0 (scale 0) is untouched by the flag: still BIGINT, still exact.
+query T
+SELECT typeof(N18_0)
+  FROM firebird_scan('${FIREBIRD_NUMERICS_DB}', 'NUM18', numeric_widen_int64=true)
+ WHERE ID = 1;
+----
+BIGINT
+
+# Extreme-value filtering is correct through the widened projection.
+query I
+SELECT ID
+  FROM firebird_scan('${FIREBIRD_NUMERICS_DB}', 'NUM18', numeric_widen_int64=true)
+ WHERE N18_6 >= 9223372036854.775807
+ ORDER BY ID;
+----
+2
+
+# The same arithmetic that RAISES "Out of Range" in the narrow projection
+# is exact here (abs of the INT64_MIN sentinel has a hugeint counterpart).
+query TT
+SELECT CAST(abs(N18_6) AS VARCHAR), CAST(N18_6 * 2 AS VARCHAR)
+  FROM firebird_scan('${FIREBIRD_NUMERICS_DB}', 'NUM18', numeric_widen_int64=true)
+ WHERE ID = 1;
+----
+9223372036854.775808	-18446744073709.551616
+
+# ---------------------------------------------------------------------------
+#  Views: reconciliation (issue #33) re-derives column types from a live
+#  describe — it must land on the SAME mapping as the table path, both
+#  with and without the flag.
+# ---------------------------------------------------------------------------
+
+query TT
+SELECT typeof(N18_6), CAST(N18_6 AS VARCHAR)
+  FROM firebird_scan('${FIREBIRD_NUMERICS_DB}', 'V_NUM18', numeric_widen_int64=true)
+ WHERE ID = 1;
+----
+DECIMAL(38,6)	-9223372036854.775808
+
+query T
+SELECT typeof(N18_6)
+  FROM firebird_scan('${FIREBIRD_NUMERICS_DB}', 'V_NUM18')
+ WHERE ID = 1;
+----
+DECIMAL(18,6)
+
+# ---------------------------------------------------------------------------
+#  ATTACH with numeric_widen_int64 true: declared type + fetch agree.
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH '${FIREBIRD_NUMERICS_DB}' AS nfb (TYPE firebird, numeric_widen_int64 true);
+
+query TT
+SELECT typeof(N18_6), CAST(N18_6 AS VARCHAR)
+  FROM nfb.main.NUM18 WHERE ID = 1;
+----
+DECIMAL(38,6)	-9223372036854.775808
+
+# The attached view reconciles to the same widened type (issue #33
+# consistency — same mapping on both sides).
+query TT
+SELECT typeof(N18_6), CAST(N18_6 AS VARCHAR)
+  FROM nfb.main.V_NUM18 WHERE ID = 1;
+----
+DECIMAL(38,6)	-9223372036854.775808
+
+query T
+SELECT typeof(N18_2) FROM nfb.main.NUM18 WHERE ID = 1;
+----
+DECIMAL(38,2)
+
+query T
+SELECT typeof(N18_0) FROM nfb.main.NUM18 WHERE ID = 1;
+----
+BIGINT
+
+# ---------------------------------------------------------------------------
+#  firebird_type_audit: new stable finding int64_numeric_widenable covers
+#  exactly the columns the flag widens (int64-backed, scale != 0).
+# ---------------------------------------------------------------------------
+
+query TT
+SELECT column_name, finding
+  FROM firebird_type_audit('nfb')
+ WHERE table_name = 'NUM18'
+ ORDER BY column_name;
+----
+N18_2	int64_numeric_widenable
+N18_6	int64_numeric_widenable
+
+# Scale-0 NUMERIC(18,0) and the INTEGER PK are NOT widenable.
+query I
+SELECT COUNT(*)
+  FROM firebird_type_audit('nfb')
+ WHERE table_name = 'NUM18'
+   AND column_name IN ('ID', 'N18_0');
+----
+0
+
+# The audit reports the DEFAULT (narrow) projection as the current mapping.
+query T
+SELECT duckdb_type
+  FROM firebird_type_audit('nfb')
+ WHERE table_name = 'NUM18' AND column_name = 'N18_6';
+----
+DECIMAL(18,6)
+
+# ...and the detail names the opt-in.
+query T
+SELECT contains(detail, 'numeric_widen_int64=true')
+  FROM firebird_type_audit('nfb')
+ WHERE table_name = 'NUM18' AND column_name = 'N18_6';
+----
+true
+
+statement ok
+DETACH nfb;
+
+# ---------------------------------------------------------------------------
+#  ATTACH without the option: narrow declared type, unchanged.
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH '${FIREBIRD_NUMERICS_DB}' AS nfb_narrow (TYPE firebird);
+
+query TT
+SELECT typeof(N18_6), typeof(N18_2)
+  FROM nfb_narrow.main.NUM18 WHERE ID = 1;
+----
+DECIMAL(18,6)	DECIMAL(18,2)
+
+statement ok
+DETACH nfb_narrow;

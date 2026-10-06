@@ -154,7 +154,8 @@ static void LoadInternal(ExtensionLoader &loader) {
     loader.RegisterFunction(DescribedTableFunction(
         GetFirebirdTypeAuditFunction(), {"catalog_name"},
         "Reports per-column type and charset fidelity findings (NONE charset, "
-        "DECFLOAT as VARCHAR, INT128, timezone types, text BLOBs) for an attached "
+        "DECFLOAT as VARCHAR, widenable int64 NUMERIC/DECIMAL, INT128, "
+        "timezone types, text BLOBs) for an attached "
         "catalog; only columns with a caveat are emitted.",
         "SELECT * FROM firebird_type_audit('fb');",
         {"firebird", "diagnostics"}));
@@ -224,6 +225,44 @@ static void LoadInternal(ExtensionLoader &loader) {
         "How long (in milliseconds) a released connection may sit in the "
         "idle queue before it is discarded on the next Acquire. "
         "0 = no expiry (default). Clock starts at Release().",
+        LogicalType::BIGINT,
+        Value::BIGINT(0));
+
+    // G1 observability wave - unpushed-filter guard. Read by the scanner
+    // once per scan, at the first partition cursor open that ends up with
+    // residual (not pushed) filters — the same signal telemetry records in
+    // firebird_last_query().not_pushed_reasons. 'silent' (default) keeps
+    // the historical behaviour at zero cost; 'warn' emits a DuckDB
+    // warning; 'error' fails the query with an actionable message.
+    config.AddExtensionOption(
+        "firebird_unpushed_mode",
+        "What to do when a Firebird scan keeps filters in DuckDB that were "
+        "not pushed down to Firebird (see not_pushed_reasons in "
+        "firebird_last_query()). 'silent' (default) does nothing, 'warn' "
+        "emits a warning, 'error' fails the query with an actionable "
+        "message.",
+        LogicalType::VARCHAR,
+        Value("silent"));
+
+    // G4 session stability - keepalive for long fetches across NAT /
+    // stateful firewalls. When > 0, every connection this extension
+    // opens (firebird_scan() and ATTACH, pool and non-pool) sends
+    // isc_dpb_dummy_packet_interval in the attach DPB, asking the
+    // server to emit a dummy packet every N seconds so a dropped
+    // connection is noticed mid-fetch instead of hanging or failing
+    // with -504/-902. Unit: seconds (same unit as DummyPacketInterval
+    // in the server's firebird.conf). 0 (default) sends nothing -
+    // byte-for-byte the historical attach. Read at firebird_scan()
+    // bind time and at ATTACH time.
+    config.AddExtensionOption(
+        "firebird_dummy_packet_interval",
+        "Keepalive interval, in SECONDS, sent to Firebird as "
+        "isc_dpb_dummy_packet_interval on every connection (0 = disabled, "
+        "default). Helps when NAT/firewall idle timeouts drop long fetches "
+        "(-504 cursor lost / -902 connection shutdown). Effectiveness "
+        "depends on the server honoring the per-attachment DPB value; on "
+        "some server versions the server-side DummyPacketInterval setting "
+        "is required instead.",
         LogicalType::BIGINT,
         Value::BIGINT(0));
 }

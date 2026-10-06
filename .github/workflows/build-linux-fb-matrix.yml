@@ -127,6 +127,14 @@ jobs:
             | docker exec -i fb bash -c "isql -u SYSDBA -p masterkey"
           docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_partitions.sql /var/lib/firebird/data/partitions.fdb
 
+          # Numerics fixture (roadmap G3) -- version-neutral (NUMERIC(18,s)
+          # exists on all Firebird versions), own database: int64 sentinels
+          # for the numeric_widen_int64 coverage.
+          docker cp scripts/fixture_numerics.sql fb:/tmp/fixture_numerics.sql
+          printf "%s\n" "CREATE DATABASE '/var/lib/firebird/data/numerics.fdb' DEFAULT CHARACTER SET UTF8;" \
+            | docker exec -i fb bash -c "isql -u SYSDBA -p masterkey"
+          docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_numerics.sql /var/lib/firebird/data/numerics.fdb
+
           # Suite tests connect over TCP — expose the URL form.
           echo "FIREBIRD_TEST_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/test.fdb?charset=UTF8" >> $GITHUB_ENV
           # charset=NONE (not UTF8/WIN1252/etc) -- ValidateClientCharset
@@ -140,6 +148,7 @@ jobs:
           # behavior explicit.
           echo "FIREBIRD_NONE_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/none.fdb?charset=NONE" >> $GITHUB_ENV
           echo "FIREBIRD_PARTITIONS_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/partitions.fdb?charset=UTF8" >> $GITHUB_ENV
+          echo "FIREBIRD_NUMERICS_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/numerics.fdb?charset=UTF8" >> $GITHUB_ENV
           # DECVALS still loads into biz4.fdb above (issue #48). Exporting
           # the env HERE (instead of only in the FB4+ smoke step) lets the
           # main suite step run firebird_decfloat.test on FB4/FB5 legs;
@@ -271,6 +280,14 @@ jobs:
           # F4: real recommended_partitions > 1 coverage on a dedicated
           # sparse-wide-PK fixture (all FB versions).
           ./build/release/test/unittest test/sql/firebird_partitions_scan.test
+          # G-queue coverage (v1.2.0): unpushed-mode guard + none_pushdown
+          # (NONE fixture), numeric_widen (numerics fixture), session
+          # stability + bytes estimate (main fixture).
+          ./build/release/test/unittest test/sql/firebird_unpushed_mode.test
+          ./build/release/test/unittest test/sql/firebird_none_pushdown.test
+          ./build/release/test/unittest test/sql/firebird_numeric_widen.test
+          ./build/release/test/unittest test/sql/firebird_session_stability.test
+          ./build/release/test/unittest test/sql/firebird_bytes_estimate.test
           # DECFLOAT promoted into the main suite (roadmap F3): runs
           # wherever FIREBIRD_DECFLOAT_DB is exported (FB4/FB5 legs);
           # self-skips on FB3 via its require-env gate.

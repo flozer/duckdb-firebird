@@ -514,10 +514,11 @@ TableFunction GetFirebirdTypeAuditFunction() {
         {LogicalType::VARCHAR,LogicalType::VARCHAR,LogicalType::VARCHAR,
          LogicalType::VARCHAR,LogicalType::VARCHAR,LogicalType::VARCHAR,
          LogicalType::VARCHAR},
-        // Findings-only: the WHERE matches exactly the 6 finding conditions,
+        // Findings-only: the WHERE matches exactly the 7 finding conditions,
         // so every fetched row is a finding. RDB$FIELD_TYPE codes per the
-        // scanner's blr->SQL map: 24/25 DECFLOAT, 26 INT128, 28/29 TZ,
-        // 14/37 CHAR/VARCHAR, 261 BLOB. CHARACTER_SET_ID 0 = NONE.
+        // scanner's blr->SQL map: 16 INT64 (int64-backed NUMERIC/DECIMAL),
+        // 24/25 DECFLOAT, 26 INT128, 28/29 TZ, 14/37 CHAR/VARCHAR, 261 BLOB.
+        // CHARACTER_SET_ID 0 = NONE.
         "SELECT TRIM(rf.RDB$RELATION_NAME), TRIM(rf.RDB$FIELD_NAME), "
         "       f.RDB$FIELD_TYPE, COALESCE(f.RDB$FIELD_SUB_TYPE,0), "
         "       COALESCE(f.RDB$FIELD_SCALE,0), COALESCE(f.RDB$FIELD_PRECISION,0), "
@@ -526,6 +527,7 @@ TableFunction GetFirebirdTypeAuditFunction() {
         "  JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE "
         " WHERE COALESCE(rf.RDB$SYSTEM_FLAG,0) = 0 AND ( "
         "       f.RDB$FIELD_TYPE IN (24,25,28,29) "
+        "    OR (f.RDB$FIELD_TYPE = 16 AND COALESCE(f.RDB$FIELD_SCALE,0) <> 0) "
         "    OR (f.RDB$FIELD_TYPE = 26 AND COALESCE(f.RDB$FIELD_SCALE,0) = 0) "
         "    OR (f.RDB$FIELD_TYPE IN (14,37) AND f.RDB$CHARACTER_SET_ID = 0) "
         "    OR (f.RDB$FIELD_TYPE = 261 AND f.RDB$FIELD_SUB_TYPE = 1) ) "
@@ -533,12 +535,36 @@ TableFunction GetFirebirdTypeAuditFunction() {
         [](FirebirdStatement &c) -> duckdb::vector<Value> {
             int ft   = c.GetShort(2);
             int st   = c.GetShort(3);
+            int sc   = c.GetShort(4);
             int prec = c.GetShort(5);
             int len  = c.GetShort(6);
             int cs   = c.IsNull(7) ? -1 : c.GetShort(7);
             const bool none = (cs == 0);
             std::string fbtype, ddtype, finding, detail;
             switch (ft) {
+            case 16:
+                // scale != 0 only reaches here (WHERE guard): the 64-bit
+                // scaled-integer NUMERIC/DECIMAL backing (dialect-3 numerics
+                // with precision 10..18; narrower precisions are FIELD_TYPE
+                // 7/8). Default projection is DECIMAL(18,scale), whose
+                // scaled ceiling (10^18-1) is below Firebird's physical
+                // int64 range (±2^63-1) — extreme values corrupt silently.
+                fbtype  = (st == 2)
+                        ? ("DECIMAL(" + std::to_string(prec) + "," +
+                           std::to_string(-sc) + ")")
+                        : ("NUMERIC(" + std::to_string(prec) + "," +
+                           std::to_string(-sc) + ")");
+                ddtype  = "DECIMAL(18," + std::to_string(-sc) + ")";
+                finding = "int64_numeric_widenable";
+                detail  = "int64-backed NUMERIC/DECIMAL with scale: the "
+                          "physical int64 carries scaled values up to "
+                          "+/-2^63-1 while DECIMAL(18,s) tops at 10^18-1, so "
+                          "extreme values surface corrupted (e.g. "
+                          "NUMERIC(18,6) = -9223372036854.775808). Pass "
+                          "numeric_widen_int64=true (firebird_scan parameter "
+                          "or ATTACH option) to project DECIMAL(38,s), which "
+                          "is lossless for the whole range.";
+                break;
             case 24:
             case 25:
                 fbtype  = (ft == 24) ? "DECFLOAT(16)" : "DECFLOAT(34)";

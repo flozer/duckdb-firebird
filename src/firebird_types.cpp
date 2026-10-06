@@ -133,7 +133,18 @@ static std::string TranscodeNoneCharset(const std::string &raw,
 // Firebird stores NUMERIC/DECIMAL as scaled integers (sqlscale is the negative
 // power-of-10 exponent). For widths up to DECIMAL(38,…) we can use DuckDB's
 // native DECIMAL; otherwise we degrade to DOUBLE.
-static LogicalType ScaledIntegerToDecimal(int precision_hint, int sqlscale) {
+//
+// `widen_int64` (G3 `numeric_widen_int64=true`) applies ONLY to the 64-bit
+// scaled-integer backing (precision hint 8, SQL_INT64) with a non-zero scale:
+// Firebird's physical int64 carries scaled values up to ±(2^63−1), while
+// DuckDB's DECIMAL(18,s) tops out at 10^18−1 scaled — values in between are
+// silently corrupted when written straight into the int64-backed DECIMAL(18)
+// vector. DECIMAL(38,s) is hugeint-backed and holds the entire int64 scaled
+// range, so the widened projection is lossless. Narrower backings
+// (SMALLINT/INTEGER) always fit their DECIMAL(4/9,s), so the flag ignores
+// them; scale 0 is a plain BIGINT either way.
+static LogicalType ScaledIntegerToDecimal(int precision_hint, int sqlscale,
+                                          bool widen_int64) {
     if (sqlscale == 0) {
         // Plain integer.
         switch (precision_hint) {
@@ -148,7 +159,8 @@ static LogicalType ScaledIntegerToDecimal(int precision_hint, int sqlscale) {
     switch (precision_hint) {
     case 2:  width = 4;  break;   // SMALLINT-backed → up to 4 digits
     case 4:  width = 9;  break;   // INTEGER-backed  → up to 9 digits
-    case 8:  width = 18; break;   // BIGINT-backed   → up to 18 digits
+    case 8:  width = widen_int64 ? 38 : 18;  // BIGINT-backed (see above)
+             break;
     default: width = 18;
     }
     if (scale < 0 || scale > width) {
@@ -157,14 +169,16 @@ static LogicalType ScaledIntegerToDecimal(int precision_hint, int sqlscale) {
     return LogicalType::DECIMAL(width, scale);
 }
 
-LogicalType FirebirdToDuckDBType(const FirebirdColumnDesc &col) {
+LogicalType FirebirdToDuckDBType(const FirebirdColumnDesc &col,
+                                 bool numeric_widen_int64) {
     switch (col.sqltype) {
     case SQL_TEXT:
     case SQL_VARYING:
         return LogicalType::VARCHAR;
-    case SQL_SHORT:    return ScaledIntegerToDecimal(2, col.sqlscale);
-    case SQL_LONG:     return ScaledIntegerToDecimal(4, col.sqlscale);
-    case SQL_INT64:    return ScaledIntegerToDecimal(8, col.sqlscale);
+    case SQL_SHORT:    return ScaledIntegerToDecimal(2, col.sqlscale, false);
+    case SQL_LONG:     return ScaledIntegerToDecimal(4, col.sqlscale, false);
+    case SQL_INT64:    return ScaledIntegerToDecimal(8, col.sqlscale,
+                                                     numeric_widen_int64);
     case SQL_INT128:
         // Firebird 4 INT128 — scale 0 → HUGEINT; with scale → DECIMAL(38, -scale).
         // Firebird always reports scale <= 0 in RDB$FIELD_SCALE.
@@ -266,7 +280,21 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
     case SQL_INT64: {
         int64_t v = stmt.GetInt64(col_idx);
         if (dst_type.id() == LogicalTypeId::DECIMAL) {
-            StoreDecimal<int64_t>(target, target_offset, v);
+            if (dst_type.InternalType() == PhysicalType::INT128) {
+                // G3 numeric_widen_int64=true projected this column as
+                // DECIMAL(38, scale), which is hugeint-backed. The fetched
+                // int64 is already the scaled DECIMAL value — widen it to
+                // hugeint (plain sign extension; the scale is unchanged and
+                // the whole int64 range fits DECIMAL(38,s)).
+                hugeint_t wide;
+                wide.lower = static_cast<uint64_t>(v);
+                wide.upper = (v < 0) ? -1 : 0;
+                FlatVector::GetData<hugeint_t>(target)[target_offset] = wide;
+            } else {
+                // DECIMAL(≤18, scale): physically int64, so the scaled
+                // int64 from Firebird is already the right bit pattern.
+                StoreDecimal<int64_t>(target, target_offset, v);
+            }
         } else {
             FlatVector::GetData<int64_t>(target)[target_offset] = v;
         }

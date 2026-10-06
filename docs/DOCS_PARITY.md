@@ -21,6 +21,7 @@ Rule:
 | Windows guide | `docs/en/guide_windows.md` | `docs/pt/guide_windows.md` | Paired (v1.0.0) |
 | Observability | `docs/en/observability.md` | covered inside `docs/pt/function_manual.md` | Acceptable for now; split PT page when observability changes again |
 | Release notes v1.1.0 | `docs/en/release_notes_v1.1.0.md` | `docs/pt/release_notes_v1.1.0.md` | Paired |
+| Release notes v1.2.0 | `docs/en/release_notes_v1.2.0.md` | `docs/pt/release_notes_v1.2.0.md` | Paired |
 | DuckDB 1.5.x compatibility plan | covered by `docs/en/roadmap.md` compatibility matrix | `docs/pt/duckdb_1_5_compatibility_plan.md` | Paired for decisions; PT carries the per-version validation records |
 | Architecture | `docs/en/architecture.md` | pending | Internal/developer doc; translate when DEV workflow depends on it |
 | Test report | `docs/en/test_report.md` | pending | Release evidence; translate or summarize per release |

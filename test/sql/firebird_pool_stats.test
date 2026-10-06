@@ -35,7 +35,8 @@ SELECT * FROM firebird_pool_stats('memory');
 is not a Firebird ATTACH
 
 # ---------------------------------------------------------------------------
-#  Schema: 8 columns, one row per call.
+#  Schema: 11 columns, one row per call. (10 Phase-4 columns + G5
+#  bytes_read_estimate as the additive tail column.)
 # ---------------------------------------------------------------------------
 
 statement ok
@@ -53,7 +54,7 @@ ATTACH '${FIREBIRD_TEST_DB}' AS fbps (TYPE firebird);
 query I
 SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM firebird_pool_stats('fbps'));
 ----
-10
+11
 
 query I
 SELECT COUNT(*) FROM firebird_pool_stats('fbps');

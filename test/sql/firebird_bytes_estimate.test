@@ -1,0 +1,260 @@
+# name: test/sql/firebird_bytes_estimate.test
+# description: G5 - bytes_read_estimate telemetry. Schema (19 columns on
+#              firebird_last_query/firebird_query_log with the new column
+#              last; 11 on firebird_pool_stats), positivity/monotonicity,
+#              determinism between identical runs, linear scaling with
+#              row_limit, BLOB segment bytes counting, and the ATTACH-only
+#              lifetime accumulation in firebird_pool_stats.
+#              The estimate is rows_read x XSQLDA row width + BLOB segment
+#              bytes (fbclient exposes no wire meter); precision against
+#              declared widths is validated manually - this file pins only
+#              invariants that hold by construction.
+# group: [firebird]
+#
+# Requires the EMPLOYEE / FILE_STORAGE fixtures from
+# scripts/setup_test_firebird.sh (TEST.FDB) and:
+#   FIREBIRD_TEST_DB   absolute path / connstring to the .fdb
+#   ISC_PASSWORD       SYSDBA password
+
+require firebird
+
+require-env FIREBIRD_TEST_DB
+
+require-env ISC_PASSWORD
+
+# ---------------------------------------------------------------------------
+#  Schema: both telemetry functions expose 19 columns; bytes_read_estimate
+#  is the additive tail column, type BIGINT. The historical 18-column
+#  prefix keeps its order (additive schema-evolution contract).
+# ---------------------------------------------------------------------------
+
+query I
+SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM firebird_last_query());
+----
+19
+
+query I
+SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM firebird_query_log());
+----
+19
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM firebird_last_query()) LIMIT 1 OFFSET 18;
+----
+bytes_read_estimate
+
+query T
+SELECT column_type FROM (DESCRIBE SELECT * FROM firebird_last_query()) LIMIT 1 OFFSET 18;
+----
+BIGINT
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM firebird_query_log()) LIMIT 1 OFFSET 18;
+----
+bytes_read_estimate
+
+query T
+SELECT column_type FROM (DESCRIBE SELECT * FROM firebird_query_log()) LIMIT 1 OFFSET 18;
+----
+BIGINT
+
+# Full column order: the legacy 18 columns intact, new column appended.
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM firebird_last_query());
+----
+remote_sql
+binds
+table_name
+projected_columns
+pushed_filters
+residual_filters
+rows_read
+firebird_time_us
+total_time_us
+connection_id
+connection_reused
+parallel_scan
+partitions
+captured_at
+error_message
+limit_pushed
+offset_pushed
+not_pushed_reasons
+bytes_read_estimate
+
+# ---------------------------------------------------------------------------
+#  Row-limit scan: estimate is positive, deterministic, and never below
+#  rows_read (every projected column counts at least 1 byte/row).
+# ---------------------------------------------------------------------------
+
+statement ok
+SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE', row_limit=3);
+
+query I
+SELECT rows_read FROM firebird_last_query();
+----
+3
+
+query I
+SELECT CASE WHEN bytes_read_estimate > 0
+              AND bytes_read_estimate >= rows_read
+            THEN 1 ELSE 0 END
+FROM firebird_last_query();
+----
+1
+
+# ---------------------------------------------------------------------------
+#  Determinism: identical scans report the identical estimate, both in
+#  firebird_last_query() and in the rotated firebird_query_log() window.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE OR REPLACE TEMP TABLE est3 AS
+  SELECT bytes_read_estimate AS b, rows_read AS r FROM firebird_last_query();
+
+statement ok
+SET firebird_query_log_size = 8;
+
+# Two more identical scans - these are the only captures the log window
+# (LIMIT 2, most-recent-first) below can see.
+
+statement ok
+SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE', row_limit=3);
+
+statement ok
+SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE', row_limit=3);
+
+query I
+SELECT CASE WHEN min(bytes_read_estimate) = max(bytes_read_estimate) THEN 1 ELSE 0 END
+FROM (SELECT bytes_read_estimate FROM firebird_query_log() LIMIT 2);
+----
+1
+
+# Third confirmation: the newest record still equals the pre-log capture.
+
+query I
+SELECT CASE WHEN l.bytes_read_estimate = s.b THEN 1 ELSE 0 END
+FROM firebird_last_query() l, est3 s;
+----
+1
+
+# ---------------------------------------------------------------------------
+#  Linear scaling: the row width is fixed per query shape, so doubling the
+#  row_limit on a BLOB-free table exactly doubles the estimate (TQUOTES:
+#  2 rows, INTEGER + VARCHAR only - no BLOB content term to skew the ratio).
+#  Cross-multiplied to stay in integer arithmetic.
+# ---------------------------------------------------------------------------
+
+statement ok
+SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'TQUOTES', row_limit=1);
+
+statement ok
+CREATE OR REPLACE TEMP TABLE estq1 AS
+  SELECT bytes_read_estimate AS b, rows_read AS r FROM firebird_last_query();
+
+statement ok
+SELECT * FROM firebird_scan('${FIREBIRD_TEST_DB}', 'TQUOTES', row_limit=2);
+
+query I
+SELECT CASE WHEN l.bytes_read_estimate * s.r = s.b * l.rows_read THEN 1 ELSE 0 END
+FROM firebird_last_query() l, estq1 s;
+----
+1
+
+# ---------------------------------------------------------------------------
+#  BLOB payload counts: the XSQLDA only carries an 8-byte BLOB id frame,
+#  but the estimate must include the segment bytes actually read.
+#  FILE_STORAGE row 1 (FILE_ID=1, 'binary', 6 bytes) - invariant form.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE OR REPLACE TEMP TABLE blob_row AS
+  SELECT octet_length(PAYLOAD) AS plen
+  FROM firebird_scan('${FIREBIRD_TEST_DB}', 'FILE_STORAGE', row_limit=1);
+
+statement ok
+CREATE OR REPLACE TEMP TABLE blob_est AS
+  SELECT bytes_read_estimate AS b, rows_read AS r FROM firebird_last_query();
+
+query I
+SELECT CASE WHEN e.b >= e.r + b.plen THEN 1 ELSE 0 END
+FROM blob_est e, blob_row b;
+----
+1
+
+# Multi-segment text BLOB: TBLOB_MULTISEG.NOTE is pinned at 4020 bytes by
+# firebird_blob_lossless.test / mkblob_fixture.cpp; the estimate for a
+# NOTE-only projection is exactly content + the 8-byte id frame.
+
+statement ok
+SELECT length(NOTE) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'TBLOB_MULTISEG', row_limit=1);
+
+query I
+SELECT bytes_read_estimate FROM firebird_last_query();
+----
+4028
+
+# ---------------------------------------------------------------------------
+#  firebird_pool_stats: 11 columns, bytes_read_estimate last, BIGINT.
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fbbe (TYPE firebird);
+
+query I
+SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM firebird_pool_stats('fbbe'));
+----
+11
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM firebird_pool_stats('fbbe')) LIMIT 1 OFFSET 10;
+----
+bytes_read_estimate
+
+query T
+SELECT column_type FROM (DESCRIBE SELECT * FROM firebird_pool_stats('fbbe')) LIMIT 1 OFFSET 10;
+----
+BIGINT
+
+# Fresh catalog: nothing scanned yet, lifetime accumulation still zero.
+
+statement ok
+CREATE OR REPLACE TEMP TABLE pool_before AS
+  SELECT bytes_read_estimate AS b FROM firebird_pool_stats('fbbe');
+
+query I
+SELECT CASE WHEN b = 0 THEN 1 ELSE 0 END FROM pool_before;
+----
+1
+
+# ---------------------------------------------------------------------------
+#  Accumulation semantics: an ATTACH-path scan grows the catalog lifetime
+#  counter; a direct firebird_scan() (no catalog) leaves it untouched.
+# ---------------------------------------------------------------------------
+
+statement ok
+SELECT COUNT(*) FROM fbbe.main.EMPLOYEE;
+
+query I
+SELECT CASE WHEN p.bytes_read_estimate > (SELECT b FROM pool_before) THEN 1 ELSE 0 END
+FROM firebird_pool_stats('fbbe') p;
+----
+1
+
+statement ok
+CREATE OR REPLACE TEMP TABLE pool_after_attach AS
+  SELECT bytes_read_estimate AS b FROM firebird_pool_stats('fbbe');
+
+statement ok
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE');
+
+query I
+SELECT CASE WHEN p.bytes_read_estimate = (SELECT b FROM pool_after_attach) THEN 1 ELSE 0 END
+FROM firebird_pool_stats('fbbe') p;
+----
+1
+
+# ---------------------------------------------------------------------------
+#  Cleanup: the log setting is session-scoped; nothing to reset.
+# ---------------------------------------------------------------------------

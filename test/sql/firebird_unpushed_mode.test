@@ -1,0 +1,115 @@
+# name: test/sql/firebird_unpushed_mode.test
+# description: firebird_unpushed_mode session setting (silent | warn | error)
+# group: [firebird]
+#
+# The guard reacts when a scan keeps residual (not pushed) filters —
+# the same signal telemetry records in not_pushed_reasons.
+#
+# Requires the NONE-charset fixture (scripts/fixture_none_charset.sql)
+# so a reliably-captured residual filter exists:
+#   FIREBIRD_NONE_DB    path to the NONE-charset database
+#   ISC_PASSWORD        Firebird SYSDBA password (pattern follows
+#                       firebird_none_charset.test)
+#
+# NOTE ON 'warn': sqllogictest cannot assert console warnings, so the
+# warn mode is only checked for NOT failing and for returning the same
+# rows as silent. The warning emission itself (native DuckDB logging
+# channel, same mechanism as the engine's deprecated-lambda notice) is
+# validated manually via the CLI.
+#
+# NOTE: a SIMPLE comparison (col = 'x') on a CHARACTER SET NONE text
+# column is applied by DuckDB above the scan and never offered to the
+# connector, so it never surfaces as a residual filter and cannot
+# trigger the guard (documented known limitation in
+# docs/en/observability.md). NOT IN is the stable trigger — same reason
+# firebird_none_charset.test uses it.
+
+require firebird
+
+require-env FIREBIRD_NONE_DB
+
+require-env ISC_PASSWORD
+
+# --- (a) default silent mode: results unchanged, nothing fails -------
+
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='win1252')
+ WHERE LABEL = 'São Paulo';
+----
+2	São Paulo
+
+# The NOT IN complex filter stays residual (NONE_CHARSET) — silent mode
+# must run it normally.
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='win1252')
+ WHERE LABEL NOT IN ('foo', 'bar');
+----
+3
+
+# --- (b) error mode: residual NONE filter fails the scan -------------
+
+statement ok
+SET firebird_unpushed_mode = 'error';
+
+statement error
+SELECT ID FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='win1252')
+ WHERE LABEL NOT IN ('foo', 'bar');
+----
+firebird_unpushed_mode='error'
+
+# The telemetry still captured the attempt with the reason attached.
+
+query T
+SELECT list_contains(not_pushed_reasons, 'NONE_CHARSET')
+  FROM firebird_last_query();
+----
+true
+
+# --- (d) a filter that DOES push never trips the guard ---------------
+# Numeric = is pushed to Firebird (no residual), so even in error mode
+# the query succeeds. Same-session SET also proves the mode is read per
+# scan, not cached per connection.
+
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='win1252')
+ WHERE ID = 2;
+----
+2	São Paulo
+
+# --- (c) warn mode: does not fail, same result as silent -------------
+# (The warning itself is not assertable in sqllogictest — see header.)
+
+statement ok
+SET firebird_unpushed_mode = 'warn';
+
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='win1252')
+ WHERE LABEL NOT IN ('foo', 'bar');
+----
+3
+
+# --- Reset back to silent in the same session -------------------------
+
+statement ok
+SET firebird_unpushed_mode = 'silent';
+
+# The previously-failing query works again; results match (a).
+query II
+SELECT ID, LABEL FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='win1252')
+ WHERE LABEL = 'São Paulo';
+----
+2	São Paulo
+
+statement ok
+RESET firebird_unpushed_mode;
+
+query T
+SELECT current_setting('firebird_unpushed_mode');
+----
+silent
+
+query I
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_NONE_DB}', 'TXT', none_encoding='win1252')
+ WHERE LABEL NOT IN ('foo', 'bar');
+----
+3

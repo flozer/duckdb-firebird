@@ -97,6 +97,15 @@ Parametros nomeados:
 - `row_limit`: limita linhas usando `ROWS` no Firebird.
 - `row_offset`: offset global; exige `row_limit`.
 - `none_encoding`: estrategia para colunas `CHARACTER SET NONE`.
+- `none_pushdown`: opt-in de pushdown de `=` / `IN` sobre colunas
+  CHAR/VARCHAR `CHARACTER SET NONE` quando `none_encoding` e `win1252` ou
+  `iso8859_1` (padrao `false`; veja "Tratamento de filtros de texto
+  CHARACTER SET NONE" nas notas de mapeamento de tipos).
+- `numeric_widen_int64`: opt-in que projeta colunas `NUMERIC`/`DECIMAL`
+  com escala armazenadas como int64 de 64 bits (precisao 10-18, ou seja,
+  `NUMERIC(18,s)` e afins) como `DECIMAL(38,s)` em vez de `DECIMAL(18,s)`,
+  para que toda a faixa escalada do int64 do Firebird sobreviva (padrao
+  `false`; veja "Notas de mapeamento de tipos").
 
 Internamente, a extensao usa `libfbclient` para abrir cursor no Firebird e
 entrega os chunks ao DuckDB como table function. O DuckDB continua responsavel
@@ -353,6 +362,18 @@ ATTACH 'C:/dados/empresa.fdb' AS fb
 SELECT *
 FROM fb.main.CLIENTES
 WHERE IDCLIENTE = 10;
+```
+
+As opcoes espelham os parametros nomeados do `firebird_scan` — `user`,
+`password`, `charset`, `role`, `dialect`, `none_encoding`, `none_pushdown`
+(opt-in de pushdown de `=` / `IN` sobre colunas CHAR/VARCHAR
+`CHARACTER SET NONE`) e `numeric_widen_int64` (opt-in de projecao
+`DECIMAL(38,s)` para numericos escalados com backing int64):
+
+```sql
+ATTACH 'C:/dados/empresa.fdb' AS fb
+(TYPE firebird, none_encoding 'win1252', none_pushdown true,
+ numeric_widen_int64 true);
 ```
 
 Internamente, o storage extension do DuckDB resolve scans de tabelas remotas e
@@ -1086,6 +1107,8 @@ Saida compartilhada com `firebird_query_log()`:
 - `pushed_filters`: filtros empurrados ao Firebird.
 - `residual_filters`: filtros mantidos para o DuckDB revalidar.
 - `rows_read`: linhas lidas.
+- `bytes_read_estimate`: ESTIMATIVA de bytes de payload lidos do Firebird
+  (G5) - veja a definicao exata logo abaixo.
 - `firebird_time_us`: tempo de chamadas Firebird em microssegundos.
 - `total_time_us`: tempo total desde a captura.
 - `connection_id`: ID monotonico global ao processo, atribuido pela extensao
@@ -1116,8 +1139,9 @@ Saida compartilhada com `firebird_query_log()`:
 As tres ultimas (`limit_pushed` / `offset_pushed` / `not_pushed_reasons`)
 sao as colunas de explicabilidade de pushdown (Fase 4 #3). Deixam explicito
 o que de paginacao chegou ao Firebird e por que um filtro ficou local, sem
-funcao nova - o schema agora tem 18 colunas, compartilhado por
-`firebird_last_query()` e `firebird_query_log()`. As razoes sao factuais e
+funcao nova. `bytes_read_estimate` (G5) entra como coluna aditiva no fim -
+o schema agora tem 19 colunas, compartilhado por `firebird_last_query()` e
+`firebird_query_log()`. As razoes sao factuais e
 coarse, nao um trace de planner:
 
 - `NONE_CHARSET`: a coluna e texto `CHARACTER SET NONE` e o pushdown e
@@ -1141,6 +1165,57 @@ coarse, nao um trace de planner:
   fora do schema resolvido.
 - `UNSUPPORTED_PROJECTION_MAPPING`: o indice de coluna projetada do filtro
   nao pode ser mapeado de volta para uma coluna de origem.
+
+Remedio por codigo de `not_pushed_reasons` (os codigos sao uma API
+estavel):
+
+| Motivo | Significado | Remedio |
+|---|---|---|
+| `NONE_CHARSET` | O filtro mira uma coluna de texto `CHARACTER SET NONE` e nao foi empurrado. Com `none_pushdown=true` isso significa que o literal nao tem byte no encoding alvo (ex. `'€'` em `iso8859_1`) ou a coluna e BLOB de texto NONE; sem a flag, todo filtro de texto em colunas NONE e barrado. | Use `none_encoding='strict'` para dados ja em UTF-8, ou ative `none_pushdown=true` (parametro do `firebird_scan` ou opcao do ATTACH) para empurrar `=` / `IN` sobre CHAR/VARCHAR NONE; ranges, `LIKE` e `NOT IN` permanecem sempre no cliente. Confirme com `firebird_explain_pushdown`. |
+| `UNSUPPORTED_OP` | O operador/forma/tipo de constante do filtro ainda nao tem traducao para SQL Firebird. | Simplifique o predicado ou aceite o filtro do lado DuckDB. |
+| `ROWID_OR_INVALID_COLUMN` | O filtro mira o rowid virtual ou coluna fora do schema resolvido. | Filtre por colunas reais em vez de `rowid`. |
+| `UNSUPPORTED_PROJECTION_MAPPING` | A coluna projetada do filtro nao pode ser mapeada de volta para uma coluna de origem. | Confira a lista de colunas / forma da projecao da query. |
+
+Para fazer filtros residuais agirem em vez de so reportar, use
+`SET firebird_unpushed_mode = 'warn' | 'error'` - veja
+[Nivel 5 - Opcoes de sessao](#nivel-5---opcoes-de-sessao).
+
+#### Definicao exata de `bytes_read_estimate` (ESTIMATIVA)
+
+O fbclient nao expoe medidor de trafego de rede; a extensao **estima** o
+payload transferido:
+
+```
+bytes_read_estimate = rows_read x largura da linha no XSQLDA
+                      + bytes de segmentos de BLOB lidos
+```
+
+- **Largura da linha no XSQLDA** e a soma dos tamanhos dos descritores de
+  fetch por coluna, fixada uma vez no prepare: `CHAR(n)` conta `n` bytes,
+  `VARCHAR(n)` conta `n + 2` (prefixo de tamanho), numericos/temporais
+  contam sua largura fixa, e uma coluna BLOB conta seu quadro de 8 bytes
+  (o id do BLOB).
+- **Conteudo de BLOB** e contado onde de fato e lido: os bytes de segmento
+  devolvidos por BLOB entram na estimativa na medida em que cruzam o
+  `isc_get_segment`.
+- **Deterministico**: duas execucoes identicas da mesma query reportam a
+  mesma estimativa (mesma largura, mesmo numero de linhas).
+
+Nao entra na conta: headers de protocolo e enquadramento por linha, as
+round-trips de prepare/execute/bind, metadados de paginacao (`ROWS`) e o
+handshake de conexao/attachment. Trate como estimativa de payload para
+orcamento de rede - "esse scan vai mover ~X MB" - nao como medidor exato
+de bytes de fio.
+
+Exemplo de orcamento de rede (WAN de ~0,3 MB/s - esse scan leva minutos ou
+horas?):
+
+```sql
+SELECT rows_read, bytes_read_estimate,
+       bytes_read_estimate / rows_read AS bytes_per_row,
+       1.0 * bytes_read_estimate / 1024 / 1024 AS est_mb
+FROM firebird_last_query();
+```
 
 Seguranca:
 
@@ -1179,6 +1254,15 @@ Checar tempos e linhas:
 
 ```sql
 SELECT rows_read, firebird_time_us, total_time_us
+FROM firebird_last_query();
+```
+
+Orcar a rede antes de rodar um scan pesado (probe curto com `row_limit`,
+depois extrapolar):
+
+```sql
+SELECT rows_read, bytes_read_estimate,
+       1.0 * bytes_read_estimate / 1024 / 1024 AS est_mb
 FROM firebird_last_query();
 ```
 
@@ -1299,7 +1383,10 @@ FROM firebird_explain_pushdown(
 #### O que faz e como funciona
 
 Mostra um historico curto das queries Firebird tentadas na conexao DuckDB
-atual. O log e desligado por padrao.
+atual. O log e desligado por padrao. Cada linha carrega o mesmo schema de
+telemetria de 19 colunas do `firebird_last_query()` - incluindo
+`bytes_read_estimate`, entao o log rotacionado preserva as estimativas de
+transferencia por query da sessao.
 
 Ativar:
 
@@ -1379,7 +1466,7 @@ SELECT IDCLIENTE FROM fb.main.CLIENTES WHERE IDCLIENTE = 1;
 SELECT * FROM firebird_pool_stats('fb');
 ```
 
-Colunas de saida (10):
+Colunas de saida (11):
 
 - `catalog_name`: o alias passado.
 - `pool_enabled`: se o pool do ATTACH esta habilitado.
@@ -1396,6 +1483,12 @@ Colunas de saida (10):
   via Release.
 - `last_error`: mensagem sanitizada da criacao de conexao com falha mais
   recente (`NULL` quando nenhuma); a senha e redigida antes de armazenar.
+- `bytes_read_estimate`: (G5) estimativa acumulada ao longo da vida dos
+  bytes de payload Firebird lidos por scans que rodaram **dentro deste
+  catalogo** (caminho ATTACH). Mesma semantica dos outros contadores de
+  vida: relativa ao processo, nunca reseta. Chamadas diretas a
+  `firebird_scan()` **nao** entram - nao pertencem a catalogo algum.
+  Definicao da estimativa: veja [`firebird_last_query()`](#firebird_last_query).
 
 Le apenas contadores e config que o pool ja rastreia, e **nao** faz lease de
 conexao - chamar nunca perturba o pool que reporta. Os valores configurados
@@ -1416,11 +1509,18 @@ em voo em outra conexao mantem o valor acima de 0.
 - Dimensionar `firebird_pool_max_size`.
 - Verificar que um catalogo com `firebird_pool_enabled = false` nunca
   estaciona conexoes idle.
+- Com `bytes_read_estimate`, acompanhar quanto payload Firebird uma sessao
+  inteira de trabalho ja puxou por catalogo (antes/depois de uma extracao
+  pesada).
 
 #### Uso no dia a dia
 
 ```sql
 SELECT pool_enabled, idle_connections, total_created, total_reused
+FROM firebird_pool_stats('fb');
+
+SELECT bytes_read_estimate,
+       1.0 * bytes_read_estimate / 1024 / 1024 AS est_mb_total
 FROM firebird_pool_stats('fb');
 ```
 
@@ -1463,6 +1563,7 @@ Codigos de finding:
 | Codigo | Significado |
 | --- | --- |
 | `decfloat_as_varchar` | DECFLOAT(16/34) projetado como VARCHAR via `CAST` server-side; semantica textual se aplica a comparacoes de filtro |
+| `int64_numeric_widenable` | `NUMERIC`/`DECIMAL` com escala e backing int64; a faixa escalada fisica do int64 excede o dominio de `DECIMAL(18,s)` — passe `numeric_widen_int64=true` (parametro do `firebird_scan` ou opcao do ATTACH) para projetar `DECIMAL(38,s)` sem perda |
 | `int128` | INT128 nativo ou NUMERIC/DECIMAL(19-38) sem casa decimal projetado como HUGEINT (sem perda); algumas ferramentas BI nao suportam INT128 |
 | `time_tz` | TIME WITH TIME ZONE; ressalva de tratamento de offset de sessao e zone-id |
 | `timestamp_tz` | TIMESTAMP WITH TIME ZONE; ressalva de tratamento de offset de sessao e zone-id |
@@ -1479,9 +1580,11 @@ Codigos de finding:
   e emitido sempre que o character set for NONE, independentemente do valor
   de `none_encoding`.
 - `int128` sinaliza `INT128` nativo e `NUMERIC`/`DECIMAL` de precisao 19-38
-  com escala 0 (todos projetados como HUGEINT). `NUMERIC`/`DECIMAL` com
-  escala diferente de 0 mapeia de forma lossless para `DECIMAL` do DuckDB e
-  nao e sinalizado.
+  com escala 0 (todos projetados como HUGEINT). `int64_numeric_widenable`
+  cobre os numericos escalados com backing int64 (precisao 10-18, escala
+  diferente de 0); numericos escalados mais estreitos (precisao 1-9,
+  backing SMALLINT/INTEGER) sempre cabem em seu `DECIMAL` DuckDB e nao sao
+  sinalizados.
 
 ### `firebird_health(alias)`
 
@@ -1615,6 +1718,50 @@ Limpar/desligar:
 SET firebird_query_log_size = 0;
 ```
 
+### `SET firebird_unpushed_mode = 'silent' | 'warn' | 'error'`
+
+#### O que faz e como funciona
+
+Controla o que acontece quando um scan Firebird mantem filtros no DuckDB
+que **nao foram empurrados** ao Firebird - o mesmo sinal que a telemetria
+mostra em `not_pushed_reasons` (`NONE_CHARSET`, `UNSUPPORTED_OP`,
+`ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING`).
+
+- `silent` (padrao) - comportamento atual: so telemetria, sem custo extra.
+- `warn` - um aviso por scan pelo canal nativo de warnings do DuckDB (o
+  CLI imprime no console; hosts embarcados recebem pelo subsystem de
+  logging, e `warnings_as_errors` promove o aviso a excecao).
+- `error` - o scan falha com Invalid Input Error listando a quantidade de
+  filtros residuais, os codigos presentes e o remedio de cada um. A
+  checagem roda uma vez por scan, antes de buscar qualquer linha, entao
+  armar antes de uma carga longa falha rapido.
+
+Padrao:
+
+```sql
+SET firebird_unpushed_mode = 'silent';
+```
+
+Valor desconhecido (`'warnn'`, ...) e rejeitado com Invalid Input Error
+assim que um scan tiver filtros residuais a reportar - um typo nunca
+desliga silenciosamente uma guarda que voce pediu.
+
+#### Para que serve
+
+- Falhar rapido em carga longa (COPY / CREATE TABLE AS) quando o pushdown
+  esperado nao aconteceu, em vez de descobrir depois pelos numeros.
+- Auditoria de performance: levantar warnings em sessoes de analise.
+
+#### Uso no dia a dia
+
+```sql
+SET firebird_unpushed_mode = 'error';
+COPY (SELECT * FROM fb.main.TABELA_GRANDE) TO 'carga.parquet';
+-- falha aqui se algum filtro ficou residual, com motivo + remedio
+
+SET firebird_unpushed_mode = 'silent';   -- de volta ao padrao na sessao
+```
+
 ### `SET firebird_pool_enabled = true|false`
 
 #### O que faz e como funciona
@@ -1707,6 +1854,61 @@ Lido no `ATTACH`. Mudanca posterior nao reconfigura pool existente.
 - Liberar handles em sessoes longas que ficam ociosas entre rajadas de
   consultas.
 
+### `SET firebird_dummy_packet_interval = SEGUNDOS`
+
+#### O que faz e como funciona
+
+Keepalive para fetches longos. Acima de `0`, **toda** conexao aberta pela
+extensao - conexoes por chamada do `firebird_scan()` e conexoes de
+`ATTACH`, do pool ou novas - envia `isc_dpb_dummy_packet_interval` no DPB
+do attach, pedindo ao Firebird para emitir um pacote dummy no fio a cada
+`SEGUNDOS`, de modo que uma conexao derrubada em silencio por NAT /
+firewall de estado seja detectada durante o fetch, em vez de aparecer
+depois como cursor morto (`-504 ... cursor lost`) ou conexao encerrada
+(`-902`).
+
+- **Unidade: segundos** - a mesma unidade de `DummyPacketInterval` no
+  `firebird.conf` do servidor e da documentacao do protocolo de rede do
+  Firebird.
+- **Padrao `0` = desligado**: o item do DPB nao e enviado e o attach fica
+  byte a byte identico as versoes anteriores.
+- Lido no bind do `firebird_scan()` e no `ATTACH`. Para um attach ja
+  existente, um `SET` posterior nao se aplica - faca `DETACH` + `ATTACH`
+  de novo (o pool cria conexoes a partir do valor capturado no attach).
+- Valores negativos (ou acima do limite de 32 bits do DPB) sao rejeitados
+  com Binder Exception que cita a unidade:
+  "firebird_dummy_packet_interval must be >= 0 (0 = disabled), got -5 (unit: seconds)".
+
+#### Para que serve
+
+- Extracoes longas via WAN, onde NAT/firewall derruba conexoes ociosas
+  no meio do fetch (sintomas classicos: `-504` cursor lost aos ~7000s,
+  `-902` em seria historica).
+- Diagnostico: se o erro de fetch passa a ocorrer com keepalive ligado,
+  o problema nao e timeout de ociosidade.
+
+#### Uso no dia a dia
+
+```sql
+SET firebird_dummy_packet_interval = 60;   -- segundos
+ATTACH 'firebird://srv:/data/erp.fdb' AS erp (TYPE firebird);
+COPY (SELECT * FROM erp.main.TABELA_GRANDE) TO 'carga.parquet';
+
+SET firebird_dummy_packet_interval = 0;    -- de volta ao padrao na sessao
+```
+
+Se mesmo assim um fetch morrer no meio, o scanner levanta `IO Error` com
+contexto acionavel (tabela, linhas ja lidas pelo worker, esta setting como
+remedio e ponteiro para `firebird_last_query()`) - veja a secao de
+troubleshooting em `docs/en/observability.md`. Ressalva honesta: o valor
+de DPB por anexacao depende do servidor honra-lo. A issue do Firebird
+[#8266](https://github.com/FirebirdSQL/firebird/issues/8266) reporta que
+em algumas versoes o valor e parseado mas nao aplicado, cabendo ao
+`DummyPacketInterval` do servidor agendar os pacotes dummy. Enviar o DPB
+segue sendo o pedido correto do lado cliente e e inofensivo em servidores
+que o ignoram; o contexto no erro de fetch (abaixo) e a metade confiavel
+do diagnostico.
+
 ## Notas de mapeamento de tipos
 
 ### Politica de tratamento de tipos
@@ -1732,6 +1934,124 @@ Uma excecao conhecida e rastreada a essa politica existe hoje:
 segmentos de `ReadBlob` — foi corrigida; `ReadBlob` agora continua lendo
 segmentos ate `isc_segstr_eof`, o unico sinal real de fim de BLOB, em
 vez de parar erroneamente no primeiro `rc == 0`.)
+
+### `NUMERIC(18,s)` / `DECIMAL(18,s)` — o dominio do int64 escalado
+
+O Firebird armazena `NUMERIC`/`DECIMAL` de dialect 3 com precisao 10-18
+como um **inteiro escalado de 64 bits**. Esse int64 fisico carrega valores
+ate +/- (2^63-1) escalados, enquanto a projecao default do DuckDB para
+essas colunas, `DECIMAL(18,s)`, termina em 10^18-1 escalado — uma ordem de
+grandeza mais estreita. Valores acima do teto do DuckDB sao escritos sem
+alteracao no vector `DECIMAL(18,s)` (fisicamente int64), e entao:
+
+- o valor **e exibido** com mais digitos de precisao do que o tipo
+  declarado permite (o dominio do tipo e violado silenciosamente);
+- aritmetica inocente **falha ruidosamente** nos valores extremos — por
+  exemplo, o sentinela classico `NUMERIC(18,6) = -9223372036854.775808`
+  (valor escalado `INT64_MIN`) levanta `Out of Range Error: Overflow in
+  multiplication of DECIMAL(18)` para `col * 2` e `Overflow in negation`
+  para `abs(col)`;
+- consumidores que confiam na precisao `DECIMAL(18,s)` declarada (models
+  dbt, ferramentas BI, alvos de CTAS) tratam mal as linhas fora do dominio.
+
+`numeric_widen_int64=true` — parametro nomeado do `firebird_scan` ou
+opcao do ATTACH — projeta essas colunas como **`DECIMAL(38,s)`**, que tem
+backing hugeint e e sem perda para toda a faixa escalada do int64:
+
+```sql
+SELECT N18_6 FROM firebird_scan('C:/dados/erp.fdb', 'LEDGER',
+                                numeric_widen_int64=true)
+WHERE N18_6 <= -9223372036854.775808;
+
+ATTACH 'C:/dados/erp.fdb' AS erp
+    (TYPE firebird, numeric_widen_int64 true);
+```
+
+Escopo e comportamento:
+
+- Aplica-se **apenas** a numericos escalados com backing int64 (precisao
+  10-18, escala diferente de 0). `NUMERIC(18,0)` continua `BIGINT`;
+  numericos escalados mais estreitos (precisao 1-9) ja cabem em seus
+  `DECIMAL(4,s)`/`DECIMAL(9,s)`; numericos com backing INT128 (precisao
+  19+) ja eram `DECIMAL(38,s)`.
+- O **tipo declarado da coluna** e o **vector de fetch** mudam juntos (o
+  fetch faz a extensao de sinal do int64 escalado para o vector hugeint),
+  inclusive pela reconciliacao de tipos de views.
+- O default e `false`: sem a flag, o mapeamento e o fetch `DECIMAL(18,s)`
+  sao byte a byte o comportamento historico.
+- O `firebird_type_audit` sinaliza cada coluna afetada por esta opcao com
+  o finding estavel `int64_numeric_widenable` (veja acima), permitindo
+  dimensionar o impacto num schema real antes de ativar a flag.
+
+### Tratamento de filtros de texto `CHARACTER SET NONE`
+
+Por padrao, filtros de texto que tocam coluna CHAR/VARCHAR (ou BLOB de
+texto) `CHARACTER SET NONE` nao sao empurrados ao Firebird, exceto quando
+`none_encoding='strict'`: literais DuckDB sao UTF-8 enquanto o servidor
+armazena e compara bytes brutos, entao um literal UTF-8 empurrado poderia
+silenciosamente nao encontrar linhas (`'São Paulo'` e `53 E3 6F ...` num
+disco Windows-1252 mas `53 C3 A3 6F ...` em UTF-8). O predicado e aplicado
+pelo DuckDB apos a transcodificacao, entao o resultado fica correto nos
+dois caminhos.
+
+`none_pushdown=true` (parametro nomeado do `firebird_scan` ou opcao do
+ATTACH) habilita o pushdown de **`=` e `IN (constantes)`** sobre colunas
+**CHAR/VARCHAR** NONE quando `none_encoding` e `win1252` ou
+`iso8859_1`/`latin1`:
+
+```sql
+SELECT *
+FROM firebird_scan('C:/legado/erp.fdb', 'CLIENTES',
+                   none_pushdown=true)
+WHERE CITY = 'São Paulo';
+
+ATTACH 'C:/legado/erp.fdb' AS erp
+    (TYPE firebird, none_encoding 'win1252', none_pushdown true);
+
+SELECT COUNT(*) FROM erp.main.CLIENTES
+WHERE CITY IN ('São Paulo', 'Resende');
+```
+
+Por que e sem perda:
+
+- O Firebird compara valores `CHARACTER SET NONE` **byte a byte** (semantica
+  binaria, sem collation). Cada literal UTF-8 e re-codificado para os bytes
+  brutos do encoding alvo — identicos aos que um escritor Windows-1252 /
+  Latin-1 gravou — entao uma linha casa exatamente quando seu valor
+  transcodificado e igual ao literal.
+- O SQL remoto carrega esses bytes atras de um introduzidor de charset
+  (`"CITY" = _WIN1252 '...'` / `_ISO8859_1 '...'`). O introduzidor e
+  obrigatorio: sem ele, o `isc_dsql_prepare` valida os literais do
+  statement contra o charset de conexao UTF-8 e falha com
+  "Malformed string".
+- A codificacao WIN1252 mapeia `codepoint < 0x80` e `0xA0..0xFF` direto para
+  o byte identico, mais a tabela fixa do Windows-1252 para os 27 codepoints
+  alocados em `0x80–0x9F` (Euro, aspas curvas, tracos, ...). ISO-8859-1
+  mapeia `codepoint <= 0xFF` direto para o byte. Sem dependencias novas.
+
+Fallback conservador e escopo:
+
+- **Qualquer literal nao-codificavel** (ex. `'€'` em `iso8859_1`, cirilico
+  em `win1252`) deixa o filtro inteiro no DuckDB — reaplicado acima do scan —
+  e registra a razao estavel `NONE_CHARSET`, entao
+  `firebird_unpushed_mode='warn' | 'error'` reage exatamente como nos outros
+  casos barrados.
+- **Escopo e so `=` e `IN`.** Comparacoes de intervalo nunca sao empurradas
+  por aqui (a ordem de bytes num encoding de um byte nao coincide sempre com
+  a ordem de codepoints Unicode), e `NOT IN` / `LIKE` mantem o gating
+  NONE_CHARSET existente. BLOBs de texto NONE tambem ficam de fora (o
+  Firebird nao avalia `=` / IN sobre valores BLOB).
+- Com `none_encoding='strict'` ou `'blob'` a flag nao tem **efeito algum**:
+  dados strict sao UTF-8 valido e ja empurram; colunas blob sao `BLOB` do
+  DuckDB. Combinar nao e erro.
+
+Nota de telemetria: o fragmento empurrado (e o `remote_sql` exibido por
+`firebird_last_query()` / `firebird_query_log()` /
+`firebird_explain_pushdown()`) contem intencionalmente os bytes
+re-codificados, que nao sao UTF-8 valido. O DuckDB valida valores
+`VARCHAR`, entao essas superficies exibem cada byte desse escapado como
+`\xNN` — ex. `"CITY" = _WIN1252 'S\xE3o Paulo'`. O SQL de fato enviado ao
+Firebird carrega o byte real (`0xE3`).
 
 ### `DECFLOAT(16)` / `DECFLOAT(34)`
 
