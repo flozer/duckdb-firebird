@@ -114,6 +114,8 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_attach.test
           ./build/release/test/unittest test/sql/firebird_function_docs.test
           ./build/release/test/unittest test/sql/firebird_partitions_scan.test
+          ./build/release/test/unittest test/sql/firebird_session_stability.test
+          ./build/release/test/unittest test/sql/firebird_bytes_estimate.test
 
       - name: Upload extension artifact (linux_amd64)
         uses: actions/upload-artifact@v7

@@ -79,6 +79,16 @@ CREATE DATABASE '$PARTITIONS_DB' DEFAULT CHARACTER SET UTF8;
 EOF
 "$ISQL" -u "$ISC_USER" -p "$ISC_PASSWORD" "$PARTITIONS_DB" -i scripts/fixture_partitions.sql
 
+# Numerics fixture (roadmap G3) -- version-neutral (NUMERIC(18,s) exists
+# on all Firebird versions), own database: carries the int64 sentinels
+# the numeric_widen_int64 tests need.
+NUMERICS_DB="$(dirname "$FIREBIRD_TEST_DB")/numerics.fdb"
+rm -f "$NUMERICS_DB"
+"$ISQL" -u "$ISC_USER" -p "$ISC_PASSWORD" <<EOF
+CREATE DATABASE '$NUMERICS_DB' DEFAULT CHARACTER SET UTF8;
+EOF
+"$ISQL" -u "$ISC_USER" -p "$ISC_PASSWORD" "$NUMERICS_DB" -i scripts/fixture_numerics.sql
+
 # DECFLOAT fixture on Firebird 4+ (roadmap F3): detect the engine version
 # of the database we just created and, when >= 4, provision DECVALS in its
 # own database. On Firebird 3 nothing is exported, and
@@ -106,6 +116,7 @@ chmod 0666 "$FIREBIRD_TEST_DB"
 cat <<EOF
 FIREBIRD_TEST_DB=$FIREBIRD_TEST_DB
 FIREBIRD_PARTITIONS_DB=$PARTITIONS_DB
+FIREBIRD_NUMERICS_DB=$NUMERICS_DB
 $DECFLOAT_EXPORT
 ISC_USER=$ISC_USER
 ISC_PASSWORD=$ISC_PASSWORD
