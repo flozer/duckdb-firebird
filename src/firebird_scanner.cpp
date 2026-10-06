@@ -124,6 +124,14 @@ struct FirebirdLocalState : public LocalTableFunctionState {
     // cursor, so the count in the error message is per-worker, not the
     // query-wide total.
     idx_t rows_read = 0;
+    // G5 — payload-byte estimate drained from the active cursor since
+    // the last flush into the per-query telemetry record (and, on the
+    // ATTACH path, into the catalog pool's lifetime counter). The
+    // statement counts RowWidthBytes() per Fetch() plus actual BLOB
+    // segment bytes; we drain (TakeBytesRead) before every cursor
+    // handoff/reset and at the end of every Scan() call so partition
+    // handoffs and multi-partition workers never lose bytes.
+    int64_t bytes_fetched = 0;
 
     ~FirebirdLocalState() override {
         // Order matters: the cursor has to be torn down before the
@@ -1070,6 +1078,9 @@ static void FirebirdScanFunction(ClientContext &ctx,
             fetch_us += std::chrono::duration_cast<std::chrono::microseconds>(
                             t1 - t0).count();
             if (!got) {
+                // G5 — cursor exhausted: keep its byte count before the
+                // statement is destroyed.
+                local.bytes_fetched += local.cursor->TakeBytesRead();
                 local.cursor.reset();
                 continue;
             }
@@ -1086,6 +1097,8 @@ static void FirebirdScanFunction(ClientContext &ctx,
                 }
                 if (local.slice_limit.IsValid() &&
                     local.rows_emitted >= local.slice_limit.GetIndex()) {
+                    // G5 — drain before dropping the slice-capped cursor.
+                    local.bytes_fetched += local.cursor->TakeBytesRead();
                     local.cursor.reset();
                     break;
                 }
@@ -1108,9 +1121,25 @@ static void FirebirdScanFunction(ClientContext &ctx,
     local.fetch_chunk.SetCardinality(row);
 
     {
+        // G5 — fold this Scan() call's drained payload-byte estimate into
+        // the per-query telemetry record, and (ATTACH path only) into the
+        // catalog pool's lifetime counter. Direct firebird_scan() has no
+        // pool, so it updates only the per-query record — it belongs to
+        // no catalog. Scans through an attached catalog land in BOTH:
+        // the per-query estimate and the per-catalog accumulation.
+        if (local.cursor) {
+            local.bytes_fetched += local.cursor->TakeBytesRead();
+        }
         auto obs = GetObservabilityState(ctx);
         if (row > 0) {
             obs->AddRows(static_cast<int64_t>(row));
+        }
+        if (local.bytes_fetched > 0) {
+            obs->AddBytes(local.bytes_fetched);
+            if (bind.pool) {
+                bind.pool->AddBytesReadEstimate(local.bytes_fetched);
+            }
+            local.bytes_fetched = 0;
         }
         if (fetch_us > 0) {
             obs->AddFirebirdTimeUs(fetch_us);

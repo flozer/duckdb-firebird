@@ -6,7 +6,7 @@ values, pushdown metadata, and per-scan metrics. All state is scoped
 to the current DuckDB `ClientContext` — one session never reads
 another session's queries.
 
-Both functions share the same 18-column schema. The difference is the
+Both functions share the same 19-column schema. The difference is the
 window: `firebird_last_query()` returns at most one row (the most
 recent attempt on this connection); `firebird_query_log()` returns a
 ring buffer, opt-in via setting.
@@ -53,12 +53,13 @@ connection.
 | `limit_pushed` | BIGINT | The `ROWS` limit actually pushed to Firebird (`row_limit`), or `NULL` when no limit was pushed. `NULL` (not `0`) so a real limit of `0` is never ambiguous. |
 | `offset_pushed` | BIGINT | The `ROWS m TO n` offset actually pushed (`row_offset`), or `NULL` when none. |
 | `not_pushed_reasons` | VARCHAR[] | One coarse reason per `residual_filters` entry, same order/length. One of `NONE_CHARSET`, `UNSUPPORTED_OP`, `ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING`. |
+| `bytes_read_estimate` | BIGINT | **ESTIMATE** (G5) of Firebird payload bytes pulled by this query: `rows_read × XSQLDA row width + BLOB segment bytes read`. Definition and exclusions below. |
 
 `limit_pushed` / `offset_pushed` / `not_pushed_reasons` are the Phase 4 #3
 pushdown-explainability columns. They make it explicit what paging reached
-Firebird and why a filter stayed local, without adding a new function — the
-schema is now 18 columns, shared by `firebird_last_query()` and
-`firebird_query_log()`.
+Firebird and why a filter stayed local, without adding a new function.
+`bytes_read_estimate` (G5) is the additive tail column — the schema is now
+19 columns, shared by `firebird_last_query()` and `firebird_query_log()`.
 
 The reasons are factual and coarse, not a planner trace:
 
@@ -216,6 +217,59 @@ attach-DPB keepalive — see the session-options section of
 `function_manual.md` for the exact semantics and the server-side
 caveat. Only the scan data-fetch path carries this context; metadata
 cursors and cursor-open failures surface their errors unchanged.
+
+### `bytes_read_estimate` — definition (G5)
+
+fbclient exposes no wire-traffic meter, so the extension reports an
+**estimate** of the payload transferred per scan:
+
+```
+bytes_read_estimate = rows_read × XSQLDA row width + BLOB segment bytes
+```
+
+What counts:
+
+- **XSQLDA row width** — the sum of the fetch descriptor sizes of the
+  columns the cursor actually projects, fixed once at prepare time:
+  `CHAR(n)` → `n` bytes; `VARCHAR(n)` → `n + 2` (2-byte length prefix);
+  fixed-width numerics/temporals/booleans → their C sizes (`SMALLINT` 2,
+  `INTEGER` 4, `BIGINT` 8, `FLOAT` 4, `DOUBLE` 8, `DATE`/`TIME` 4,
+  `TIMESTAMP` 8, `BOOLEAN` 1, `INT128`/`DEC34`/`DECFLOAT(34)` 16,
+  `DECFLOAT(16)` 8, TZ variants add 2–6 bytes); `BLOB` → 8 (the BLOB id
+  frame; the descriptor carries no content).
+- **BLOB content** — counted where it is actually read: every byte
+  returned by `isc_get_segment` while materialising a BLOB column is
+  added to the estimate.
+- Under parallel scans, every worker's cursors contribute (the estimate
+  is query-wide, unlike the per-worker row count in the G4 error text).
+- Deterministic: identical re-runs report the identical estimate.
+
+What does **not** count (why it is an estimate, not a wire meter):
+
+- Protocol headers, per-row/per-message framing, op codes.
+- Prepare/execute/describe-bind round-trips, including the metadata
+  queries of the ATTACH/bind path (schema discovery, PK probe).
+- Paging (`ROWS m TO n`) bookkeeping beyond the rows themselves.
+- The `sqllen` of a `VARCHAR`/`CHAR` is the declared capacity — a row
+  with short values still counts full declared width (a deliberate,
+  stable over-approximation for text; actual `VARCHAR` payload is
+  length-prefixed on the wire).
+
+Use it for network budgeting on slow links (e.g. WAN at ~0.3 MB/s):
+
+```sql
+SELECT * FROM fb.main.BIG_TABLE LIMIT 0;   -- probe with a real scan
+SELECT rows_read,
+       bytes_read_estimate,
+       bytes_read_estimate / rows_read     AS bytes_per_row,
+       1.0 * bytes_read_estimate / 1024 / 1024 AS est_mb
+  FROM firebird_last_query();
+-- full-table transfer time ≈ est_mb / 0.3 MB/s
+```
+
+The per-catalog lifetime accumulation lives in
+`firebird_pool_stats(catalog).bytes_read_estimate` (ATTACH-path scans
+only — direct `firebird_scan()` belongs to no catalog).
 
 ### Examples
 

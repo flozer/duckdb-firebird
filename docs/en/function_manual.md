@@ -633,14 +633,52 @@ Useful fields include:
   `NULL` when none)
 - elapsed time
 - rows read
+- estimated bytes read from Firebird (`bytes_read_estimate`)
 - parallel scan details
 - connection reuse details
 
-The schema is 18 columns (shared with `firebird_query_log()`). The
+The schema is 19 columns (shared with `firebird_query_log()`). The
 pushdown-explainability columns (`limit_pushed`, `offset_pushed`,
 `not_pushed_reasons`) make it explicit what reached Firebird and why a
-filter stayed local. See `docs/en/observability.md` for the full column
-reference and the reason vocabulary.
+filter stayed local, and `bytes_read_estimate` (added last, G5) supports
+network budgeting before a long scan. See `docs/en/observability.md` for
+the full column reference and the reason vocabulary.
+
+#### `bytes_read_estimate` — what it is and what it counts
+
+fbclient does not expose a wire-traffic meter, so the extension
+**estimates** the transferred payload:
+
+```
+bytes_read_estimate = rows_read × XSQLDA row width + BLOB segment bytes
+```
+
+- **XSQLDA row width** is the sum of the per-column fetch descriptor
+  sizes, fixed once at prepare time: `CHAR(n)` counts `n` bytes,
+  `VARCHAR(n)` counts `n + 2` (length prefix), numerics/temporals count
+  their fixed widths, and a BLOB column counts its 8-byte id frame.
+- **BLOB content** is counted where it is actually read: the segment
+  bytes returned per BLOB are added to the estimate as they cross
+  `isc_get_segment`.
+- **Deterministic**: two identical runs of the same query report the
+  same estimate (same row width, same row count).
+
+It does **not** include: protocol headers and per-row framing, the
+prepare/execute/bind round-trips, paging (`ROWS`) metadata, or the
+connection/attachment handshake. Treat it as a payload lower-bound-ish
+estimate for network budgeting — e.g. "this scan will move roughly X MB"
+— not as an exact byte meter.
+
+Network-budget example (WAN at ~0.3 MB/s — is this scan minutes or
+hours?):
+
+```sql
+SELECT * FROM fb.main.BIG_TABLE LIMIT 0;   -- or any probe scan
+SELECT rows_read, bytes_read_estimate,
+       bytes_read_estimate / rows_read AS bytes_per_row,
+       1.0 * bytes_read_estimate / 1024 / 1024 AS est_mb
+FROM firebird_last_query();
+```
 
 Remedy per `not_pushed_reasons` code (the codes are a stable API):
 
@@ -763,6 +801,10 @@ FROM firebird_explain_pushdown(
 
 Returns the in-memory query log for the current DuckDB session.
 
+Each row carries the same 19-column telemetry schema as
+`firebird_last_query()` — including `bytes_read_estimate`, so a rotated
+log keeps the per-query transfer estimates of the session.
+
 The log is bounded by `firebird_query_log_size` and is intended for
 debugging, diagnostics, and support.
 
@@ -781,7 +823,7 @@ SELECT EMP_ID FROM fb.main.EMPLOYEE WHERE EMP_ID = 1;
 SELECT * FROM firebird_pool_stats('fb');
 ```
 
-Output columns (10):
+Output columns (11):
 
 | Column | Type | Notes |
 |---|---|---|
@@ -795,6 +837,7 @@ Output columns (10):
 | `total_discarded` | BIGINT | Lifetime connections destroyed (pool disabled, or idle cap/expiry hit) |
 | `active_connections` | BIGINT | Connections currently leased out and not yet returned via Release |
 | `last_error` | VARCHAR | Sanitized message of the most recent failed connection creation (`NULL` when none); the password is redacted before storage |
+| `bytes_read_estimate` | BIGINT | G5 — lifetime estimate of Firebird payload bytes fetched by scans that ran **inside this catalog** (ATTACH path). Same semantics as the other lifetime counters: process-relative, never reset. Direct `firebird_scan()` calls are **not** included — they belong to no catalog. Estimate definition: see [`firebird_last_query()`](#firebird_last_query) |
 
 It reads only counters and config the pool already tracks, and it does
 **not** lease a connection — calling it never perturbs the pool it reports
@@ -802,8 +845,16 @@ on. The configured values mirror the pool settings read at `ATTACH` time;
 a later `SET` does not retune an existing pool (re-`ATTACH` to apply).
 
 Use it to confirm pooling is actually reusing connections, to size
-`firebird_pool_max_size`, or to verify a `firebird_pool_enabled = false`
-catalog never parks idle connections.
+`firebird_pool_max_size`, to verify a `firebird_pool_enabled = false`
+catalog never parks idle connections — or, with `bytes_read_estimate`,
+to watch how much Firebird payload a whole working session has pulled
+through one catalog (e.g. before/after a heavy extraction):
+
+```sql
+SELECT bytes_read_estimate,
+       1.0 * bytes_read_estimate / 1024 / 1024 AS est_mb_total
+FROM firebird_pool_stats('fb');
+```
 
 `last_error` is populated only for post-`ATTACH` connection-creation
 failures (a failure during `ATTACH` itself never registers a catalog) —

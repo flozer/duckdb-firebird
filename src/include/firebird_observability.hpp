@@ -26,6 +26,14 @@ struct FirebirdQueryTelemetry {
     std::vector<std::string> pushed_filters;
     std::vector<std::string> residual_filters;
     int64_t rows_read = 0;
+    // G5 — ESTIMATE of Firebird payload bytes pulled by this query:
+    // rows_read x XSQLDA row width (sum of the per-column descriptor
+    // buffer sizes, fixed at prepare time) + actual BLOB segment bytes
+    // read. fbclient exposes no wire-traffic meter, so this is a payload
+    // estimate for network budgeting — protocol headers, prepare/bind
+    // round-trips and paging metadata are NOT included. See
+    // FirebirdStatement::RowWidthBytes()/BytesRead().
+    int64_t bytes_read_estimate = 0;
     int64_t firebird_time_us = 0;
     int64_t total_time_us = 0;
     int64_t connection_id = -1;
@@ -82,6 +90,11 @@ public:
     // is one uncontended lock, called once per fetched chunk (not per
     // row), so it stays off the hot path even for million-row scans.
     void AddRows(int64_t n);
+    // G5 — fold a drained bytes_read_estimate delta (statement-level
+    // row-width x fetches + BLOB segment bytes) into the current record.
+    // Mirrors AddRows: also updates the newest ring-buffer entry so
+    // firebird_query_log() shows in-flight totals.
+    void AddBytes(int64_t bytes);
     void AddFirebirdTimeUs(int64_t us);
     void UpdateTotalTimeUs();
     void SetError(const std::string &msg);

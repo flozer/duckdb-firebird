@@ -72,6 +72,14 @@ void FirebirdObservabilityState::AddRows(int64_t n) {
     }
 }
 
+void FirebirdObservabilityState::AddBytes(int64_t bytes) {
+    std::lock_guard<std::mutex> g(lock_);
+    last_.bytes_read_estimate += bytes;
+    if (!log_.empty()) {
+        log_.back().bytes_read_estimate = last_.bytes_read_estimate;
+    }
+}
+
 void FirebirdObservabilityState::AddFirebirdTimeUs(int64_t us) {
     std::lock_guard<std::mutex> g(lock_);
     last_.firebird_time_us += us;
@@ -339,6 +347,11 @@ std::string RedactBindValue(const Value &v) {
 //   partitions         INTEGER
 //   captured_at        TIMESTAMP
 //   error_message      VARCHAR   - empty when scan ran cleanly
+//   limit_pushed        BIGINT    - SQL NULL when no ROWS was pushed
+//   offset_pushed       BIGINT    - SQL NULL when no ROWS was pushed
+//   not_pushed_reasons  VARCHAR[]
+//   bytes_read_estimate BIGINT    - G5 payload-bytes estimate (rows x
+//                                   XSQLDA width + BLOB segments)
 
 // Forward declarations - shared by firebird_last_query() and
 // firebird_query_log() below.
@@ -380,7 +393,7 @@ static Value VarcharList(const std::vector<std::string> &xs) {
 
 // Emit one FirebirdQueryTelemetry into the output chunk at index `row`.
 // Shared by firebird_last_query() and firebird_query_log() to keep the
-// 18-column schema in lockstep.
+// 19-column schema in lockstep.
 static void EmitTelemetryRow(DataChunk &output, idx_t row,
                               const FirebirdQueryTelemetry &t) {
     output.data[0].SetValue(row, Value(t.remote_sql));
@@ -408,6 +421,10 @@ static void EmitTelemetryRow(DataChunk &output, idx_t row,
         ? Value::BIGINT(static_cast<int64_t>(t.offset_pushed.GetIndex()))
         : Value(LogicalType::BIGINT));
     output.data[17].SetValue(row, VarcharList(t.not_pushed_reasons));
+    // G5 — additive tail column; appended AFTER not_pushed_reasons so the
+    // historical 18-column prefix keeps its order (additive schema
+    // evolution contract documented in docs/*/function_manual.md).
+    output.data[18].SetValue(row, Value::BIGINT(t.bytes_read_estimate));
 }
 
 // Returns the canonical (names, types) the two observability table
@@ -434,6 +451,7 @@ static void TelemetrySchema(vector<string> &names,
         "limit_pushed",
         "offset_pushed",
         "not_pushed_reasons",
+        "bytes_read_estimate",
     };
     types = {
         LogicalType::VARCHAR,
@@ -454,6 +472,7 @@ static void TelemetrySchema(vector<string> &names,
         LogicalType::BIGINT,
         LogicalType::BIGINT,
         LogicalType::LIST(LogicalType::VARCHAR),
+        LogicalType::BIGINT,
     };
 }
 

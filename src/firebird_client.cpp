@@ -729,6 +729,14 @@ void FirebirdStatement::AllocateBuffers() {
     buffers_.resize(n);
     indicators_.assign(n, 0);
     columns_.resize(n);
+    // G5 — row width for the bytes_read_estimate: the sum of the
+    // per-column fetch buffer sizes allocated below. These are exactly
+    // the descriptor widths libfbclient fills per fetched row (CHAR
+    // sqllen, VARCHAR sqllen + 2-byte length prefix, fixed numeric /
+    // temporal / tz widths, 8-byte BLOB id frame), so rows_read x
+    // row_width_bytes_ is a stable lower-bound-ish payload estimate.
+    // Computed once here — prepare/describe time — never per fetch.
+    int64_t width = 0;
 
     for (int i = 0; i < n; ++i) {
         XSQLVAR &v = out_sqlda_->sqlvar[i];
@@ -798,11 +806,13 @@ void FirebirdStatement::AllocateBuffers() {
         default:            bufsz = v.sqllen > 0 ? v.sqllen : 8;
         }
         buffers_[i].assign(bufsz, 0);
+        width += static_cast<int64_t>(bufsz);
         v.sqldata = buffers_[i].data();
         // Force nullable so libfbclient writes into our indicator slot.
         v.sqltype = c.sqltype | 1;
         v.sqlind  = &indicators_[i];
     }
+    row_width_bytes_ = width;
 }
 
 bool FirebirdStatement::Fetch() {
@@ -812,6 +822,9 @@ bool FirebirdStatement::Fetch() {
     if (rc != 0) {
         FirebirdConnection::Check(status, "isc_dsql_fetch");
     }
+    // G5 — one row crossed the wire; add this cursor's fixed payload
+    // width. BLOB content is added separately, where ReadBlob() runs.
+    bytes_read_ += row_width_bytes_;
     return true;
 }
 
@@ -938,6 +951,11 @@ std::string FirebirdStatement::ReadBlob(idx_t col) const {
     }
     std::memset(status, 0, sizeof(status));
     isc_close_blob(status, &blob);
+    // G5 — BLOB content does not travel in the XSQLDA row frame (only
+    // its 8-byte id does); it arrives through these isc_get_segment
+    // calls. Count the bytes actually received so scans of BLOB-bearing
+    // tables do not grossly understate the transfer.
+    bytes_read_ += static_cast<int64_t>(out.size());
     return out;
 }
 

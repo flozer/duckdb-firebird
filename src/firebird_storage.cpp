@@ -931,6 +931,11 @@ struct FirebirdPoolStatsRow {
     int64_t     total_discarded = 0;
     int64_t     active_connections = 0;
     std::string last_error; // "" -> NULL (no failure recorded)
+    // G5 — lifetime payload-byte estimate accumulated by every scan that
+    // ran inside this catalog (ATTACH path). Same semantics as the other
+    // lifetime counters: process-relative, never reset. Direct
+    // firebird_scan() calls are NOT included — they have no catalog.
+    int64_t     bytes_read_estimate = 0;
 };
 
 FirebirdPoolStatsRow ReadFirebirdPoolStats(ClientContext &context,
@@ -953,6 +958,7 @@ FirebirdPoolStatsRow ReadFirebirdPoolStats(ClientContext &context,
     row.total_discarded    = pool.TotalDiscarded();
     row.active_connections = pool.ActiveCount();
     row.last_error         = pool.LastError();
+    row.bytes_read_estimate = pool.BytesReadEstimate();
     return row;
 }
 
@@ -993,6 +999,7 @@ unique_ptr<FunctionData> PoolStatsBind(ClientContext &context,
         "total_discarded",
         "active_connections",
         "last_error",
+        "bytes_read_estimate",
     };
     return_types = {
         LogicalType::VARCHAR,
@@ -1005,6 +1012,7 @@ unique_ptr<FunctionData> PoolStatsBind(ClientContext &context,
         LogicalType::BIGINT,
         LogicalType::BIGINT,
         LogicalType::VARCHAR,
+        LogicalType::BIGINT,
     };
     return std::move(bind);
 }
@@ -1037,6 +1045,7 @@ void PoolStatsFunction(ClientContext &context, TableFunctionInput &input,
     output.data[9].SetValue(0, r.last_error.empty()
                                   ? Value(LogicalType::VARCHAR)
                                   : Value(r.last_error));
+    output.data[10].SetValue(0, Value::BIGINT(r.bytes_read_estimate));
     g.emitted = true;
 }
 

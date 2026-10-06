@@ -1107,6 +1107,8 @@ Saida compartilhada com `firebird_query_log()`:
 - `pushed_filters`: filtros empurrados ao Firebird.
 - `residual_filters`: filtros mantidos para o DuckDB revalidar.
 - `rows_read`: linhas lidas.
+- `bytes_read_estimate`: ESTIMATIVA de bytes de payload lidos do Firebird
+  (G5) - veja a definicao exata logo abaixo.
 - `firebird_time_us`: tempo de chamadas Firebird em microssegundos.
 - `total_time_us`: tempo total desde a captura.
 - `connection_id`: ID monotonico global ao processo, atribuido pela extensao
@@ -1137,8 +1139,9 @@ Saida compartilhada com `firebird_query_log()`:
 As tres ultimas (`limit_pushed` / `offset_pushed` / `not_pushed_reasons`)
 sao as colunas de explicabilidade de pushdown (Fase 4 #3). Deixam explicito
 o que de paginacao chegou ao Firebird e por que um filtro ficou local, sem
-funcao nova - o schema agora tem 18 colunas, compartilhado por
-`firebird_last_query()` e `firebird_query_log()`. As razoes sao factuais e
+funcao nova. `bytes_read_estimate` (G5) entra como coluna aditiva no fim -
+o schema agora tem 19 colunas, compartilhado por `firebird_last_query()` e
+`firebird_query_log()`. As razoes sao factuais e
 coarse, nao um trace de planner:
 
 - `NONE_CHARSET`: a coluna e texto `CHARACTER SET NONE` e o pushdown e
@@ -1177,6 +1180,43 @@ Para fazer filtros residuais agirem em vez de so reportar, use
 `SET firebird_unpushed_mode = 'warn' | 'error'` - veja
 [Nivel 5 - Opcoes de sessao](#nivel-5---opcoes-de-sessao).
 
+#### Definicao exata de `bytes_read_estimate` (ESTIMATIVA)
+
+O fbclient nao expoe medidor de trafego de rede; a extensao **estima** o
+payload transferido:
+
+```
+bytes_read_estimate = rows_read x largura da linha no XSQLDA
+                      + bytes de segmentos de BLOB lidos
+```
+
+- **Largura da linha no XSQLDA** e a soma dos tamanhos dos descritores de
+  fetch por coluna, fixada uma vez no prepare: `CHAR(n)` conta `n` bytes,
+  `VARCHAR(n)` conta `n + 2` (prefixo de tamanho), numericos/temporais
+  contam sua largura fixa, e uma coluna BLOB conta seu quadro de 8 bytes
+  (o id do BLOB).
+- **Conteudo de BLOB** e contado onde de fato e lido: os bytes de segmento
+  devolvidos por BLOB entram na estimativa na medida em que cruzam o
+  `isc_get_segment`.
+- **Deterministico**: duas execucoes identicas da mesma query reportam a
+  mesma estimativa (mesma largura, mesmo numero de linhas).
+
+Nao entra na conta: headers de protocolo e enquadramento por linha, as
+round-trips de prepare/execute/bind, metadados de paginacao (`ROWS`) e o
+handshake de conexao/attachment. Trate como estimativa de payload para
+orcamento de rede - "esse scan vai mover ~X MB" - nao como medidor exato
+de bytes de fio.
+
+Exemplo de orcamento de rede (WAN de ~0,3 MB/s - esse scan leva minutos ou
+horas?):
+
+```sql
+SELECT rows_read, bytes_read_estimate,
+       bytes_read_estimate / rows_read AS bytes_per_row,
+       1.0 * bytes_read_estimate / 1024 / 1024 AS est_mb
+FROM firebird_last_query();
+```
+
 Seguranca:
 
 - Texto e blob em binds viram `<text:redacted>`.
@@ -1214,6 +1254,15 @@ Checar tempos e linhas:
 
 ```sql
 SELECT rows_read, firebird_time_us, total_time_us
+FROM firebird_last_query();
+```
+
+Orcar a rede antes de rodar um scan pesado (probe curto com `row_limit`,
+depois extrapolar):
+
+```sql
+SELECT rows_read, bytes_read_estimate,
+       1.0 * bytes_read_estimate / 1024 / 1024 AS est_mb
 FROM firebird_last_query();
 ```
 
@@ -1334,7 +1383,10 @@ FROM firebird_explain_pushdown(
 #### O que faz e como funciona
 
 Mostra um historico curto das queries Firebird tentadas na conexao DuckDB
-atual. O log e desligado por padrao.
+atual. O log e desligado por padrao. Cada linha carrega o mesmo schema de
+telemetria de 19 colunas do `firebird_last_query()` - incluindo
+`bytes_read_estimate`, entao o log rotacionado preserva as estimativas de
+transferencia por query da sessao.
 
 Ativar:
 
@@ -1414,7 +1466,7 @@ SELECT IDCLIENTE FROM fb.main.CLIENTES WHERE IDCLIENTE = 1;
 SELECT * FROM firebird_pool_stats('fb');
 ```
 
-Colunas de saida (10):
+Colunas de saida (11):
 
 - `catalog_name`: o alias passado.
 - `pool_enabled`: se o pool do ATTACH esta habilitado.
@@ -1431,6 +1483,12 @@ Colunas de saida (10):
   via Release.
 - `last_error`: mensagem sanitizada da criacao de conexao com falha mais
   recente (`NULL` quando nenhuma); a senha e redigida antes de armazenar.
+- `bytes_read_estimate`: (G5) estimativa acumulada ao longo da vida dos
+  bytes de payload Firebird lidos por scans que rodaram **dentro deste
+  catalogo** (caminho ATTACH). Mesma semantica dos outros contadores de
+  vida: relativa ao processo, nunca reseta. Chamadas diretas a
+  `firebird_scan()` **nao** entram - nao pertencem a catalogo algum.
+  Definicao da estimativa: veja [`firebird_last_query()`](#firebird_last_query).
 
 Le apenas contadores e config que o pool ja rastreia, e **nao** faz lease de
 conexao - chamar nunca perturba o pool que reporta. Os valores configurados
@@ -1451,11 +1509,18 @@ em voo em outra conexao mantem o valor acima de 0.
 - Dimensionar `firebird_pool_max_size`.
 - Verificar que um catalogo com `firebird_pool_enabled = false` nunca
   estaciona conexoes idle.
+- Com `bytes_read_estimate`, acompanhar quanto payload Firebird uma sessao
+  inteira de trabalho ja puxou por catalogo (antes/depois de uma extracao
+  pesada).
 
 #### Uso no dia a dia
 
 ```sql
 SELECT pool_enabled, idle_connections, total_created, total_reused
+FROM firebird_pool_stats('fb');
+
+SELECT bytes_read_estimate,
+       1.0 * bytes_read_estimate / 1024 / 1024 AS est_mb_total
 FROM firebird_pool_stats('fb');
 ```
 
