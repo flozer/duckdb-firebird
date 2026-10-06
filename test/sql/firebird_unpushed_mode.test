@@ -27,6 +27,7 @@
 require firebird
 
 require-env FIREBIRD_NONE_DB
+
 require-env ISC_PASSWORD
 
 # --- (a) default silent mode: results unchanged, nothing fails -------

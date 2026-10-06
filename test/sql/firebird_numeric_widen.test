@@ -41,6 +41,7 @@
 require firebird
 
 require-env FIREBIRD_NUMERICS_DB
+
 require-env ISC_PASSWORD
 
 # ---------------------------------------------------------------------------
