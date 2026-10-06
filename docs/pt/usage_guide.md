@@ -1,5 +1,8 @@
 # duckdb-firebird - Guia de uso para analistas
 
+> A primeira extensao Firebird publicada no registro
+> [DuckDB Community Extensions](https://github.com/duckdb/community-extensions).
+
 Este guia mostra como usar a extensao `firebird` para consultar bases
 Firebird a partir do [DuckDB](https://github.com/duckdb/duckdb), criar uma camada local de analytics em
 arquivo `.duckdb`, materializar dados em tabelas rapidas e exportar
@@ -892,6 +895,60 @@ ORDER BY 2 DESC;
 COPY gold.pessoas_por_uf
 TO 'C:/exports/pessoas_por_uf.parquet'
 (FORMAT parquet, COMPRESSION zstd);
+```
+
+## 19. Novidades da v1.2.0 - pushdown sobre texto NONE legado, guardas e orcamento
+
+### Filtrar colunas CHARACTER SET NONE no servidor (`none_pushdown`)
+
+Colunas de texto NONE nunca empurravam filtros - um `IN` grande
+significava full scan no servidor. Ative e literais constantes de
+`=`/`IN` viajam re-encodeados (casamento byte a byte lossless; literais
+nao codificaveis caem de volta automaticamente):
+
+```sql
+ATTACH 'C:/legacy/erp.fdb' AS erp
+    (TYPE firebird, none_encoding 'win1252', none_pushdown true);
+
+SELECT count(*)
+FROM erp.main.APURACAOSIMPLESDASWEBTEMP
+WHERE ANOMES IN ('202501', '202502', '202503');
+-- remote_sql agora carrega: "ANOMES" IN (_WIN1252 '202501', ...)
+SELECT remote_sql, pushed_filters FROM firebird_last_query();
+```
+
+Escopo: `=` e `IN` em CHAR/VARCHAR. Range, `LIKE` e `NOT IN` ficam no
+cliente (o DuckDB os aplica, corretamente).
+
+### Falhar rapido em vez de full scan silencioso (`firebird_unpushed_mode`)
+
+Arme antes de cargas longas; um scan que mantem filtros no DuckDB falha
+com a razao e o remedio em vez de rodar por horas:
+
+```sql
+SET firebird_unpushed_mode = 'error';   -- ou 'warn' (default 'silent')
+SELECT count(*) FROM erp.main.T WHERE DESCRICAORECEITA NOT IN ('VENDA');
+-- Invalid Input Error: ... NONE_CHARSET (1): ... use none_pushdown=true ...
+```
+
+### NUMERIC(18,s) alem de ±10^18 (`numeric_widen_int64`)
+
+```sql
+SELECT typeof(QTDPMR) FROM firebird_scan('C:/legacy/erp.fdb', 'SFCLIENTE');
+-- DECIMAL(18,2)
+SELECT typeof(QTDPMR) FROM firebird_scan('C:/legacy/erp.fdb', 'SFCLIENTE',
+                                         numeric_widen_int64=true);
+-- DECIMAL(38,2) - a faixa completa do int64 escalado sobrevive a aritmetica
+```
+O `firebird_type_audit('erp')` lista cada coluna afetada como
+`int64_numeric_widenable`.
+
+### Sessoes longas em WAN/NAT e orcamento de rede
+
+```sql
+SET firebird_dummy_packet_interval = 60;   -- DPB de keepalive, segundos
+SELECT rows_read, bytes_read_estimate FROM firebird_last_query();
+SELECT bytes_read_estimate FROM firebird_pool_stats('erp');  -- acumulado
 ```
 
 ## 18. Troubleshooting

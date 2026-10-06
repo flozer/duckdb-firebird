@@ -894,6 +894,59 @@ TO 'C:/exports/pessoas_por_uf.parquet'
 (FORMAT parquet, COMPRESSION zstd);
 ```
 
+## 19. New in v1.2.0 — pushdown over legacy NONE text, guards, and budgeting
+
+### Filter CHARACTER SET NONE columns server-side (`none_pushdown`)
+
+Legacy NONE text columns never pushed filters down — a big `IN` meant a
+full server scan. Opt in and constant `=`/`IN` literals travel re-encoded
+(lossless byte-wise match; unencodable literals fall back automatically):
+
+```sql
+ATTACH 'C:/legacy/erp.fdb' AS erp
+    (TYPE firebird, none_encoding 'win1252', none_pushdown true);
+
+SELECT count(*)
+FROM erp.main.APURACAOSIMPLESDASWEBTEMP
+WHERE ANOMES IN ('202501', '202502', '202503');
+-- remote_sql now carries: "ANOMES" IN (_WIN1252 '202501', ...)
+SELECT remote_sql, pushed_filters FROM firebird_last_query();
+```
+
+Scope: `=` and `IN` on CHAR/VARCHAR. Ranges, `LIKE` and `NOT IN` stay
+client-side (DuckDB still applies them, correctly).
+
+### Fail fast instead of silently full-scanning (`firebird_unpushed_mode`)
+
+Arm before long loads; a scan that keeps filters in DuckDB fails with the
+reason and remedy instead of running for hours:
+
+```sql
+SET firebird_unpushed_mode = 'error';   -- or 'warn' (default 'silent')
+SELECT count(*) FROM erp.main.T WHERE DESCRICAORECEITA NOT IN ('VENDA');
+-- Invalid Input Error: ... NONE_CHARSET (1): ... use none_pushdown=true ...
+```
+
+### NUMERIC(18,s) beyond ±10^18 (`numeric_widen_int64`)
+
+```sql
+SELECT typeof(QTDPMR) FROM firebird_scan('C:/legacy/erp.fdb', 'SFCLIENTE');
+-- DECIMAL(18,2)
+SELECT typeof(QTDPMR) FROM firebird_scan('C:/legacy/erp.fdb', 'SFCLIENTE',
+                                         numeric_widen_int64=true);
+-- DECIMAL(38,2) - the full scaled-int64 range survives arithmetic
+```
+`firebird_type_audit('erp')` lists every affected column as
+`int64_numeric_widenable`.
+
+### Long sessions over WAN/NAT, and network budgeting
+
+```sql
+SET firebird_dummy_packet_interval = 60;   -- keepalive DPB, seconds
+SELECT rows_read, bytes_read_estimate FROM firebird_last_query();
+SELECT bytes_read_estimate FROM firebird_pool_stats('erp');  -- lifetime
+```
+
 ## 18. Troubleshooting
 
 ### `Extension "firebird" could not be loaded`
