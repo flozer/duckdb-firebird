@@ -247,11 +247,10 @@ DuckDB behavior.
 
 ## Current Status
 
-Published community release: **v1.1.0** (`INSTALL firebird FROM
+Published community release: **v1.2.0** (`INSTALL firebird FROM
 community`; descriptor merged as
-[duckdb/community-extensions#2888](https://github.com/duckdb/community-extensions/pull/2888)
-on 2026-10-02); the v1.2.0 descriptor update is prepared and gated on
-maintainer authorization. The copy in
+[duckdb/community-extensions#2947](https://github.com/duckdb/community-extensions/pull/2947)
+on 2026-10-08). The copy in
 [`community-extensions/description.yml`](community-extensions/description.yml)
 mirrors the latest prepared descriptor. Descriptors pin an immutable
 commit SHA in `repo.ref` (catalog convention).
