@@ -171,6 +171,16 @@ ATTACH 'database=C:/data/erp.fdb user=APP_READONLY password=secret'
          numeric_widen_int64 true);
 ```
 
+Since v1.2.1, `none_encoding` and `none_pushdown` are also accepted inside
+the connection string itself, in both supported forms — URI query
+(`firebird://user:pass@host:3050/path?charset=UTF8&none_encoding=win1252&none_pushdown=true`)
+and key=value DSN (`database=C:/data/erp.fdb;user=APP_READONLY;password=secret;none_encoding=win1252;none_pushdown=true`).
+Booleans accept `true`/`false`/`1`/`0`; anything else fails with an
+actionable error (unknown keys are still ignored, so spell carefully).
+Precedence: explicit ATTACH option / `firebird_scan` named parameter >
+connection string > default. `numeric_widen_int64` remains an ATTACH
+option / named parameter only.
+
 Prefer `ATTACH` for analytics sessions that query multiple Firebird tables.
 It enables catalog discovery, normal SQL references, and connection-pool
 reuse.

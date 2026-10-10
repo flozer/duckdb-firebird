@@ -66,6 +66,23 @@ static std::string UrlDecode(const std::string &s) {
     return out;
 }
 
+// v1.2.1 — strict boolean for connection-string options. The parser
+// silently skips unknown keys, so a typo'd none_pushdown would otherwise
+// look applied while staying off: fail loud instead.
+static bool ParseConnStringBool(const std::string &key,
+                                const std::string &val) {
+    std::string lower;
+    lower.reserve(val.size());
+    for (char c : val) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    if (lower == "true" || lower == "1") return true;
+    if (lower == "false" || lower == "0") return false;
+    throw InvalidInputException(
+        "connection-string option '%s' expects true/false (or 1/0), got "
+        "'%s'", key, val);
+}
+
 FirebirdConnectionInfo FirebirdConnectionInfo::Parse(const std::string &conn_str) {
     FirebirdConnectionInfo info;
 
@@ -124,6 +141,10 @@ FirebirdConnectionInfo FirebirdConnectionInfo::Parse(const std::string &conn_str
             else if (key == "dialect")  info.dialect  = std::atoi(val.c_str());
             else if (key == "user")     info.user     = val;
             else if (key == "password") info.password = val;
+            // v1.2.1 — NONE-charset preferences ride the connection
+            // string too; raw spelling here, parsed at the use site.
+            else if (key == "none_encoding") info.none_encoding = val;
+            else if (key == "none_pushdown") info.none_pushdown = ParseConnStringBool(key, val);
         }
         return info;
     }
@@ -147,6 +168,10 @@ FirebirdConnectionInfo FirebirdConnectionInfo::Parse(const std::string &conn_str
             else if (key == "charset")  info.charset  = val;
             else if (key == "role")     info.role     = val;
             else if (key == "dialect")  info.dialect  = std::atoi(val.c_str());
+            // v1.2.1 — NONE-charset preferences ride the connection
+            // string too; raw spelling here, parsed at the use site.
+            else if (key == "none_encoding") info.none_encoding = val;
+            else if (key == "none_pushdown") info.none_pushdown = ParseConnStringBool(key, val);
         }
         return info;
     }

@@ -461,6 +461,14 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
     bind->conn_info = FirebirdConnectionInfo::Parse(input.inputs[0].ToString());
     bind->table_name = input.inputs[1].ToString();
 
+    // v1.2.1 — connection-string preferences seed the NONE settings so
+    // they ride the DSN/URI form; the named parameters below keep
+    // precedence when explicitly supplied.
+    if (!bind->conn_info.none_encoding.empty()) {
+        bind->none_encoding = ParseNoneEncoding(bind->conn_info.none_encoding);
+    }
+    bind->none_pushdown = bind->conn_info.none_pushdown;
+
     // Per-call overrides via named parameters.
     for (auto &kv : input.named_parameters) {
         auto &key = kv.first;

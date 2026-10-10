@@ -11,7 +11,7 @@
   </p>
   <p>
     <a href="LICENSE"><img alt="license MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
-    <a href="https://github.com/flozer/duckdb-firebird/releases/tag/v1.2.0"><img alt="release v1.2.0" src="https://img.shields.io/badge/release-v1.2.0-blue.svg"></a>
+    <a href="https://github.com/flozer/duckdb-firebird/releases/tag/v1.2.1"><img alt="release v1.2.1" src="https://img.shields.io/badge/release-v1.2.1-blue.svg"></a>
     <a href="https://github.com/flozer/duckdb-firebird/actions/workflows/build-linux-fb-matrix.yml"><img alt="linux matrix" src="https://github.com/flozer/duckdb-firebird/actions/workflows/build-linux-fb-matrix.yml/badge.svg"></a>
     <a href="https://github.com/duckdb/community-extensions/pull/1980"><img alt="community extension merged" src="https://img.shields.io/badge/DuckDB%20community-merged-brightgreen.svg"></a>
     <a href="https://duckdb.org/community_extensions/download_metrics"><img alt="total DuckDB Community downloads for firebird" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fflozer%2Fduckdb-firebird%2Fmain%2F.github%2Fbadges%2Fdownloads.json"></a>
@@ -250,14 +250,16 @@ DuckDB behavior.
 Published community release: **v1.2.0** (`INSTALL firebird FROM
 community`; descriptor merged as
 [duckdb/community-extensions#2947](https://github.com/duckdb/community-extensions/pull/2947)
-on 2026-10-08). The copy in
+on 2026-10-08); the v1.2.1 patch (connection-string support for
+`none_encoding` / `none_pushdown`) is prepared. The copy in
 [`community-extensions/description.yml`](community-extensions/description.yml)
 mirrors the latest prepared descriptor. Descriptors pin an immutable
 commit SHA in `repo.ref` (catalog convention).
 
-`main` is at **v1.2.0** (see
-[docs/en/release_notes_v1.2.0.md](docs/en/release_notes_v1.2.0.md)):
-v1.1.0 plus the G-queue — `none_pushdown` (`=`/`IN` over CHARACTER SET
+`main` is at **v1.2.1** (see
+[docs/en/release_notes_v1.2.1.md](docs/en/release_notes_v1.2.1.md)):
+v1.2.0 plus connection-string support for `none_encoding` /
+`none_pushdown`; v1.2.0 delivered the G-queue — `none_pushdown` (`=`/`IN` over CHARACTER SET
 NONE columns), the `firebird_unpushed_mode` guard,
 `numeric_widen_int64` (NUMERIC(18,s) → DECIMAL(38,s)),
 `firebird_dummy_packet_interval` keepalive with fetch-failure context,

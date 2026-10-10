@@ -245,3 +245,43 @@ true
 
 statement ok
 DETACH att_l1;
+
+# ---------------------------------------------------------------------------
+#  v1.2.1 — none_encoding / none_pushdown accepted INSIDE the connection
+#  string. Local envs hand a bare path (DSN: 'database=<path>;k=v'); CI
+#  hands a firebird:// URL (query: '?k=v&...'). CASE picks the right form.
+# ---------------------------------------------------------------------------
+
+# Values seen through the connection-string form (transcode sanity).
+
+query II
+SELECT ID, LABEL FROM firebird_scan(
+    CASE WHEN starts_with('${FIREBIRD_NONE_DB}', 'firebird://')
+         THEN '${FIREBIRD_NONE_DB}&none_encoding=win1252&none_pushdown=true'
+         ELSE 'database=${FIREBIRD_NONE_DB};none_encoding=win1252;none_pushdown=true'
+    END, 'TXT', none_pushdown=false) WHERE LABEL = 'São Paulo' ORDER BY ID;
+----
+2	São Paulo
+
+# Pushdown end to end through the connection-string form: same row.
+
+query I
+SELECT count(*) FROM firebird_scan(
+    CASE WHEN starts_with('${FIREBIRD_NONE_DB}', 'firebird://')
+         THEN '${FIREBIRD_NONE_DB}&none_encoding=win1252&none_pushdown=true'
+         ELSE 'database=${FIREBIRD_NONE_DB};none_encoding=win1252;none_pushdown=true'
+    END, 'TXT') WHERE LABEL = 'São Paulo';
+----
+1
+
+# A malformed boolean in the connection string fails loud with an
+# actionable message instead of being silently ignored.
+
+statement error
+SELECT count(*) FROM firebird_scan(
+    CASE WHEN starts_with('${FIREBIRD_NONE_DB}', 'firebird://')
+         THEN '${FIREBIRD_NONE_DB}&none_pushdown=yes'
+         ELSE 'database=${FIREBIRD_NONE_DB};none_pushdown=yes'
+    END, 'TXT');
+----
+connection-string option 'none_pushdown' expects true/false (or 1/0), got 'yes'
