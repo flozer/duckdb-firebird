@@ -58,6 +58,13 @@ struct FirebirdConnectionInfo {
     // connections, metadata leases, schema/table catalog entries and
     // scanner connections all attach through FirebirdConnection::Attach().
     int64_t dummy_packet_interval_secs = 0;
+    // v1.2.1 — NONE-charset preferences parsed straight from the
+    // connection string (URI query `?none_encoding=...&none_pushdown=...`
+    // or key=value `;none_encoding=...;none_pushdown=...`). Empty string /
+    // false = unset: the firebird_scan named parameter and the ATTACH
+    // option keep precedence over the connection-string form.
+    std::string none_encoding;   // raw spelling; parsed at the use site
+    bool none_pushdown = false;
 
     static FirebirdConnectionInfo Parse(const std::string &conn_str);
 };

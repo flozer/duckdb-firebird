@@ -376,6 +376,16 @@ ATTACH 'C:/dados/empresa.fdb' AS fb
  numeric_widen_int64 true);
 ```
 
+Desde a v1.2.1, `none_encoding` e `none_pushdown` tambem sao aceitos dentro
+da propria string de conexao, nas duas formas suportadas — query de URI
+(`firebird://usuario:senha@host:3050/path?charset=UTF8&none_encoding=win1252&none_pushdown=true`)
+e DSN chave=valor (`database=C:/dados/empresa.fdb;user=APP_READONLY;password=secret;none_encoding=win1252;none_pushdown=true`).
+Booleans aceitam `true`/`false`/`1`/`0`; qualquer outro valor falha com erro
+acionavel (chaves desconhecidas continuam ignoradas — escreva com cuidado).
+Precedencia: opcao explicita do ATTACH / parametro nomeado do
+`firebird_scan` > string de conexao > default. `numeric_widen_int64`
+permanece disponivel apenas como opcao do ATTACH / parametro nomeado.
+
 Internamente, o storage extension do DuckDB resolve scans de tabelas remotas e
 reusa a mesma infraestrutura do `firebird_scan`: schema remoto, pushdown,
 prepared statements, particionamento e conversao de tipos.

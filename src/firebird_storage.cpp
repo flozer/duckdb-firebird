@@ -798,6 +798,13 @@ static FirebirdConnectionInfo BuildConnectionInfo(const std::string &path,
     out_none = NoneEncoding::WIN1252;
     out_none_pushdown = false;
     out_numeric_widen = false;
+    // v1.2.1 — connection-string preferences seed the NONE settings so
+    // they ride the DSN/URI form; the explicit ATTACH options below keep
+    // precedence when supplied.
+    if (!conn.none_encoding.empty()) {
+        out_none = ParseNoneEncoding(conn.none_encoding);
+    }
+    out_none_pushdown = conn.none_pushdown;
     for (auto &kv : info.options) {
         const auto &key = kv.first;
         const auto &val = kv.second;
