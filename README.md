@@ -247,11 +247,10 @@ DuckDB behavior.
 
 ## Current Status
 
-Published community release: **v1.2.0** (`INSTALL firebird FROM
+Published community release: **v1.2.1** (`INSTALL firebird FROM
 community`; descriptor merged as
-[duckdb/community-extensions#2947](https://github.com/duckdb/community-extensions/pull/2947)
-on 2026-10-08); the v1.2.1 patch (connection-string support for
-`none_encoding` / `none_pushdown`) is prepared. The copy in
+[duckdb/community-extensions#3022](https://github.com/duckdb/community-extensions/pull/3022)
+on 2026-10-12). The copy in
 [`community-extensions/description.yml`](community-extensions/description.yml)
 mirrors the latest prepared descriptor. Descriptors pin an immutable
 commit SHA in `repo.ref` (catalog convention).
