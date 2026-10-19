@@ -58,10 +58,12 @@ jobs:
           existing_pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open \
             --json number --jq '.[0].number // empty')
           if [ -z "$existing_pr" ]; then
-            existing_pr=$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
+            # gh pr create prints the PR URL on success (it has no --json);
+            # the number is the trailing path segment.
+            pr_url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
               --title "docs: update download badge" \
-              --body "Automated update to \`.github/badges/downloads.json\` via \`scripts/update_download_badge.mjs\`. Merged automatically by this workflow so the README badge stays fresh daily." \
-              --json number --jq '.number')
+              --body "Automated update to \`.github/badges/downloads.json\` via \`scripts/update_download_badge.mjs\`. Merged automatically by this workflow so the README badge stays fresh daily.")
+            existing_pr="${pr_url##*/}"
           else
             echo "PR #$existing_pr already open for $BRANCH -- branch force-pushed with the latest count."
           fi
