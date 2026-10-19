@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "label": "downloads",
-  "message": "15K total",
+  "message": "16K total",
   "color": "blue",
-  "total": 14904,
+  "total": 16200,
   "extension": "firebird",
   "source": "https://duckdb.org/community_extensions/download_metrics",
   "source_data": "https://community-extensions.duckdb.org/download-stats-weekly",
-  "weeks_with_data": 41,
-  "last_update": "2026-10-11T04:00:07.532Z",
-  "generated_at": "2026-10-12T15:43:36.822Z"
+  "weeks_with_data": 42,
+  "last_update": "2026-10-18T04:00:27.249Z",
+  "generated_at": "2026-10-19T14:17:35.503Z"
 }
