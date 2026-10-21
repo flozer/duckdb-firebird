@@ -634,7 +634,7 @@ struct ProfileTableGlobalState : public GlobalTableFunctionState {
 
 static unique_ptr<FunctionData>
 ProfileTableBind(ClientContext &context, TableFunctionBindInput &input,
-                 vector<LogicalType> &return_types, vector<string> &names) {
+                 vector<LogicalType> &return_types, vector<Identifier> &names) {
     if (input.inputs.empty() || input.inputs[0].IsNull()) {
         throw BinderException(
             "firebird_profile_table(qualified_name VARCHAR): qualified_name "
@@ -647,6 +647,8 @@ ProfileTableBind(ClientContext &context, TableFunctionBindInput &input,
     bind->catalog_name = qn.catalog;
     bind->table_name = qn.table;
     for (auto &kv : input.named_parameters) {
+        // v2.0: NULL = omitted keyword-only parameter (its default).
+        if (kv.second.IsNull()) continue;
         if (kv.first == "exact_row_count") {
             bind->exact_row_count = kv.second.GetValue<bool>();
         }
@@ -773,11 +775,13 @@ static void ProfileTableFunction(ClientContext &context,
 
 TableFunction GetFirebirdProfileTableFunction() {
     TableFunction fn("firebird_profile_table",
-                     {LogicalType::VARCHAR},
+                     FunctionSignature()
+                         .AddPositionalOnly("qualified_name", LogicalType::VARCHAR)
+                         .AddKeywordOnly("exact_row_count", LogicalType::BOOLEAN,
+                                         Value(LogicalType::BOOLEAN)),
                      ProfileTableFunction,
                      ProfileTableBind,
                      ProfileTableInitGlobal);
-    fn.named_parameters["exact_row_count"] = LogicalType::BOOLEAN;
     return fn;
 }
 

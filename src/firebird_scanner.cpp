@@ -452,7 +452,7 @@ std::unique_ptr<PrimaryKeyInfo> ProbePrimaryKey(
 static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
                                                  TableFunctionBindInput &input,
                                                  vector<LogicalType> &return_types,
-                                                 vector<string> &names) {
+                                                 vector<Identifier> &names) {
     if (input.inputs.size() < 2) {
         throw BinderException("firebird_scan(connection_string, table_name) "
                               "requires two positional arguments");
@@ -473,6 +473,9 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
     for (auto &kv : input.named_parameters) {
         auto &key = kv.first;
         auto &val = kv.second;
+        // v2.0 fills omitted keyword-only parameters with their NULL
+        // defaults before bind — a NULL here means "not supplied".
+        if (val.IsNull()) continue;
         if      (key == "user")       bind->conn_info.user     = val.ToString();
         else if (key == "password")   bind->conn_info.password = val.ToString();
         else if (key == "charset") {
@@ -664,7 +667,7 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
     }
 
     return_types = bind->column_types;
-    names        = bind->column_names;
+    names        = StringsToIdentifiers(bind->column_names);  // v2.0: Identifier names
     return std::move(bind);
 }
 
@@ -1210,7 +1213,7 @@ struct FirebirdTablesGlobalState : public GlobalTableFunctionState {
 static unique_ptr<FunctionData> FirebirdTablesBind(ClientContext &,
                                                    TableFunctionBindInput &input,
                                                    vector<LogicalType> &return_types,
-                                                   vector<string> &names) {
+                                                   vector<Identifier> &names) {
     if (input.inputs.empty()) {
         throw BinderException("firebird_tables(connection_string) "
                               "requires the connection string as a positional argument");
@@ -1218,6 +1221,8 @@ static unique_ptr<FunctionData> FirebirdTablesBind(ClientContext &,
     auto bind = make_uniq<FirebirdTablesBindData>();
     bind->conn_info = FirebirdConnectionInfo::Parse(input.inputs[0].ToString());
     for (auto &kv : input.named_parameters) {
+        // v2.0: NULL = omitted keyword-only parameter (its default).
+        if (kv.second.IsNull()) continue;
         if      (kv.first == "user")     bind->conn_info.user     = kv.second.ToString();
         else if (kv.first == "password") bind->conn_info.password = kv.second.ToString();
         else if (kv.first == "charset")  bind->conn_info.charset  = kv.second.ToString();
@@ -1283,14 +1288,14 @@ static void FirebirdTablesFunction(ClientContext &, TableFunctionInput &data,
     idx_t row = 0;
     while (row < target && gstate.cursor < gstate.rows.size()) {
         const auto &r = gstate.rows[gstate.cursor++];
-        FlatVector::GetData<string_t>(output.data[0])[row] =
+        FlatVector::GetDataMutable<string_t>(output.data[0])[row] =
             StringVector::AddString(output.data[0], r.table_name);
-        FlatVector::GetData<string_t>(output.data[1])[row] =
+        FlatVector::GetDataMutable<string_t>(output.data[1])[row] =
             StringVector::AddString(output.data[1], r.kind);
-        FlatVector::GetData<int32_t>(output.data[2])[row] = r.column_count;
-        FlatVector::GetData<bool>(output.data[3])[row]    = r.has_pk;
+        FlatVector::GetDataMutable<int32_t>(output.data[2])[row] = r.column_count;
+        FlatVector::GetDataMutable<bool>(output.data[3])[row]    = r.has_pk;
         if (r.has_pk) {
-            FlatVector::GetData<string_t>(output.data[4])[row] =
+            FlatVector::GetDataMutable<string_t>(output.data[4])[row] =
                 StringVector::AddString(output.data[4], r.pk_column);
         } else {
             FlatVector::SetNull(output.data[4], row, true);
@@ -1301,16 +1306,20 @@ static void FirebirdTablesFunction(ClientContext &, TableFunctionInput &data,
 }
 
 TableFunction GetFirebirdTablesFunction() {
+    // v2.0: named parameters are declared as KEYWORD_ONLY signature
+    // parameters. Every one gets a NULL default so omitting it at the call
+    // site stays legal (v1.5 semantics); the bind skips NULL values.
     TableFunction fn("firebird_tables",
-                     {LogicalType::VARCHAR},
+                     FunctionSignature()
+                         .AddPositionalOnly("table_name", LogicalType::VARCHAR)
+                         .AddKeywordOnly("user", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+                         .AddKeywordOnly("password", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+                         .AddKeywordOnly("charset", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+                         .AddKeywordOnly("role", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+                         .AddKeywordOnly("dialect", LogicalType::INTEGER, Value(LogicalType::INTEGER)),
                      FirebirdTablesFunction,
                      FirebirdTablesBind,
                      FirebirdTablesInitGlobal);
-    fn.named_parameters["user"]     = LogicalType::VARCHAR;
-    fn.named_parameters["password"] = LogicalType::VARCHAR;
-    fn.named_parameters["charset"]  = LogicalType::VARCHAR;
-    fn.named_parameters["role"]     = LogicalType::VARCHAR;
-    fn.named_parameters["dialect"]  = LogicalType::INTEGER;
     return fn;
 }
 
@@ -1355,7 +1364,7 @@ struct FirebirdAttachGlobalState : public GlobalTableFunctionState {
 static unique_ptr<FunctionData> FirebirdAttachBind(ClientContext &,
                                                    TableFunctionBindInput &input,
                                                    vector<LogicalType> &return_types,
-                                                   vector<string> &names) {
+                                                   vector<Identifier> &names) {
     if (input.inputs.empty()) {
         throw BinderException("firebird_attach_sql(connection_string [, schema='fb'])");
     }
@@ -1366,6 +1375,8 @@ static unique_ptr<FunctionData> FirebirdAttachBind(ClientContext &,
         bind->target_schema = input.inputs[1].ToString();
     }
     for (auto &kv : input.named_parameters) {
+        // v2.0: NULL = omitted keyword-only parameter (its default).
+        if (kv.second.IsNull()) continue;
         if      (kv.first == "user")      bind->conn_info.user     = kv.second.ToString();
         else if (kv.first == "password")  bind->conn_info.password = kv.second.ToString();
         else if (kv.first == "charset")   bind->conn_info.charset  = kv.second.ToString();
@@ -1425,7 +1436,7 @@ static void FirebirdAttachFunction(ClientContext &, TableFunctionInput &data,
     const idx_t target = STANDARD_VECTOR_SIZE;
     idx_t row = 0;
     while (row < target && gstate.cursor < gstate.stmts.size()) {
-        FlatVector::GetData<string_t>(output.data[0])[row] =
+        FlatVector::GetDataMutable<string_t>(output.data[0])[row] =
             StringVector::AddString(output.data[0], gstate.stmts[gstate.cursor++]);
         ++row;
     }
@@ -1433,19 +1444,23 @@ static void FirebirdAttachFunction(ClientContext &, TableFunctionInput &data,
 }
 
 TableFunction GetFirebirdAttachFunction() {
+    // v2.0: the optional second positional (target schema) is declared as
+    // "*args" (v1.5 `varargs`); named parameters become KEYWORD_ONLY with
+    // NULL defaults (see GetFirebirdTablesFunction).
     TableFunction fn("firebird_attach_sql",
-                     {LogicalType::VARCHAR},
+                     FunctionSignature()
+                         .AddPositionalOnly("connection_string", LogicalType::VARCHAR)
+                         .AddArgs("schema", LogicalType::VARCHAR)
+                         .AddKeywordOnly("user", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+                         .AddKeywordOnly("password", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+                         .AddKeywordOnly("charset", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+                         .AddKeywordOnly("role", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+                         .AddKeywordOnly("dialect", LogicalType::INTEGER, Value(LogicalType::INTEGER))
+                         .AddKeywordOnly("schema", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+                         .AddKeywordOnly("overwrite", LogicalType::BOOLEAN, Value(LogicalType::BOOLEAN)),
                      FirebirdAttachFunction,
                      FirebirdAttachBind,
                      FirebirdAttachInitGlobal);
-    fn.varargs = LogicalType::VARCHAR;            // optional positional schema name
-    fn.named_parameters["user"]      = LogicalType::VARCHAR;
-    fn.named_parameters["password"]  = LogicalType::VARCHAR;
-    fn.named_parameters["charset"]   = LogicalType::VARCHAR;
-    fn.named_parameters["role"]      = LogicalType::VARCHAR;
-    fn.named_parameters["dialect"]   = LogicalType::INTEGER;
-    fn.named_parameters["schema"]    = LogicalType::VARCHAR;
-    fn.named_parameters["overwrite"] = LogicalType::BOOLEAN;
     return fn;
 }
 
@@ -1478,19 +1493,19 @@ static bool TryExtractLikePrefix(Expression &expr,
     }
     auto &fn = expr.Cast<BoundFunctionExpression>();
     // DuckDB exposes `LIKE` as the scalar function "~~".
-    if (fn.function.name != "~~" || fn.children.size() != 2) return false;
+    if (fn.Function().GetName() != "~~" || fn.GetChildren().size() != 2) return false;
 
-    auto &lhs = *fn.children[0];
-    auto &rhs = *fn.children[1];
+    auto &lhs = *fn.GetChildren()[0];
+    auto &rhs = *fn.GetChildren()[1];
     if (lhs.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) return false;
     if (rhs.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT)   return false;
 
     auto &colref = lhs.Cast<BoundColumnRefExpression>();
     auto &constexpr_ = rhs.Cast<BoundConstantExpression>();
-    if (constexpr_.value.IsNull()) return false;
-    if (constexpr_.value.type().id() != LogicalTypeId::VARCHAR) return false;
+    if (constexpr_.GetValue().IsNull()) return false;
+    if (constexpr_.GetValue().type().id() != LogicalTypeId::VARCHAR) return false;
 
-    auto pattern = constexpr_.value.GetValue<std::string>();
+    auto pattern = constexpr_.GetValue().GetValue<std::string>();
     if (pattern.empty()) return false;
     // Require at least one literal character before any wildcard so
     // Firebird can use an index range scan. A leading `%`/`_` would
@@ -1498,7 +1513,7 @@ static bool TryExtractLikePrefix(Expression &expr,
     char first = pattern.front();
     if (first == '%' || first == '_') return false;
 
-    out_col     = colref.binding.column_index;
+    out_col     = colref.Binding().column_index;
     out_pattern = std::move(pattern);
     return true;
 }
@@ -1543,19 +1558,19 @@ static bool TryExtractNotIn(Expression &expr,
     if (expr.GetExpressionClass() != ExpressionClass::BOUND_OPERATOR) return false;
     auto &op = expr.Cast<BoundOperatorExpression>();
     if (op.GetExpressionType() != ExpressionType::COMPARE_NOT_IN) return false;
-    if (op.children.size() < 2) return false;
-    if (op.children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) return false;
+    if (op.GetChildren().size() < 2) return false;
+    if (op.GetChildren()[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) return false;
 
     out_values.clear();
-    for (size_t i = 1; i < op.children.size(); ++i) {
-        auto &child = *op.children[i];
+    for (size_t i = 1; i < op.GetChildren().size(); ++i) {
+        auto &child = *op.GetChildren()[i];
         if (child.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) return false;
-        const auto &v = child.Cast<BoundConstantExpression>().value;
+        const auto &v = child.Cast<BoundConstantExpression>().GetValue();
         if (v.IsNull()) return false;                          // NULL in IN-list is squirrelly
         if (!ExprValueBindable(v.type())) return false;
         out_values.push_back(v);
     }
-    out_col = op.children[0]->Cast<BoundColumnRefExpression>().binding.column_index;
+    out_col = op.GetChildren()[0]->Cast<BoundColumnRefExpression>().Binding().column_index;
     return true;
 }
 
@@ -1567,11 +1582,11 @@ static bool TryExtractNotBoolColumn(Expression &expr, idx_t &out_col) {
     if (expr.GetExpressionClass() != ExpressionClass::BOUND_OPERATOR) return false;
     auto &op = expr.Cast<BoundOperatorExpression>();
     if (op.GetExpressionType() != ExpressionType::OPERATOR_NOT) return false;
-    if (op.children.size() != 1) return false;
-    auto &inner = *op.children[0];
+    if (op.GetChildren().size() != 1) return false;
+    auto &inner = *op.GetChildren()[0];
     if (inner.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) return false;
-    if (inner.return_type.id() != LogicalTypeId::BOOLEAN) return false;
-    out_col = inner.Cast<BoundColumnRefExpression>().binding.column_index;
+    if (inner.GetReturnType().id() != LogicalTypeId::BOOLEAN) return false;
+    out_col = inner.Cast<BoundColumnRefExpression>().Binding().column_index;
     return true;
 }
 
@@ -1781,31 +1796,37 @@ static bool IsNoneCharVarcharColumn(const FirebirdColumnDesc &desc) {
 }
 
 // Detects `col = 'literal'` (or the flipped `'literal' = col`). DuckDB
-// binds simple comparisons as BoundComparisonExpression COMPARE_EQUAL.
+// binds simple comparisons as comparison expressions of type COMPARE_EQUAL.
 // Returns the projected column index and the constant's string value.
 // Only VARCHAR constants participate: those are the ones a NONE text
 // column can be compared with under DuckDB's schema for this column.
+// (v2.0: comparison expressions are function expressions; the
+// BoundComparisonExpression facade exposes left/right.)
 static bool TryExtractEquality(Expression &expr, idx_t &out_col,
                                std::string &out_value) {
-    if (expr.GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) {
+    if (!BoundComparisonExpression::IsComparison(expr)) {
         return false;
     }
-    auto &cmp = expr.Cast<BoundComparisonExpression>();
-    if (cmp.GetExpressionType() != ExpressionType::COMPARE_EQUAL) return false;
-    auto &lhs = *cmp.left;
-    auto &rhs = *cmp.right;
-    auto *colref = dynamic_cast<BoundColumnRefExpression *>(&lhs);
-    auto *conref = dynamic_cast<BoundConstantExpression *>(&rhs);
-    if (!colref) {
-        // Flipped literal = col.
-        colref = dynamic_cast<BoundColumnRefExpression *>(&rhs);
-        conref = dynamic_cast<BoundConstantExpression *>(&lhs);
+    if (expr.GetExpressionType() != ExpressionType::COMPARE_EQUAL) return false;
+    auto &cmp = expr.Cast<BoundFunctionExpression>();
+    auto &lhs = BoundComparisonExpression::Left(cmp);
+    auto &rhs = BoundComparisonExpression::Right(cmp);
+    const BoundColumnRefExpression *colref = nullptr;
+    const BoundConstantExpression *conref = nullptr;
+    if (lhs.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+        rhs.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+        colref = &lhs.Cast<BoundColumnRefExpression>();
+        conref = &rhs.Cast<BoundConstantExpression>();
+    } else if (rhs.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+               lhs.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+        colref = &rhs.Cast<BoundColumnRefExpression>();
+        conref = &lhs.Cast<BoundConstantExpression>();
     }
     if (!colref || !conref) return false;
-    const auto &v = conref->value;
+    const auto &v = conref->GetValue();
     if (v.IsNull()) return false;
     if (v.type().id() != LogicalTypeId::VARCHAR) return false;
-    out_col   = colref->binding.column_index;
+    out_col   = colref->Binding().column_index;
     out_value = v.GetValue<std::string>();
     return true;
 }
@@ -1821,23 +1842,23 @@ static bool TryExtractInList(Expression &expr, idx_t &out_col,
     }
     auto &op = expr.Cast<BoundOperatorExpression>();
     if (op.GetExpressionType() != ExpressionType::COMPARE_IN) return false;
-    if (op.children.size() < 2) return false;
-    if (op.children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+    if (op.GetChildren().size() < 2) return false;
+    if (op.GetChildren()[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
         return false;
     }
     out_values.clear();
-    for (size_t i = 1; i < op.children.size(); ++i) {
-        auto &child = *op.children[i];
+    for (size_t i = 1; i < op.GetChildren().size(); ++i) {
+        auto &child = *op.GetChildren()[i];
         if (child.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
             return false;
         }
-        const auto &v = child.Cast<BoundConstantExpression>().value;
+        const auto &v = child.Cast<BoundConstantExpression>().GetValue();
         if (v.IsNull()) return false;
         if (v.type().id() != LogicalTypeId::VARCHAR) return false;
         out_values.push_back(v.GetValue<std::string>());
     }
-    out_col = op.children[0]->Cast<BoundColumnRefExpression>()
-                  .binding.column_index;
+    out_col = op.GetChildren()[0]->Cast<BoundColumnRefExpression>()
+                  .Binding().column_index;
     return true;
 }
 
@@ -2081,23 +2102,29 @@ static void FirebirdScanPushdownComplexFilter(
 //  Registration.
 // ---------------------------------------------------------------------------
 TableFunction GetFirebirdScanFunction() {
+    // v2.0: named parameters are declared as KEYWORD_ONLY signature
+    // parameters with NULL defaults (see GetFirebirdTablesFunction); the
+    // bind skips NULL values so omitting one at the call site keeps the
+    // v1.5 semantics.
     TableFunction fn("firebird_scan",
-                     {LogicalType::VARCHAR, LogicalType::VARCHAR},
+                     FunctionSignature()
+                         .AddPositionalOnly("connection_string", LogicalType::VARCHAR)
+                         .AddPositionalOnly("table_name", LogicalType::VARCHAR)
+                         .AddKeywordOnly("user", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+                         .AddKeywordOnly("password", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+                         .AddKeywordOnly("charset", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+                         .AddKeywordOnly("role", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+                         .AddKeywordOnly("dialect", LogicalType::INTEGER, Value(LogicalType::INTEGER))
+                         .AddKeywordOnly("partitions", LogicalType::BIGINT, Value(LogicalType::BIGINT))
+                         .AddKeywordOnly("row_limit", LogicalType::BIGINT, Value(LogicalType::BIGINT))
+                         .AddKeywordOnly("row_offset", LogicalType::BIGINT, Value(LogicalType::BIGINT))
+                         .AddKeywordOnly("none_encoding", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+                         .AddKeywordOnly("none_pushdown", LogicalType::BOOLEAN, Value(LogicalType::BOOLEAN))
+                         .AddKeywordOnly("numeric_widen_int64", LogicalType::BOOLEAN, Value(LogicalType::BOOLEAN)),
                      FirebirdScanFunction,
                      FirebirdScanBind,
                      FirebirdScanInitGlobal,
                      FirebirdScanInitLocal);
-    fn.named_parameters["user"]          = LogicalType::VARCHAR;
-    fn.named_parameters["password"]      = LogicalType::VARCHAR;
-    fn.named_parameters["charset"]       = LogicalType::VARCHAR;
-    fn.named_parameters["role"]          = LogicalType::VARCHAR;
-    fn.named_parameters["dialect"]       = LogicalType::INTEGER;
-    fn.named_parameters["partitions"]    = LogicalType::BIGINT;
-    fn.named_parameters["row_limit"]     = LogicalType::BIGINT;
-    fn.named_parameters["row_offset"]    = LogicalType::BIGINT;
-    fn.named_parameters["none_encoding"] = LogicalType::VARCHAR;
-    fn.named_parameters["none_pushdown"] = LogicalType::BOOLEAN;
-    fn.named_parameters["numeric_widen_int64"] = LogicalType::BOOLEAN;
 
     // Pushdown advertisements — DuckDB's planner now knows it can hand us
     // narrowed column lists and TableFilterSet entries.

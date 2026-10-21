@@ -26,14 +26,15 @@ namespace {
 //
 // positional_names covers only the positional parameters: duckdb_functions()
 // zips parameter_names against the combined list of positional arguments plus
-// fn.named_parameters (iterated in hash-map order), so the named tail must be
-// read from the same map here to stay index-aligned.
+// the keyword-only parameters, so the named tail must be read from the
+// signature in the same declaration order here to stay index-aligned.
+// (v2.0: named parameters live in FunctionSignature, not TableFunction.)
 CreateTableFunctionInfo DescribedTableFunction(TableFunction fn, vector<string> positional_names,
                                                string description, string example, vector<string> categories) {
     FunctionDescription desc;
     desc.parameter_names = std::move(positional_names);
-    for (const auto &kv : fn.named_parameters) {
-        desc.parameter_names.push_back(kv.first);
+    for (const auto &param : fn.GetSignature().GetParameters()) {
+        desc.parameter_names.push_back(param.GetName().GetIdentifierName());
     }
     desc.description = std::move(description);
     desc.examples = {std::move(example)};

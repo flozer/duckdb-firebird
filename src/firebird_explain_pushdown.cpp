@@ -22,6 +22,10 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/settings.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/parser/parser.hpp"
@@ -117,7 +121,7 @@ static bool HasFirebirdScanInTableRef(const TableRef *ref) {
         if (tf.function &&
             tf.function->GetExpressionClass() == ExpressionClass::FUNCTION) {
             const auto &fe = tf.function->Cast<FunctionExpression>();
-            if (ToLower(fe.function_name) == "firebird_scan")
+            if (ToLower(fe.FunctionName().GetIdentifierName()) == "firebird_scan")
                 return true;
         }
         // Also recurse into a nested subquery argument if present.
@@ -142,10 +146,11 @@ static bool HasFirebirdScanInTableRef(const TableRef *ref) {
 }
 
 static bool HasFirebirdScanInNode(const QueryNode &node) {
-    // Walk CTE definitions (WITH clauses).
+    // Walk CTE definitions (WITH clauses). v2.0: CommonTableExpressionInfo
+    // holds the QueryNode directly (query_node), not a SelectStatement.
     for (auto &kv : node.cte_map.map) {
-        if (kv.second && kv.second->query)
-            if (HasFirebirdScanInNode(*kv.second->query->node))
+        if (kv.second && kv.second->query_node)
+            if (HasFirebirdScanInNode(*kv.second->query_node))
                 return true;
     }
     // Walk the node itself.
@@ -182,10 +187,10 @@ struct ExplainPushdownGlobalState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData>
-ExplainPushdownBind(ClientContext &,
+ExplainPushdownBind(ClientContext &context,
                     TableFunctionBindInput &input,
                     vector<LogicalType> &return_types,
-                    vector<string> &names) {
+                    vector<Identifier> &names) {
     // Require exactly one VARCHAR argument.
     if (input.inputs.size() != 1 ||
         input.inputs[0].type().id() != LogicalTypeId::VARCHAR) {
@@ -196,7 +201,8 @@ ExplainPushdownBind(ClientContext &,
     const std::string sql = input.inputs[0].GetValue<std::string>();
 
     // --- Guard 1: parse + require exactly one SELECT statement ---
-    Parser p;
+    // v2.0: the Parser needs a ClientContext (connection settings, grammar).
+    Parser p(context);
     p.ParseQuery(sql);
     if (p.statements.size() != 1 ||
         p.statements[0]->type != StatementType::SELECT_STATEMENT) {
@@ -285,7 +291,7 @@ static void WalkPlan(LogicalOperator &op,
                      int64_t &next_ordinal) {
     if (op.type == LogicalOperatorType::LOGICAL_GET) {
         auto &get = op.Cast<LogicalGet>();
-        if (get.function.name == "firebird_scan" && get.bind_data) {
+        if (get.function.GetName() == "firebird_scan" && get.bind_data) {
             auto &bd = get.bind_data->Cast<FirebirdBindData>();
 
             // Real pushdown only: named-param path (row_limit= / row_offset=).
@@ -312,18 +318,15 @@ static void WalkPlan(LogicalOperator &op,
             // (e.g. a LABEL predicate was reported as `"ID" = ?`). Mirror
             // the physical planner's conversion so the explain row matches
             // the scanner's real telemetry.
-            unique_ptr<TableFilterSet> scan_filters;
-            if (!get.table_filters.filters.empty()) {
-                scan_filters = make_uniq<TableFilterSet>();
-                for (auto &entry : get.table_filters.filters) {
-                    for (idx_t i = 0; i < column_ids.size(); ++i) {
-                        if (column_ids[i] == entry.first) {
-                            scan_filters->filters[i] = entry.second->Copy();
-                            break;
-                        }
-                    }
-                }
-            }
+            // v2.0: LogicalGet::table_filters keys are ProjectionIndex values
+            // relative to the scan's projection list (the physical planner
+            // moves them as-is into the scan's init input — see
+            // plan_get.cpp MoveTableFilters). That is exactly the relative
+            // form Build() expects, so the filters pass through unchanged.
+            // (v1.5 keyed them by absolute source column id, which needed
+            // the remap that used to live here.)
+            TableFilterSet *scan_filters =
+                get.table_filters.HasFilters() ? &get.table_filters : nullptr;
 
             // Capture-only Build — serial WHERE, no PK bounds, no extra
             // predicate string (extra_predicates are appended below as
@@ -342,7 +345,7 @@ static void WalkPlan(LogicalOperator &op,
                 bd.column_names,
                 bd.column_types,
                 column_ids,
-                scan_filters.get(),
+                scan_filters,
                 real_limit,
                 /*extra_predicate=*/"",
                 &bd.column_descs,
@@ -539,8 +542,12 @@ ExplainPushdownInitGlobal(ClientContext &context, TableFunctionInitInput &input)
     // Guard the optimizer: an un-optimized plan would lack filter/projection
     // pushdown and the pushdown-complex callback, defeating the report. Force
     // it on for this throwaway connection.
-    if (!con.context->config.enable_optimizer) {
-        con.context->config.enable_optimizer = true;
+    // v2.0: `enable_optimizer` left ClientConfig — it is a raw global setting
+    // read/written through the Settings facade (settings.hpp). SESSION scope
+    // stores a per-connection user setting, matching the v1.5 behaviour of
+    // touching only this connection's config.
+    if (!Settings::Get<EnableOptimizerSetting>(*con.context)) {
+        Settings::Set<EnableOptimizerSetting>(*con.context, SetScope::SESSION, Value::BOOLEAN(true));
     }
 
     auto plan = con.context->ExtractPlan(bind.sql);
@@ -605,7 +612,8 @@ static void ExplainPushdownFunction(ClientContext &,
 
 TableFunction GetFirebirdExplainPushdownFunction() {
     TableFunction fn("firebird_explain_pushdown",
-                     {LogicalType::VARCHAR},
+                     FunctionSignature()
+                         .AddPositionalOnly("sql", LogicalType::VARCHAR),
                      ExplainPushdownFunction,
                      ExplainPushdownBind,
                      ExplainPushdownInitGlobal);

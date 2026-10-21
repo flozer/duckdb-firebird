@@ -75,7 +75,7 @@ struct MetaGlobalState : public GlobalTableFunctionState {
 // Non-capturing bind callback — reads the descriptor from function_info.
 static unique_ptr<FunctionData>
 MetaBindDispatch(ClientContext &context, TableFunctionBindInput &input,
-                 vector<LogicalType> &return_types, vector<string> &names) {
+                 vector<LogicalType> &return_types, vector<Identifier> &names) {
     D_ASSERT(input.info);
     auto &info = input.info->Cast<MetadataFnInfo>();
     const MetadataFn &desc = info.desc;
@@ -89,7 +89,7 @@ MetaBindDispatch(ClientContext &context, TableFunctionBindInput &input,
     bind->catalog_name = input.inputs[0].ToString();
     bind->desc = &desc;
     ValidateFirebirdAttachAlias(context, bind->catalog_name);
-    names = desc.col_names;
+    names = StringsToIdentifiers(desc.col_names);  // v2.0: Identifier names
     return_types = desc.col_types;
     return std::move(bind);
 }
@@ -125,7 +125,9 @@ static void MetaFunction(ClientContext &, TableFunctionInput &input,
 // body in later tasks) into a TableFunction using the function_info slot so
 // MetaBindDispatch can retrieve it without a capturing lambda.
 [[maybe_unused]] static TableFunction MakeMetadataFunction(const MetadataFn &desc) {
-    TableFunction fn(desc.name, {LogicalType::VARCHAR}, MetaFunction,
+    TableFunction fn(Identifier(desc.name),
+                     FunctionSignature().AddPositionalOnly("catalog_name", LogicalType::VARCHAR),
+                     MetaFunction,
                      MetaBindDispatch,
                      MetaInitGlobal);
     fn.function_info = make_shared_ptr<MetadataFnInfo>(desc);
@@ -217,7 +219,7 @@ struct GenGlobalState : public GlobalTableFunctionState {
 
 static unique_ptr<FunctionData>
 GenBind(ClientContext &context, TableFunctionBindInput &input,
-        vector<LogicalType> &return_types, vector<string> &names) {
+        vector<LogicalType> &return_types, vector<Identifier> &names) {
     if (input.inputs.empty() || input.inputs[0].IsNull())
         throw BinderException("firebird_generators(catalog_name VARCHAR): catalog_name is required.");
     auto bind = make_uniq<GenBindData>();
@@ -292,7 +294,8 @@ static void GenFunction(ClientContext &, TableFunctionInput &input,
 }
 
 TableFunction GetFirebirdGeneratorsFunction() {
-    return TableFunction("firebird_generators", {LogicalType::VARCHAR},
+    return TableFunction("firebird_generators",
+                         FunctionSignature().AddPositionalOnly("catalog_name", LogicalType::VARCHAR),
                          GenFunction, GenBind, GenInitGlobal);
 }
 

@@ -27,7 +27,8 @@ namespace duckdb {
 
 void ValidateFirebirdAttachAlias(ClientContext &context,
                                  const std::string &catalog_name) {
-    auto catalog_ptr = Catalog::GetCatalogEntry(context, catalog_name);
+    // v2.0: GetCatalogEntry keys by Identifier.
+    auto catalog_ptr = Catalog::GetCatalogEntry(context, Identifier(catalog_name));
     if (!catalog_ptr) {
         throw BinderException(
             "firebird_generate_dbt_sources: no attached catalog named '%s'. "
@@ -238,7 +239,7 @@ static unique_ptr<FunctionData>
 DbtSourcesBind(ClientContext &context,
                TableFunctionBindInput &input,
                vector<LogicalType> &return_types,
-               vector<string> &names) {
+               vector<Identifier> &names) {
     if (input.inputs.empty() || input.inputs[0].IsNull()) {
         throw BinderException(
             "firebird_generate_dbt_sources(catalog_name VARCHAR): "
@@ -285,7 +286,7 @@ static void DbtSourcesFunction(ClientContext &context,
 
 TableFunction GetFirebirdDbtSourcesFunction() {
     TableFunction fn("firebird_generate_dbt_sources",
-                     {LogicalType::VARCHAR},
+                     FunctionSignature().AddPositionalOnly("catalog_name", LogicalType::VARCHAR),
                      DbtSourcesFunction,
                      DbtSourcesBind,
                      DbtSourcesInitGlobal);

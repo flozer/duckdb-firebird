@@ -355,7 +355,7 @@ std::string RedactBindValue(const Value &v) {
 
 // Forward declarations - shared by firebird_last_query() and
 // firebird_query_log() below.
-static void TelemetrySchema(vector<string> &names,
+static void TelemetrySchema(vector<Identifier> &names,
                              vector<LogicalType> &types);
 static void EmitTelemetryRow(DataChunk &output, idx_t row,
                               const FirebirdQueryTelemetry &t);
@@ -370,7 +370,7 @@ struct LastQueryGlobalState : public GlobalTableFunctionState {
 
 static unique_ptr<FunctionData>
 LastQueryBind(ClientContext &, TableFunctionBindInput &,
-              vector<LogicalType> &return_types, vector<string> &names) {
+              vector<LogicalType> &return_types, vector<Identifier> &names) {
     TelemetrySchema(names, return_types);
     return make_uniq<LastQueryBindData>();
 }
@@ -430,7 +430,7 @@ static void EmitTelemetryRow(DataChunk &output, idx_t row,
 // Returns the canonical (names, types) the two observability table
 // functions share. Kept in one place so adding a column never gets out
 // of sync between the two.
-static void TelemetrySchema(vector<string> &names,
+static void TelemetrySchema(vector<Identifier> &names,
                              vector<LogicalType> &types) {
     names = {
         "remote_sql",
@@ -490,7 +490,7 @@ static void LastQueryFunction(ClientContext &, TableFunctionInput &input,
 
 TableFunction GetFirebirdLastQueryFunction() {
     TableFunction fn("firebird_last_query",
-                     {},
+                     FunctionSignature(),
                      LastQueryFunction,
                      LastQueryBind,
                      LastQueryInitGlobal);
@@ -515,7 +515,7 @@ struct QueryLogGlobalState : public GlobalTableFunctionState {
 
 static unique_ptr<FunctionData>
 QueryLogBind(ClientContext &, TableFunctionBindInput &,
-             vector<LogicalType> &return_types, vector<string> &names) {
+             vector<LogicalType> &return_types, vector<Identifier> &names) {
     TelemetrySchema(names, return_types);
     return make_uniq<QueryLogBindData>();
 }
@@ -541,7 +541,7 @@ static void QueryLogFunction(ClientContext &, TableFunctionInput &input,
 
 TableFunction GetFirebirdQueryLogFunction() {
     TableFunction fn("firebird_query_log",
-                     {},
+                     FunctionSignature(),
                      QueryLogFunction,
                      QueryLogBind,
                      QueryLogInitGlobal);
