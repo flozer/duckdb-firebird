@@ -1446,11 +1446,13 @@ static void FirebirdAttachFunction(ClientContext &, TableFunctionInput &data,
 TableFunction GetFirebirdAttachFunction() {
     // v2.0: the optional second positional (target schema) is declared as
     // "*args" (v1.5 `varargs`); named parameters become KEYWORD_ONLY with
-    // NULL defaults (see GetFirebirdTablesFunction).
+    // NULL defaults (see GetFirebirdTablesFunction). The "*args" parameter
+    // name must differ from the "schema" keyword — names share one
+    // case-insensitive namespace in a signature.
     TableFunction fn("firebird_attach_sql",
                      FunctionSignature()
                          .AddPositionalOnly("connection_string", LogicalType::VARCHAR)
-                         .AddArgs("schema", LogicalType::VARCHAR)
+                         .AddArgs("extra_positional", LogicalType::VARCHAR)
                          .AddKeywordOnly("user", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
                          .AddKeywordOnly("password", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
                          .AddKeywordOnly("charset", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))

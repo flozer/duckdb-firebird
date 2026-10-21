@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 
@@ -460,12 +461,25 @@ void FirebirdConnection::Attach() {
     }
 
     ISC_STATUS status[20] = {};
-    isc_attach_database(status,
-                        static_cast<short>(info_.database.size()),
-                        const_cast<char *>(info_.database.c_str()),
-                        &db_,
-                        static_cast<short>(dpb.size()),
-                        dpb.data());
+    // DuckDB v2.0's executor starts partition workers back-to-back, so
+    // several isc_attach_database calls can land at the same instant. The
+    // Windows local (XPS) provider intermittently drops the handshake when
+    // that happens ("isc_attach_database: connection lost to database",
+    // sqlcode -901) — the same burst attaches fine over TCP and under the
+    // v1.5 scheduler, which happened to stagger the workers. Attachments
+    // are one-shot and cheap, so serializing the attach handshake
+    // process-wide costs nothing measurable and removes the race for every
+    // protocol (local, TCP, embedded).
+    static std::mutex attach_mutex;
+    {
+        std::lock_guard<std::mutex> guard(attach_mutex);
+        isc_attach_database(status,
+                            static_cast<short>(info_.database.size()),
+                            const_cast<char *>(info_.database.c_str()),
+                            &db_,
+                            static_cast<short>(dpb.size()),
+                            dpb.data());
+    }
     Check(status, "isc_attach_database(" + info_.database + ")");
 }
 
