@@ -121,7 +121,11 @@ static bool HasFirebirdScanInTableRef(const TableRef *ref) {
         if (tf.function &&
             tf.function->GetExpressionClass() == ExpressionClass::FUNCTION) {
             const auto &fe = tf.function->Cast<FunctionExpression>();
+#ifdef FIREBIRD_DUCKDB_V2
             if (ToLower(fe.FunctionName().GetIdentifierName()) == "firebird_scan")
+#else
+            if (ToLower(fe.function_name) == "firebird_scan")
+#endif
                 return true;
         }
         // Also recurse into a nested subquery argument if present.
@@ -146,12 +150,18 @@ static bool HasFirebirdScanInTableRef(const TableRef *ref) {
 }
 
 static bool HasFirebirdScanInNode(const QueryNode &node) {
-    // Walk CTE definitions (WITH clauses). v2.0: CommonTableExpressionInfo
-    // holds the QueryNode directly (query_node), not a SelectStatement.
+    // Walk CTE definitions (WITH clauses).
+    // (v2.0: CommonTableExpressionInfo holds the QueryNode directly
+    // (query_node); v1.5 wrapped it in a SelectStatement.)
     for (auto &kv : node.cte_map.map) {
+#ifdef FIREBIRD_DUCKDB_V2
         if (kv.second && kv.second->query_node)
             if (HasFirebirdScanInNode(*kv.second->query_node))
-                return true;
+#else
+        if (kv.second && kv.second->query)
+            if (HasFirebirdScanInNode(*kv.second->query->node))
+#endif
+            return true;
     }
     // Walk the node itself.
     if (node.type == QueryNodeType::SELECT_NODE) {
@@ -190,7 +200,11 @@ static unique_ptr<FunctionData>
 ExplainPushdownBind(ClientContext &context,
                     TableFunctionBindInput &input,
                     vector<LogicalType> &return_types,
-                    vector<Identifier> &names) {
+#ifdef FIREBIRD_DUCKDB_V2
+                    vector<Identifier> &names) {  // v2.0: Identifier names
+#else
+                    vector<string> &names) {
+#endif
     // Require exactly one VARCHAR argument.
     if (input.inputs.size() != 1 ||
         input.inputs[0].type().id() != LogicalTypeId::VARCHAR) {
@@ -201,8 +215,12 @@ ExplainPushdownBind(ClientContext &context,
     const std::string sql = input.inputs[0].GetValue<std::string>();
 
     // --- Guard 1: parse + require exactly one SELECT statement ---
+#ifdef FIREBIRD_DUCKDB_V2
     // v2.0: the Parser needs a ClientContext (connection settings, grammar).
     Parser p(context);
+#else
+    Parser p;
+#endif
     p.ParseQuery(sql);
     if (p.statements.size() != 1 ||
         p.statements[0]->type != StatementType::SELECT_STATEMENT) {
@@ -291,7 +309,11 @@ static void WalkPlan(LogicalOperator &op,
                      int64_t &next_ordinal) {
     if (op.type == LogicalOperatorType::LOGICAL_GET) {
         auto &get = op.Cast<LogicalGet>();
+#ifdef FIREBIRD_DUCKDB_V2
         if (get.function.GetName() == "firebird_scan" && get.bind_data) {
+#else
+        if (get.function.name == "firebird_scan" && get.bind_data) {
+#endif
             auto &bd = get.bind_data->Cast<FirebirdBindData>();
 
             // Real pushdown only: named-param path (row_limit= / row_offset=).
@@ -309,24 +331,38 @@ static void WalkPlan(LogicalOperator &op,
                 column_ids.push_back(ci.GetPrimaryIndex());
             }
 
-            // LogicalGet::table_filters keys are ABSOLUTE source column ids
-            // (the physical planner's CreateTableFilterSet in plan_get.cpp
-            // converts them to column_ids-relative positions before handing
-            // them to the scan). Build() expects the relative form; passing
-            // the absolute keys mis-attributed filters whenever a column's
+            // LogicalGet::table_filters keying differs by version.
+#ifdef FIREBIRD_DUCKDB_V2
+            // v2.0: keys are ProjectionIndex values relative to the scan's
+            // projection list (the physical planner moves them as-is into
+            // the scan's init input — see plan_get.cpp MoveTableFilters).
+            // That is exactly the relative form Build() expects, so the
+            // filters pass through unchanged.
+            TableFilterSet *scan_filters =
+                get.table_filters.HasFilters() ? &get.table_filters : nullptr;
+#else
+            // v1.5: keys are ABSOLUTE source column ids (the physical
+            // planner's CreateTableFilterSet in plan_get.cpp converts them
+            // to column_ids-relative positions before handing them to the
+            // scan). Build() expects the relative form; passing the
+            // absolute keys mis-attributed filters whenever a column's
             // absolute id differed from its position in the projected list
             // (e.g. a LABEL predicate was reported as `"ID" = ?`). Mirror
             // the physical planner's conversion so the explain row matches
             // the scanner's real telemetry.
-            // v2.0: LogicalGet::table_filters keys are ProjectionIndex values
-            // relative to the scan's projection list (the physical planner
-            // moves them as-is into the scan's init input — see
-            // plan_get.cpp MoveTableFilters). That is exactly the relative
-            // form Build() expects, so the filters pass through unchanged.
-            // (v1.5 keyed them by absolute source column id, which needed
-            // the remap that used to live here.)
-            TableFilterSet *scan_filters =
-                get.table_filters.HasFilters() ? &get.table_filters : nullptr;
+            unique_ptr<TableFilterSet> scan_filters;
+            if (!get.table_filters.filters.empty()) {
+                scan_filters = make_uniq<TableFilterSet>();
+                for (auto &entry : get.table_filters.filters) {
+                    for (idx_t i = 0; i < column_ids.size(); ++i) {
+                        if (column_ids[i] == entry.first) {
+                            scan_filters->filters[i] = entry.second->Copy();
+                            break;
+                        }
+                    }
+                }
+            }
+#endif
 
             // Capture-only Build — serial WHERE, no PK bounds, no extra
             // predicate string (extra_predicates are appended below as
@@ -345,7 +381,11 @@ static void WalkPlan(LogicalOperator &op,
                 bd.column_names,
                 bd.column_types,
                 column_ids,
+#ifdef FIREBIRD_DUCKDB_V2
                 scan_filters,
+#else
+                scan_filters.get(),
+#endif
                 real_limit,
                 /*extra_predicate=*/"",
                 &bd.column_descs,
@@ -542,6 +582,7 @@ ExplainPushdownInitGlobal(ClientContext &context, TableFunctionInitInput &input)
     // Guard the optimizer: an un-optimized plan would lack filter/projection
     // pushdown and the pushdown-complex callback, defeating the report. Force
     // it on for this throwaway connection.
+#ifdef FIREBIRD_DUCKDB_V2
     // v2.0: `enable_optimizer` left ClientConfig — it is a raw global setting
     // read/written through the Settings facade (settings.hpp). SESSION scope
     // stores a per-connection user setting, matching the v1.5 behaviour of
@@ -549,6 +590,11 @@ ExplainPushdownInitGlobal(ClientContext &context, TableFunctionInitInput &input)
     if (!Settings::Get<EnableOptimizerSetting>(*con.context)) {
         Settings::Set<EnableOptimizerSetting>(*con.context, SetScope::SESSION, Value::BOOLEAN(true));
     }
+#else
+    if (!con.context->config.enable_optimizer) {
+        con.context->config.enable_optimizer = true;
+    }
+#endif
 
     auto plan = con.context->ExtractPlan(bind.sql);
     if (plan) {
@@ -612,8 +658,12 @@ static void ExplainPushdownFunction(ClientContext &,
 
 TableFunction GetFirebirdExplainPushdownFunction() {
     TableFunction fn("firebird_explain_pushdown",
+#ifdef FIREBIRD_DUCKDB_V2
                      FunctionSignature()
                          .AddPositionalOnly("sql", LogicalType::VARCHAR),
+#else
+                     {LogicalType::VARCHAR},
+#endif
                      ExplainPushdownFunction,
                      ExplainPushdownBind,
                      ExplainPushdownInitGlobal);

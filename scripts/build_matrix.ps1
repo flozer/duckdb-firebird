@@ -23,12 +23,14 @@
 #
 # Exit code: non-zero if the baseline v1.5.3 fails to build.
 
-param([string[]]$Tags = @('v1.5.3', 'v1.5.5', 'v1.5.6'))
+param([string[]]$Tags = @('v1.5.6', 'v2.0.0'))
 
 $ErrorActionPreference = 'Continue'
 $root = 'd:/Dados/duckdb-firebird'
-$pin = '14eca11bd9d4a0de2ea0f078be588a9c1c5b279c' # v1.5.3 (committed submodule pin)
-$baseline = 'v1.5.3'
+# Restore target = the submodule gitlink recorded on the CURRENT branch
+# (resolved dynamically: main carries v1.5.6, the compat branch v2.0.0).
+$pin = (git ls-tree HEAD duckdb | ForEach-Object { ($_ -split "\s+")[2] })
+$baseline = 'v1.5.6'
 
 $fbSdk = 'C:/Program Files/Firebird/Firebird_5_0'
 $ninja = 'C:\Users\fernando.souza\AppData\Local\Microsoft\WinGet\Packages\Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe\ninja.exe'
@@ -81,11 +83,17 @@ $testFixtureVar = @{
 function Invoke-Build([string]$buildDir) {
     New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
     $extCfg = "$root/extension_config.cmake"
+    # -DCMAKE_CXX_STANDARD=17: DuckDB v1.5.x seeds the build cache with
+    # CMAKE_CXX_STANDARD=11, which DuckDB v2.0's strict check then rejects
+    # when the v2.0 leg reuses a tree first configured by a v1.5 leg. The
+    # repo CMakeLists already forces 17 for compilation; passing it here
+    # keeps the cached value legal for both API generations.
     $cfg = "-G Ninja -DCMAKE_MAKE_PROGRAM=`"$ninja`" -DCMAKE_BUILD_TYPE=Release " +
            "-DEXTENSION_STATIC_BUILD=1 -DDUCKDB_EXTENSION_CONFIGS=`"$extCfg`" " +
            "-DFB_SDK_ROOT=`"$fbSdk`" -DDUCKDB_EXPLICIT_PLATFORM=windows_amd64 " +
            "-DENABLE_EXTENSION_AUTOLOADING=0 -DENABLE_EXTENSION_AUTOINSTALL=0 " +
            "-DENABLE_UNITTEST_CPP_TESTS=FALSE -DUNITTEST_ROOT_DIRECTORY=`"$root`" " +
+           "-DCMAKE_CXX_STANDARD=17 " +
            "-S `"$root/duckdb`" -B `"$buildDir`""
     cmd /c "`"$vcvars`" >nul && `"$cmake`" $cfg && `"$cmake`" --build `"$buildDir`" --config Release" 2>&1 |
         Tee-Object -FilePath "$buildDir/build.log" | Out-Null

@@ -218,9 +218,24 @@ LogicalType FirebirdToDuckDBType(const FirebirdColumnDesc &col,
 // Helper: write a scaled integer (Firebird NUMERIC/DECIMAL) into a DuckDB
 // DECIMAL vector slot. The DECIMAL is physically stored as the underlying
 // integer width, so the scaled int from Firebird is already the right value.
+// v2.0 made FlatVector::GetData const-correct (returns const T*); mutable
+// writes go through GetDataMutable there. v1.5 has a single GetData<T>(Vector&)
+// returning T*.
+#ifdef FIREBIRD_DUCKDB_V2
+template <class T>
+static T *FbFlatData(Vector &vector) {
+    return FlatVector::GetDataMutable<T>(vector);
+}
+#else
+template <class T>
+static T *FbFlatData(Vector &vector) {
+    return FlatVector::GetData<T>(vector);
+}
+#endif
+
 template <class T>
 static void StoreDecimal(Vector &target, idx_t offset, T value) {
-    auto data = FlatVector::GetDataMutable<T>(target);
+    auto data = FbFlatData<T>(target);
     data[offset] = value;
 }
 
@@ -248,13 +263,13 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
         // alone and let DuckDB's append handle them.
         if (col.character_set_id == 0) {
             if (none_encoding == NoneEncoding::BLOB) {
-                FlatVector::GetDataMutable<string_t>(target)[target_offset] =
+                FbFlatData<string_t>(target)[target_offset] =
                     StringVector::AddStringOrBlob(target, str);
                 break;
             }
             str = TranscodeNoneCharset(str, none_encoding, col.name);
         }
-        FlatVector::GetDataMutable<string_t>(target)[target_offset] =
+        FbFlatData<string_t>(target)[target_offset] =
             StringVector::AddString(target, str);
         break;
     }
@@ -264,7 +279,7 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
             // DECIMAL with internal width SMALLINT.
             StoreDecimal<int16_t>(target, target_offset, v);
         } else {
-            FlatVector::GetDataMutable<int16_t>(target)[target_offset] = v;
+            FbFlatData<int16_t>(target)[target_offset] = v;
         }
         break;
     }
@@ -273,7 +288,7 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
         if (dst_type.id() == LogicalTypeId::DECIMAL) {
             StoreDecimal<int32_t>(target, target_offset, v);
         } else {
-            FlatVector::GetDataMutable<int32_t>(target)[target_offset] = v;
+            FbFlatData<int32_t>(target)[target_offset] = v;
         }
         break;
     }
@@ -289,26 +304,26 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
                 hugeint_t wide;
                 wide.lower = static_cast<uint64_t>(v);
                 wide.upper = (v < 0) ? -1 : 0;
-                FlatVector::GetDataMutable<hugeint_t>(target)[target_offset] = wide;
+                FbFlatData<hugeint_t>(target)[target_offset] = wide;
             } else {
                 // DECIMAL(≤18, scale): physically int64, so the scaled
                 // int64 from Firebird is already the right bit pattern.
                 StoreDecimal<int64_t>(target, target_offset, v);
             }
         } else {
-            FlatVector::GetDataMutable<int64_t>(target)[target_offset] = v;
+            FbFlatData<int64_t>(target)[target_offset] = v;
         }
         break;
     }
     case SQL_FLOAT:
-        FlatVector::GetDataMutable<float>(target)[target_offset] = stmt.GetFloat(col_idx);
+        FbFlatData<float>(target)[target_offset] = stmt.GetFloat(col_idx);
         break;
     case SQL_D_FLOAT:
     case SQL_DOUBLE:
-        FlatVector::GetDataMutable<double>(target)[target_offset] = stmt.GetDouble(col_idx);
+        FbFlatData<double>(target)[target_offset] = stmt.GetDouble(col_idx);
         break;
     case SQL_BOOLEAN:
-        FlatVector::GetDataMutable<bool>(target)[target_offset] = stmt.GetBool(col_idx);
+        FbFlatData<bool>(target)[target_offset] = stmt.GetBool(col_idx);
         break;
     case SQL_TIMESTAMP: {
         auto ts = stmt.GetTimestamp(col_idx);
@@ -317,7 +332,7 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
         date_t      d = Date::FromDate(1858, 11, 17);
         d.days       += ts.timestamp_date;
         dtime_t     t(static_cast<int64_t>(ts.timestamp_time) * 100);  // -> microseconds
-        FlatVector::GetDataMutable<timestamp_t>(target)[target_offset] =
+        FbFlatData<timestamp_t>(target)[target_offset] =
             Timestamp::FromDatetime(d, t);
         break;
     }
@@ -325,12 +340,12 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
         auto d  = stmt.GetDate(col_idx);
         date_t out = Date::FromDate(1858, 11, 17);
         out.days  += d;
-        FlatVector::GetDataMutable<date_t>(target)[target_offset] = out;
+        FbFlatData<date_t>(target)[target_offset] = out;
         break;
     }
     case SQL_TYPE_TIME: {
         auto t = stmt.GetTime(col_idx);
-        FlatVector::GetDataMutable<dtime_t>(target)[target_offset] =
+        FbFlatData<dtime_t>(target)[target_offset] =
             dtime_t(static_cast<int64_t>(t) * 100);  // 1/10000s → microseconds
         break;
     }
@@ -343,7 +358,7 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
         hugeint_t v;
         v.lower = lo;
         v.upper = hi;
-        FlatVector::GetDataMutable<hugeint_t>(target)[target_offset] = v;
+        FbFlatData<hugeint_t>(target)[target_offset] = v;
         break;
     }
     case SQL_TIMESTAMP_TZ:
@@ -355,7 +370,7 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
         date_t  d = Date::FromDate(1858, 11, 17);
         d.days   += ts.timestamp_date;
         dtime_t t(static_cast<int64_t>(ts.timestamp_time) * 100);
-        FlatVector::GetDataMutable<timestamp_tz_t>(target)[target_offset] =
+        FbFlatData<timestamp_tz_t>(target)[target_offset] =
             timestamp_tz_t(Timestamp::FromDatetime(d, t));
         break;
     }
@@ -364,7 +379,7 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
         auto t = stmt.GetTimeTzUtc(col_idx);
         // Firebird stores the UTC component; surface it with a zero
         // offset (DuckDB's dtime_tz_t encodes time+offset in 64 bits).
-        FlatVector::GetDataMutable<dtime_tz_t>(target)[target_offset] =
+        FbFlatData<dtime_tz_t>(target)[target_offset] =
             dtime_tz_t(dtime_t(static_cast<int64_t>(t) * 100), 0);
         break;
     }
@@ -389,16 +404,16 @@ void FirebirdAppendValue(FirebirdStatement &stmt,
             // through BLOBs while the matching VARCHAR path rejects).
             if (col.character_set_id == 0) {
                 if (none_encoding == NoneEncoding::BLOB) {
-                    FlatVector::GetDataMutable<string_t>(target)[target_offset] =
+                    FbFlatData<string_t>(target)[target_offset] =
                         StringVector::AddStringOrBlob(target, blob);
                     break;
                 }
                 blob = TranscodeNoneCharset(blob, none_encoding, col.name);
             }
-            FlatVector::GetDataMutable<string_t>(target)[target_offset] =
+            FbFlatData<string_t>(target)[target_offset] =
                 StringVector::AddString(target, blob);
         } else {
-            FlatVector::GetDataMutable<string_t>(target)[target_offset] =
+            FbFlatData<string_t>(target)[target_offset] =
                 StringVector::AddStringOrBlob(target, blob);
         }
         break;

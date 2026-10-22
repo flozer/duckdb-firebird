@@ -15,12 +15,12 @@ permissions:
   contents: write
 
 env:
-  DUCKDB_VERSION: v1.5.3
+  DUCKDB_VERSION: v1.5.6
   FIREBIRD_SDK_URL: https://github.com/FirebirdSQL/firebird/releases/download/v4.0.5/Firebird-4.0.5.3140-0-x64.zip
 
 jobs:
   linux-x64:
-    name: linux-x64 release asset
+    name: linux-x64 release asset (DuckDB v1.5.6)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
 
@@ -80,7 +80,7 @@ jobs:
           gh release upload "$RELEASE_TAG" dist/duckdb-firebird-*-linux-x64.tar.gz --clobber
 
   windows-x64:
-    name: windows-x64 release asset
+    name: windows-x64 release asset (DuckDB v1.5.6)
     # windows-latest ships MSVC 14.51, which removed
     # stdext::checked_array_iterator that DuckDB v1.5.3's bundled
     # third_party/fmt still uses (fmt/format.h fails before extension code).
@@ -190,3 +190,188 @@ jobs:
             }
           }
           gh release upload $env:RELEASE_TAG dist/duckdb-firebird-*-windows-x64.zip --clobber
+
+  # DuckDB v2.0 asset legs (v1.3.0+). The same dual-path source builds
+  # against the v2.0 C++ API; extension-ci-tools must be on its
+  # v2.0-cyanoptera branch for the make-based build. continue-on-error:
+  # the v2.0 CI path is on its first ride — a failure must not block the
+  # v1.5.6 release assets.
+  linux-x64-duckdb2:
+    name: linux-x64 release asset (DuckDB v2.0)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Pin extension-ci-tools to the v2.0 branch
+        run: |
+          git -C extension-ci-tools fetch origin v2.0-cyanoptera
+          git -C extension-ci-tools checkout FETCH_HEAD
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build g++ pkg-config python3 ccache \
+            firebird-dev libfbclient2
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=1G
+          echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
+
+      - name: Build
+        env:
+          DUCKDB_VERSION: v2.0.0
+        run: scripts/build_linux_local.sh --clean
+
+      - name: Package
+        env:
+          RELEASE_VERSION: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+        run: scripts/package_dist_linux.sh
+
+      - name: Suffix asset for the DuckDB v2 build
+        run: |
+          for f in dist/duckdb-firebird-*-linux-x64.tar.gz; do
+            mv "$f" "${f%.tar.gz}-duckdb2.tar.gz"
+          done
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: duckdb-firebird-linux-x64-duckdb2
+          path: dist/duckdb-firebird-*-linux-x64-duckdb2.tar.gz
+          if-no-files-found: error
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes "Automated release assets for $RELEASE_TAG." \
+              || gh release view "$RELEASE_TAG" >/dev/null
+          fi
+          gh release upload "$RELEASE_TAG" dist/duckdb-firebird-*-linux-x64-duckdb2.tar.gz --clobber
+
+  windows-x64-duckdb2:
+    name: windows-x64 release asset (DuckDB v2.0)
+    runs-on: windows-2022
+    timeout-minutes: 120
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Pin extension-ci-tools to the v2.0 branch
+        shell: bash
+        run: |
+          git -C extension-ci-tools fetch origin v2.0-cyanoptera
+          git -C extension-ci-tools checkout FETCH_HEAD
+
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Ninja
+        shell: pwsh
+        run: choco install ninja -y --no-progress
+
+      - name: Cache Firebird SDK
+        id: cache-fb-sdk
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}\firebird-sdk
+          key: firebird-sdk-${{ env.FIREBIRD_SDK_URL }}
+
+      - name: Download + extract Firebird Windows SDK
+        if: steps.cache-fb-sdk.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $url = $env:FIREBIRD_SDK_URL
+          if ($url -notmatch '^https://github\.com/FirebirdSQL/firebird/releases/download/.+\.zip$') {
+            throw "Unsupported Firebird SDK URL. Use an official https://github.com/FirebirdSQL/firebird/releases/download/... .zip URL."
+          }
+          $zip = Join-Path $env:RUNNER_TEMP 'firebird-sdk.zip'
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $dest = Join-Path $env:RUNNER_TEMP 'firebird-sdk'
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          New-Item -ItemType Directory -Path $dest | Out-Null
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+
+      - name: Locate Firebird SDK
+        id: fb-sdk
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'firebird-sdk'
+          $header = Get-ChildItem -Recurse -Filter 'ibase.h' $root | Select-Object -First 1
+          $lib    = Get-ChildItem -Recurse -Filter 'fbclient_ms.lib' $root | Select-Object -First 1
+          $dll    = Get-ChildItem -Recurse -Filter 'fbclient.dll' $root | Select-Object -First 1
+          if (-not $header) { throw "ibase.h not found under $root" }
+          if (-not $lib)    { throw "fbclient_ms.lib not found under $root" }
+          if (-not $dll)    { throw "fbclient.dll not found under $root" }
+          $sdkRoot = Split-Path -Parent (Split-Path -Parent $header.FullName)
+          "FB_SDK_ROOT=$sdkRoot" >> $env:GITHUB_ENV
+          "FBCLIENT_DLL=$($dll.FullName)" >> $env:GITHUB_ENV
+
+      - name: Pin DuckDB version
+        shell: bash
+        run: DUCKDB_GIT_VERSION=v2.0.0 make set_duckdb_version
+
+      - name: Build
+        shell: bash
+        env:
+          GEN: ninja
+        run: |
+          export FB_SDK_ROOT_FWD=$(echo "$FB_SDK_ROOT" | sed 's|\|/|g')
+          EXT_FLAGS="-DFB_SDK_ROOT=$FB_SDK_ROOT_FWD" make release
+
+      - name: Stage fbclient.dll
+        shell: pwsh
+        run: |
+          Copy-Item -Path $env:FBCLIENT_DLL -Destination build\release\fbclient.dll -Force
+
+      - name: Package
+        shell: cmd
+        env:
+          RELEASE_VERSION: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+        run: scripts\package_dist.bat
+
+      - name: Suffix asset for the DuckDB v2 build
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -Filter 'duckdb-firebird-*-windows-x64.zip' | ForEach-Object {
+            Rename-Item $_.FullName ($_.FullName -replace '\.zip$', '-duckdb2.zip')
+          }
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: duckdb-firebird-windows-x64-duckdb2
+          path: dist/duckdb-firebird-*-windows-x64-duckdb2.zip
+          if-no-files-found: error
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+        run: |
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --title $env:RELEASE_TAG --notes "Automated release assets for $env:RELEASE_TAG."
+          }
+          gh release upload $env:RELEASE_TAG dist/duckdb-firebird-*-windows-x64-duckdb2.zip --clobber

@@ -11,7 +11,9 @@
 #include "duckdb/planner/filter/in_filter.hpp"
 #include "duckdb/planner/filter/null_filter.hpp"
 #include "duckdb/planner/filter/optional_filter.hpp"
-#include "duckdb/planner/table_filter_set.hpp"
+#ifdef FIREBIRD_DUCKDB_V2
+#include "duckdb/planner/table_filter_set.hpp"  // v2.0: TableFilterSet moved out of table_filter.hpp
+#endif
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
@@ -108,6 +110,8 @@ static const char *ComparisonToSql(ExpressionType t) {
     default: return nullptr;
     }
 }
+
+#ifdef FIREBIRD_DUCKDB_V2
 
 // ---------------------------------------------------------------------------
 // v2.0 expression decompilation
@@ -299,6 +303,21 @@ static bool TranslateFilterExpression(const std::string &column_name,
         return false;
     }
 }
+#endif  // FIREBIRD_DUCKDB_V2 (v2.0 expression decompilation)
+
+#ifndef FIREBIRD_DUCKDB_V2
+// v1.5: the same filter family, under its pre-"Legacy" names (the member
+// surface is identical — only the type/enum spellings differ in v2.0).
+using LegacyConstantFilter = ConstantFilter;
+using LegacyConjunctionAndFilter = ConjunctionAndFilter;
+using LegacyConjunctionOrFilter = ConjunctionOrFilter;
+using LegacyInFilter = InFilter;
+using LegacyOptionalFilter = OptionalFilter;
+// v2.0 renamed the enum entries to LEGACY_*; v1.5 keeps the bare names.
+#define FB_TFT(name) TableFilterType::name
+#else
+#define FB_TFT(name) TableFilterType::LEGACY_##name
+#endif
 
 // Recursively try to translate a TableFilter on `column_name`. Writes the
 // SQL fragment into `out` and any bindable constants into `params_out` on
@@ -316,19 +335,21 @@ static bool TranslateFilter(const std::string &column_name,
                             std::string &out,
                             std::vector<Value> &params_out) {
     switch (filter.filter_type) {
+#ifdef FIREBIRD_DUCKDB_V2
     case TableFilterType::EXPRESSION_FILTER: {
         // v2.0 runtime shape: the planner pushes bound expressions.
         auto &ef = filter.Cast<ExpressionFilter>();
         if (!ef.expr) return false;
         return TranslateFilterExpression(column_name, *ef.expr, out, params_out);
     }
-    case TableFilterType::LEGACY_IS_NULL:
+#endif
+    case FB_TFT(IS_NULL):
         out = column_name + " IS NULL";
         return true;
-    case TableFilterType::LEGACY_IS_NOT_NULL:
+    case FB_TFT(IS_NOT_NULL):
         out = column_name + " IS NOT NULL";
         return true;
-    case TableFilterType::LEGACY_CONSTANT_COMPARISON: {
+    case FB_TFT(CONSTANT_COMPARISON): {
         auto &c = filter.Cast<LegacyConstantFilter>();
         const char *op = ComparisonToSql(c.comparison_type);
         if (!op) return false;
@@ -347,7 +368,7 @@ static bool TranslateFilter(const std::string &column_name,
         }
         return false;
     }
-    case TableFilterType::LEGACY_CONJUNCTION_AND: {
+    case FB_TFT(CONJUNCTION_AND): {
         auto &c = filter.Cast<LegacyConjunctionAndFilter>();
         std::string acc;
         // Snapshot the params accumulator so an unsupported child can
@@ -365,7 +386,7 @@ static bool TranslateFilter(const std::string &column_name,
         out = acc;
         return !out.empty();
     }
-    case TableFilterType::LEGACY_CONJUNCTION_OR: {
+    case FB_TFT(CONJUNCTION_OR): {
         auto &c = filter.Cast<LegacyConjunctionOrFilter>();
         std::string acc;
         const size_t saved = params_out.size();
@@ -381,7 +402,7 @@ static bool TranslateFilter(const std::string &column_name,
         out = acc;
         return !out.empty();
     }
-    case TableFilterType::LEGACY_IN_FILTER: {
+    case FB_TFT(IN_FILTER): {
         auto &c = filter.Cast<LegacyInFilter>();
         if (c.values.empty()) {
             // `WHERE col IN ()` is unsatisfiable — emit something that
@@ -409,7 +430,7 @@ static bool TranslateFilter(const std::string &column_name,
         out = acc;
         return true;
     }
-    case TableFilterType::LEGACY_OPTIONAL_FILTER: {
+    case FB_TFT(OPTIONAL_FILTER): {
         // "Optional" means DuckDB will still re-check this filter, so
         // pushing it down is a pure win when we *can*. Unwrap and try the
         // child; if we can't translate it, just signal "not pushed" — no
@@ -503,14 +524,24 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
     sql << " FROM " << QuoteIdent(table_name);
 
     // --- filter pushdown -----------------------------------------------------
+#ifdef FIREBIRD_DUCKDB_V2
     if (filters && filters->HasFilters()) {
+#else
+    if (filters && !filters->filters.empty()) {
+#endif
         std::vector<std::string> conds;
         idx_t filter_idx = 0;
+#ifdef FIREBIRD_DUCKDB_V2
         // v2.0: TableFilterSet::filters is private — iterate via the
         // public iterator (InsertionIndex entry.GetIndex() + entry.Filter()).
         for (auto &entry : *filters) {
             column_t projected_col = entry.GetIndex();    // index into column_ids
             auto &filter = entry.Filter();
+#else
+        for (auto &kv : filters->filters) {
+            column_t projected_col = kv.first;            // index into column_ids
+            auto &filter = *kv.second;
+#endif
             // Resolve projected column back to the original column name.
             if (projected_col >= column_ids.size()) {
                 r.residual_filter_indices.push_back(filter_idx++);

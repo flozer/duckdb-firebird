@@ -656,7 +656,11 @@ void FirebirdStatement::BindInputParameters(const std::vector<Value> &params,
             // DuckDB TIME is microseconds since midnight; Firebird TIME is
             // 1/10000 second (100 microseconds) since midnight.
             dtime_t t = val.GetValue<dtime_t>();
-            ISC_TIME fb_time = static_cast<ISC_TIME>(t.value / 100);
+#ifdef FIREBIRD_DUCKDB_V2
+            ISC_TIME fb_time = static_cast<ISC_TIME>(t.value / 100);  // v2.0: dtime_t::value
+#else
+            ISC_TIME fb_time = static_cast<ISC_TIME>(t.micros / 100);
+#endif
             std::memcpy(in_buffers_[i].data(), &fb_time, sizeof(fb_time));
             v.sqldata = in_buffers_[i].data();
             break;
@@ -671,7 +675,11 @@ void FirebirdStatement::BindInputParameters(const std::vector<Value> &params,
             fb_ts.timestamp_date =
                 static_cast<ISC_DATE>(d.days + MJD_EPOCH_TO_UNIX_EPOCH_DAYS);
             fb_ts.timestamp_time =
-                static_cast<ISC_TIME>(t.value / 100);
+#ifdef FIREBIRD_DUCKDB_V2
+                static_cast<ISC_TIME>(t.value / 100);  // v2.0: dtime_t::value
+#else
+                static_cast<ISC_TIME>(t.micros / 100);
+#endif
             std::memcpy(in_buffers_[i].data(), &fb_ts, sizeof(fb_ts));
             v.sqldata = in_buffers_[i].data();
             break;
