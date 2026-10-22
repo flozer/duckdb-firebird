@@ -335,8 +335,12 @@ jobs:
         env:
           GEN: ninja
         run: |
-          export FB_SDK_ROOT_FWD=$(echo "$FB_SDK_ROOT" | sed 's|\|/|g')
-          EXT_FLAGS="-DFB_SDK_ROOT=$FB_SDK_ROOT_FWD" make release
+          export FB_SDK_ROOT_FWD=$(echo "$FB_SDK_ROOT" | sed 's|\\|/|g')
+          # FIREBIRD_DUCKDB_V2=1: the empty OVERRIDE_GIT_DESCRIBE this make
+          # path passes makes DuckDB's version detection bail to a dummy
+          # v0.0.1, so the CMake gate in the extension cannot see the real
+          # version - inject the v2 selection explicitly.
+          EXT_FLAGS="-DFB_SDK_ROOT=$FB_SDK_ROOT_FWD -DFIREBIRD_DUCKDB_V2=1" make release
 
       - name: Stage fbclient.dll
         shell: pwsh
