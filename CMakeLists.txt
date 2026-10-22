@@ -23,9 +23,18 @@ include_directories(src/include)
 # FIREBIRD_DUCKDB_V2, set here from DuckDB's own version variables - in
 # scope because this file is included by DuckDB's extension build system
 # (extension_config.cmake / duckdb_extension_load).
-message(STATUS "firebird gate: DEFINED=${DUCKDB_MAJOR_VERSION} MAJOR=${DUCKDB_MAJOR_VERSION}")
+# Two version sources, because the extension builds through two consumers:
+#   * direct DuckDB CMake include (local builds): DUCKDB_MAJOR_VERSION is
+#     a numeric variable set by DuckDB's own CMakeLists;
+#   * extension-ci-tools make path (CI release assets): only the STRING
+#     DUCKDB_VERSION ("v2.0.0") is propagated from the workflow env.
 if(DEFINED DUCKDB_MAJOR_VERSION AND DUCKDB_MAJOR_VERSION GREATER_EQUAL 2)
-  message(STATUS "firebird: DuckDB v2.x C++ API (DUCKDB_MAJOR_VERSION=${DUCKDB_MAJOR_VERSION})")
+  set(FIREBIRD_DUCKDB_V2 1)
+elseif(DEFINED DUCKDB_VERSION AND DUCKDB_VERSION MATCHES "^v[2-9]\.")
+  set(FIREBIRD_DUCKDB_V2 1)
+endif()
+if(FIREBIRD_DUCKDB_V2)
+  message(STATUS "firebird: DuckDB v2.x C++ API")
   add_compile_definitions(FIREBIRD_DUCKDB_V2=1)
 else()
   message(STATUS "firebird: DuckDB v1.x C++ API (named_parameters/TableFunction)")
