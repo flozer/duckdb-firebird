@@ -322,7 +322,13 @@ struct IndexProfileGlobalState : public GlobalTableFunctionState {
 
 static unique_ptr<FunctionData>
 IndexProfileBind(ClientContext &context, TableFunctionBindInput &input,
-                 vector<LogicalType> &return_types, vector<string> &names) {
+                 vector<LogicalType> &return_types,
+#ifdef FIREBIRD_DUCKDB_V2
+                 // v2.0: bind-reported column names are Identifiers.
+                 vector<Identifier> &names) {
+#else
+                 vector<string> &names) {
+#endif
     if (input.inputs.empty() || input.inputs[0].IsNull()) {
         throw BinderException(
             "firebird_index_profile(qualified_name VARCHAR): qualified_name "
@@ -436,7 +442,12 @@ static void IndexProfileFunction(ClientContext &, TableFunctionInput &input,
 }
 
 TableFunction GetFirebirdIndexProfileFunction() {
-    TableFunction fn("firebird_index_profile", {LogicalType::VARCHAR},
+    TableFunction fn("firebird_index_profile",
+#ifdef FIREBIRD_DUCKDB_V2
+                     FunctionSignature().AddPositionalOnly("qualified_name", LogicalType::VARCHAR),
+#else
+                     {LogicalType::VARCHAR},
+#endif
                      IndexProfileFunction, IndexProfileBind,
                      IndexProfileInitGlobal);
     return fn;

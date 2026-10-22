@@ -355,7 +355,12 @@ std::string RedactBindValue(const Value &v) {
 
 // Forward declarations - shared by firebird_last_query() and
 // firebird_query_log() below.
+#ifdef FIREBIRD_DUCKDB_V2
+static void TelemetrySchema(vector<Identifier> &names,  // v2.0: Identifier names
+#else
 static void TelemetrySchema(vector<string> &names,
+#endif
+
                              vector<LogicalType> &types);
 static void EmitTelemetryRow(DataChunk &output, idx_t row,
                               const FirebirdQueryTelemetry &t);
@@ -370,7 +375,12 @@ struct LastQueryGlobalState : public GlobalTableFunctionState {
 
 static unique_ptr<FunctionData>
 LastQueryBind(ClientContext &, TableFunctionBindInput &,
-              vector<LogicalType> &return_types, vector<string> &names) {
+              vector<LogicalType> &return_types,
+#ifdef FIREBIRD_DUCKDB_V2
+              vector<Identifier> &names) {  // v2.0: Identifier names
+#else
+              vector<string> &names) {
+#endif
     TelemetrySchema(names, return_types);
     return make_uniq<LastQueryBindData>();
 }
@@ -378,7 +388,8 @@ LastQueryBind(ClientContext &, TableFunctionBindInput &,
 static unique_ptr<GlobalTableFunctionState>
 LastQueryInitGlobal(ClientContext &context, TableFunctionInitInput &) {
     auto g = make_uniq<LastQueryGlobalState>();
-    g->snapshot = GetObservabilityState(context)->GetLastQuery();
+    auto st = GetObservabilityState(context);
+    g->snapshot = st->GetLastQuery();
     return std::move(g);
 }
 
@@ -430,7 +441,11 @@ static void EmitTelemetryRow(DataChunk &output, idx_t row,
 // Returns the canonical (names, types) the two observability table
 // functions share. Kept in one place so adding a column never gets out
 // of sync between the two.
+#ifdef FIREBIRD_DUCKDB_V2
+static void TelemetrySchema(vector<Identifier> &names,  // v2.0: Identifier names
+#else
 static void TelemetrySchema(vector<string> &names,
+#endif
                              vector<LogicalType> &types) {
     names = {
         "remote_sql",
@@ -490,7 +505,11 @@ static void LastQueryFunction(ClientContext &, TableFunctionInput &input,
 
 TableFunction GetFirebirdLastQueryFunction() {
     TableFunction fn("firebird_last_query",
+#ifdef FIREBIRD_DUCKDB_V2
+                     FunctionSignature(),
+#else
                      {},
+#endif
                      LastQueryFunction,
                      LastQueryBind,
                      LastQueryInitGlobal);
@@ -515,7 +534,12 @@ struct QueryLogGlobalState : public GlobalTableFunctionState {
 
 static unique_ptr<FunctionData>
 QueryLogBind(ClientContext &, TableFunctionBindInput &,
-             vector<LogicalType> &return_types, vector<string> &names) {
+             vector<LogicalType> &return_types,
+#ifdef FIREBIRD_DUCKDB_V2
+             vector<Identifier> &names) {  // v2.0: Identifier names
+#else
+             vector<string> &names) {
+#endif
     TelemetrySchema(names, return_types);
     return make_uniq<QueryLogBindData>();
 }
@@ -541,7 +565,11 @@ static void QueryLogFunction(ClientContext &, TableFunctionInput &input,
 
 TableFunction GetFirebirdQueryLogFunction() {
     TableFunction fn("firebird_query_log",
+#ifdef FIREBIRD_DUCKDB_V2
+                     FunctionSignature(),
+#else
                      {},
+#endif
                      QueryLogFunction,
                      QueryLogBind,
                      QueryLogInitGlobal);

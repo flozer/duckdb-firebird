@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 
@@ -460,12 +461,25 @@ void FirebirdConnection::Attach() {
     }
 
     ISC_STATUS status[20] = {};
-    isc_attach_database(status,
-                        static_cast<short>(info_.database.size()),
-                        const_cast<char *>(info_.database.c_str()),
-                        &db_,
-                        static_cast<short>(dpb.size()),
-                        dpb.data());
+    // DuckDB v2.0's executor starts partition workers back-to-back, so
+    // several isc_attach_database calls can land at the same instant. The
+    // Windows local (XPS) provider intermittently drops the handshake when
+    // that happens ("isc_attach_database: connection lost to database",
+    // sqlcode -901) — the same burst attaches fine over TCP and under the
+    // v1.5 scheduler, which happened to stagger the workers. Attachments
+    // are one-shot and cheap, so serializing the attach handshake
+    // process-wide costs nothing measurable and removes the race for every
+    // protocol (local, TCP, embedded).
+    static std::mutex attach_mutex;
+    {
+        std::lock_guard<std::mutex> guard(attach_mutex);
+        isc_attach_database(status,
+                            static_cast<short>(info_.database.size()),
+                            const_cast<char *>(info_.database.c_str()),
+                            &db_,
+                            static_cast<short>(dpb.size()),
+                            dpb.data());
+    }
     Check(status, "isc_attach_database(" + info_.database + ")");
 }
 
@@ -642,7 +656,11 @@ void FirebirdStatement::BindInputParameters(const std::vector<Value> &params,
             // DuckDB TIME is microseconds since midnight; Firebird TIME is
             // 1/10000 second (100 microseconds) since midnight.
             dtime_t t = val.GetValue<dtime_t>();
+#ifdef FIREBIRD_DUCKDB_V2
+            ISC_TIME fb_time = static_cast<ISC_TIME>(t.value / 100);  // v2.0: dtime_t::value
+#else
             ISC_TIME fb_time = static_cast<ISC_TIME>(t.micros / 100);
+#endif
             std::memcpy(in_buffers_[i].data(), &fb_time, sizeof(fb_time));
             v.sqldata = in_buffers_[i].data();
             break;
@@ -657,7 +675,11 @@ void FirebirdStatement::BindInputParameters(const std::vector<Value> &params,
             fb_ts.timestamp_date =
                 static_cast<ISC_DATE>(d.days + MJD_EPOCH_TO_UNIX_EPOCH_DAYS);
             fb_ts.timestamp_time =
+#ifdef FIREBIRD_DUCKDB_V2
+                static_cast<ISC_TIME>(t.value / 100);  // v2.0: dtime_t::value
+#else
                 static_cast<ISC_TIME>(t.micros / 100);
+#endif
             std::memcpy(in_buffers_[i].data(), &fb_ts, sizeof(fb_ts));
             v.sqldata = in_buffers_[i].data();
             break;

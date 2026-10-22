@@ -7,9 +7,20 @@
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
 #include "duckdb/planner/filter/constant_filter.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/filter/in_filter.hpp"
 #include "duckdb/planner/filter/null_filter.hpp"
 #include "duckdb/planner/filter/optional_filter.hpp"
+#ifdef FIREBIRD_DUCKDB_V2
+#include "duckdb/planner/table_filter_set.hpp"  // v2.0: TableFilterSet moved out of table_filter.hpp
+#endif
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
 
 namespace duckdb {
 
@@ -100,6 +111,214 @@ static const char *ComparisonToSql(ExpressionType t) {
     }
 }
 
+#ifdef FIREBIRD_DUCKDB_V2
+
+// ---------------------------------------------------------------------------
+// v2.0 expression decompilation
+//
+// The v2.0 planner no longer pushes the typed v1.5 filters (ConstantFilter,
+// InFilter, ...): it pushes ExpressionFilter objects wrapping *bound
+// expressions* over a BoundReferenceExpression(0) placeholder (see
+// FilterCombiner). Every predicate the planner pushes as a non-optional
+// filter is our responsibility — DuckDB only re-applies filters lifted
+// back out via supports_pushdown_type and optional-wrapped ones — so we
+// must decompile the shapes the FilterCombiner creates into Firebird SQL:
+//   * comparisons col <op> const (also flipped const <op> col)
+//   * comparisons over a cast of the column (mirrors projection casts,
+//     e.g. DECFLOAT→VARCHAR(64); we push the same CAST to Firebird so the
+//     comparison semantics match DuckDB's)
+//   * IS NULL / IS NOT NULL checks
+//   * IN-lists (COMPARE_IN operator expressions)
+//   * AND / OR conjunctions of the above
+// Anything else stays residual (optional filters do too — DuckDB still
+// re-checks those, so skipping them is always safe).
+// ---------------------------------------------------------------------------
+
+// Whether `expr` denotes the scanned column: the BoundReference placeholder
+// the planner substitutes for the column, a bound column ref, or a cast
+// chain over one of those.
+static bool IsColumnSubject(const Expression &expr) {
+    switch (expr.GetExpressionClass()) {
+    case ExpressionClass::BOUND_REF:
+    case ExpressionClass::BOUND_COLUMN_REF:
+        return true;
+    case ExpressionClass::BOUND_FUNCTION:
+        if (BoundCastExpression::IsCast(expr)) {
+            auto &cast = expr.Cast<BoundFunctionExpression>();
+            return IsColumnSubject(BoundCastExpression::Child(cast));
+        }
+        return false;
+    default:
+        return false;
+    }
+}
+
+// Extract the constant a comparison candidate carries. The combiner only
+// pairs constants whose type equals the column's type, and a folded
+// constant arrives as a bare BoundConstantExpression.
+static bool TryGetConstant(const Expression &expr, Value &out) {
+    if (expr.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) return false;
+    out = expr.Cast<BoundConstantExpression>().GetValue();
+    return true;
+}
+
+// Translate `col <op> const` / `const <op> col` (v2.0 comparison expressions
+// are function expressions; BoundComparisonExpression is a helper facade).
+static bool TranslateComparison(const std::string &column_name,
+                                const Expression &expr,
+                                std::string &out,
+                                std::vector<Value> &params_out) {
+    auto &cmp = expr.Cast<BoundFunctionExpression>();
+    auto &left = BoundComparisonExpression::Left(cmp);
+    auto &right = BoundComparisonExpression::Right(cmp);
+    auto type = expr.GetExpressionType();
+
+    Value constant;
+    bool col_on_left = IsColumnSubject(left);
+    if (col_on_left == IsColumnSubject(right)) return false;
+    if (col_on_left) {
+        if (!TryGetConstant(right, constant)) return false;
+    } else {
+        if (!TryGetConstant(left, constant)) return false;
+        type = FlipComparisonExpression(type);
+    }
+    const char *op = ComparisonToSql(type);
+    if (!op) return false;
+    if (constant.IsNull()) {
+        // `x <op> NULL` is never true — DuckDB plans it away; refuse so we
+        // never emit a predicate Firebird would read as an IS-NOT-NULL.
+        return false;
+    }
+    if (IsBindableType(constant.type())) {
+        out = column_name + " " + op + " ?";
+        params_out.push_back(constant);
+        return true;
+    }
+    // Fallback for types we can safely stringify (HUGEINT, DECIMAL) but
+    // don't yet support as bind parameters. Strings always parametrise.
+    std::string lit;
+    if (SafeLiteralInline(constant, lit)) {
+        out = column_name + " " + op + " " + lit;
+        return true;
+    }
+    return false;
+}
+
+// Translate an IN-list over the column (operator expression COMPARE_IN).
+static bool TranslateInList(const std::string &column_name,
+                            const BoundOperatorExpression &op,
+                            std::string &out,
+                            std::vector<Value> &params_out) {
+    if (op.GetChildren().size() < 2) return false;
+    if (!IsColumnSubject(*op.GetChildren()[0])) return false;
+
+    std::vector<Value> values;
+    for (size_t i = 1; i < op.GetChildren().size(); ++i) {
+        Value v;
+        if (!TryGetConstant(*op.GetChildren()[i], v)) return false;
+        if (v.IsNull()) return false;   // NULL in IN-list: leave to DuckDB
+        values.push_back(std::move(v));
+    }
+    if (values.empty()) {
+        out = "(1=0)";
+        return true;
+    }
+    const size_t saved = params_out.size();
+    std::string acc = column_name + " IN (";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i) acc += ", ";
+        if (IsBindableType(values[i].type())) {
+            acc += "?";
+            params_out.push_back(values[i]);
+            continue;
+        }
+        std::string lit;
+        if (!SafeLiteralInline(values[i], lit)) {
+            params_out.resize(saved);
+            return false;
+        }
+        acc += lit;
+    }
+    acc += ")";
+    out = acc;
+    return true;
+}
+
+// Recursively decompile a bound filter expression into a Firebird WHERE
+// fragment. Returns false when the shape is unsupported (caller marks the
+// filter residual).
+static bool TranslateFilterExpression(const std::string &column_name,
+                                      const Expression &expr,
+                                      std::string &out,
+                                      std::vector<Value> &params_out) {
+    switch (expr.GetExpressionClass()) {
+    case ExpressionClass::BOUND_FUNCTION: {
+        if (BoundComparisonExpression::IsComparison(expr)) {
+            return TranslateComparison(column_name, expr, out, params_out);
+        }
+        return false;
+    }
+    case ExpressionClass::BOUND_OPERATOR: {
+        auto &op = expr.Cast<BoundOperatorExpression>();
+        switch (op.GetExpressionType()) {
+        case ExpressionType::COMPARE_IN:
+            return TranslateInList(column_name, op, out, params_out);
+        case ExpressionType::OPERATOR_IS_NULL:
+        case ExpressionType::OPERATOR_IS_NOT_NULL: {
+            if (op.GetChildren().size() != 1) return false;
+            if (!IsColumnSubject(*op.GetChildren()[0])) return false;
+            out = column_name +
+                  (op.GetExpressionType() == ExpressionType::OPERATOR_IS_NULL
+                       ? " IS NULL"
+                       : " IS NOT NULL");
+            return true;
+        }
+        default:
+            return false;
+        }
+    }
+    case ExpressionClass::BOUND_CONJUNCTION: {
+        auto &conj = expr.Cast<BoundConjunctionExpression>();
+        const bool is_and = conj.GetExpressionType() == ExpressionType::CONJUNCTION_AND;
+        const bool is_or  = conj.GetExpressionType() == ExpressionType::CONJUNCTION_OR;
+        if (!is_and && !is_or) return false;
+        std::string acc;
+        // Snapshot the params accumulator so an unsupported child can
+        // roll back any params siblings already pushed for this branch.
+        const size_t saved = params_out.size();
+        const char *sep = is_and ? " AND " : " OR ";
+        for (auto &child : conj.GetChildren()) {
+            std::string part;
+            if (!TranslateFilterExpression(column_name, *child, part, params_out)) {
+                params_out.resize(saved);
+                return false;
+            }
+            if (!acc.empty()) acc += sep;
+            acc += "(" + part + ")";
+        }
+        out = acc;
+        return !out.empty();
+    }
+    default:
+        return false;
+    }
+}
+#endif  // FIREBIRD_DUCKDB_V2 (v2.0 expression decompilation)
+
+#ifndef FIREBIRD_DUCKDB_V2
+// v1.5: the same filter family, under its pre-"Legacy" names (the member
+// surface is identical — only the type/enum spellings differ in v2.0).
+using LegacyConstantFilter = ConstantFilter;
+using LegacyConjunctionAndFilter = ConjunctionAndFilter;
+using LegacyConjunctionOrFilter = ConjunctionOrFilter;
+using LegacyInFilter = InFilter;
+using LegacyOptionalFilter = OptionalFilter;
+// v2.0 renamed the enum entries to LEGACY_*; v1.5 keeps the bare names.
+#define FB_TFT(name) TableFilterType::name
+#else
+#define FB_TFT(name) TableFilterType::LEGACY_##name
+#endif
+
 // Recursively try to translate a TableFilter on `column_name`. Writes the
 // SQL fragment into `out` and any bindable constants into `params_out` on
 // success. Returns true on success; on failure (unsupported shape or
@@ -116,14 +335,22 @@ static bool TranslateFilter(const std::string &column_name,
                             std::string &out,
                             std::vector<Value> &params_out) {
     switch (filter.filter_type) {
-    case TableFilterType::IS_NULL:
+#ifdef FIREBIRD_DUCKDB_V2
+    case TableFilterType::EXPRESSION_FILTER: {
+        // v2.0 runtime shape: the planner pushes bound expressions.
+        auto &ef = filter.Cast<ExpressionFilter>();
+        if (!ef.expr) return false;
+        return TranslateFilterExpression(column_name, *ef.expr, out, params_out);
+    }
+#endif
+    case FB_TFT(IS_NULL):
         out = column_name + " IS NULL";
         return true;
-    case TableFilterType::IS_NOT_NULL:
+    case FB_TFT(IS_NOT_NULL):
         out = column_name + " IS NOT NULL";
         return true;
-    case TableFilterType::CONSTANT_COMPARISON: {
-        auto &c = filter.Cast<ConstantFilter>();
+    case FB_TFT(CONSTANT_COMPARISON): {
+        auto &c = filter.Cast<LegacyConstantFilter>();
         const char *op = ComparisonToSql(c.comparison_type);
         if (!op) return false;
         if (IsBindableType(c.constant.type())) {
@@ -141,8 +368,8 @@ static bool TranslateFilter(const std::string &column_name,
         }
         return false;
     }
-    case TableFilterType::CONJUNCTION_AND: {
-        auto &c = filter.Cast<ConjunctionAndFilter>();
+    case FB_TFT(CONJUNCTION_AND): {
+        auto &c = filter.Cast<LegacyConjunctionAndFilter>();
         std::string acc;
         // Snapshot the params accumulator so an unsupported child can
         // roll back any params siblings already pushed for this branch.
@@ -159,8 +386,8 @@ static bool TranslateFilter(const std::string &column_name,
         out = acc;
         return !out.empty();
     }
-    case TableFilterType::CONJUNCTION_OR: {
-        auto &c = filter.Cast<ConjunctionOrFilter>();
+    case FB_TFT(CONJUNCTION_OR): {
+        auto &c = filter.Cast<LegacyConjunctionOrFilter>();
         std::string acc;
         const size_t saved = params_out.size();
         for (auto &child : c.child_filters) {
@@ -175,8 +402,8 @@ static bool TranslateFilter(const std::string &column_name,
         out = acc;
         return !out.empty();
     }
-    case TableFilterType::IN_FILTER: {
-        auto &c = filter.Cast<InFilter>();
+    case FB_TFT(IN_FILTER): {
+        auto &c = filter.Cast<LegacyInFilter>();
         if (c.values.empty()) {
             // `WHERE col IN ()` is unsatisfiable — emit something that
             // guarantees zero rows without round-tripping every literal.
@@ -203,12 +430,12 @@ static bool TranslateFilter(const std::string &column_name,
         out = acc;
         return true;
     }
-    case TableFilterType::OPTIONAL_FILTER: {
+    case FB_TFT(OPTIONAL_FILTER): {
         // "Optional" means DuckDB will still re-check this filter, so
         // pushing it down is a pure win when we *can*. Unwrap and try the
         // child; if we can't translate it, just signal "not pushed" — no
         // correctness impact (DuckDB still applies it).
-        auto &c = filter.Cast<OptionalFilter>();
+        auto &c = filter.Cast<LegacyOptionalFilter>();
         if (!c.child_filter) return false;
         return TranslateFilter(column_name, *c.child_filter, out, params_out);
     }
@@ -297,12 +524,24 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
     sql << " FROM " << QuoteIdent(table_name);
 
     // --- filter pushdown -----------------------------------------------------
+#ifdef FIREBIRD_DUCKDB_V2
+    if (filters && filters->HasFilters()) {
+#else
     if (filters && !filters->filters.empty()) {
+#endif
         std::vector<std::string> conds;
         idx_t filter_idx = 0;
+#ifdef FIREBIRD_DUCKDB_V2
+        // v2.0: TableFilterSet::filters is private — iterate via the
+        // public iterator (InsertionIndex entry.GetIndex() + entry.Filter()).
+        for (auto &entry : *filters) {
+            column_t projected_col = entry.GetIndex();    // index into column_ids
+            auto &filter = entry.Filter();
+#else
         for (auto &kv : filters->filters) {
             column_t projected_col = kv.first;            // index into column_ids
             auto &filter = *kv.second;
+#endif
             // Resolve projected column back to the original column name.
             if (projected_col >= column_ids.size()) {
                 r.residual_filter_indices.push_back(filter_idx++);

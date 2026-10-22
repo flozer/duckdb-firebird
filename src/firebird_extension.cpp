@@ -26,15 +26,23 @@ namespace {
 //
 // positional_names covers only the positional parameters: duckdb_functions()
 // zips parameter_names against the combined list of positional arguments plus
-// fn.named_parameters (iterated in hash-map order), so the named tail must be
-// read from the same map here to stay index-aligned.
+// the named tail (keyword-only parameters), so the named tail must be read
+// from the same source duckdb_functions() reads to stay index-aligned.
+// (v1.5: fn.named_parameters, iterated in hash-map order; v2.0: the
+// keyword-only parameters of the FunctionSignature, in declaration order.)
 CreateTableFunctionInfo DescribedTableFunction(TableFunction fn, vector<string> positional_names,
                                                string description, string example, vector<string> categories) {
     FunctionDescription desc;
     desc.parameter_names = std::move(positional_names);
+#ifdef FIREBIRD_DUCKDB_V2
+    for (const auto &param : fn.GetSignature().GetParameters()) {
+        desc.parameter_names.push_back(param.GetName().GetIdentifierName());
+    }
+#else
     for (const auto &kv : fn.named_parameters) {
         desc.parameter_names.push_back(kv.first);
     }
+#endif
     desc.description = std::move(description);
     desc.examples = {std::move(example)};
     desc.categories = std::move(categories);

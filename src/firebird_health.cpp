@@ -138,7 +138,13 @@ struct HealthGlobalState : public GlobalTableFunctionState {
 
 static unique_ptr<FunctionData>
 HealthBind(ClientContext &context, TableFunctionBindInput &input,
-           vector<LogicalType> &return_types, vector<string> &names) {
+           vector<LogicalType> &return_types,
+#ifdef FIREBIRD_DUCKDB_V2
+           // v2.0: bind-reported column names are Identifiers.
+           vector<Identifier> &names) {
+#else
+           vector<string> &names) {
+#endif
     if (input.inputs.empty() || input.inputs[0].IsNull()) {
         throw BinderException(
             "firebird_health(alias VARCHAR): alias is required (the ATTACH "
@@ -235,7 +241,12 @@ static void HealthFunction(ClientContext &context, TableFunctionInput &input,
 }
 
 TableFunction GetFirebirdHealthFunction() {
-    TableFunction fn("firebird_health", {LogicalType::VARCHAR},
+    TableFunction fn("firebird_health",
+#ifdef FIREBIRD_DUCKDB_V2
+                     FunctionSignature().AddPositionalOnly("alias", LogicalType::VARCHAR),
+#else
+                     {LogicalType::VARCHAR},
+#endif
                      HealthFunction, HealthBind, HealthInitGlobal);
     return fn;
 }

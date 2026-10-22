@@ -634,7 +634,13 @@ struct ProfileTableGlobalState : public GlobalTableFunctionState {
 
 static unique_ptr<FunctionData>
 ProfileTableBind(ClientContext &context, TableFunctionBindInput &input,
-                 vector<LogicalType> &return_types, vector<string> &names) {
+                 vector<LogicalType> &return_types,
+#ifdef FIREBIRD_DUCKDB_V2
+                 // v2.0: bind-reported column names are Identifiers.
+                 vector<Identifier> &names) {
+#else
+                 vector<string> &names) {
+#endif
     if (input.inputs.empty() || input.inputs[0].IsNull()) {
         throw BinderException(
             "firebird_profile_table(qualified_name VARCHAR): qualified_name "
@@ -647,6 +653,12 @@ ProfileTableBind(ClientContext &context, TableFunctionBindInput &input,
     bind->catalog_name = qn.catalog;
     bind->table_name = qn.table;
     for (auto &kv : input.named_parameters) {
+#ifdef FIREBIRD_DUCKDB_V2
+        // v2.0 fills omitted keyword-only parameters with their NULL
+        // defaults before bind — a NULL here means "not supplied".
+        // (v1.5 only reports explicitly-passed parameters.)
+        if (kv.second.IsNull()) continue;
+#endif
         if (kv.first == "exact_row_count") {
             bind->exact_row_count = kv.second.GetValue<bool>();
         }
@@ -773,11 +785,20 @@ static void ProfileTableFunction(ClientContext &context,
 
 TableFunction GetFirebirdProfileTableFunction() {
     TableFunction fn("firebird_profile_table",
+#ifdef FIREBIRD_DUCKDB_V2
+                     FunctionSignature()
+                         .AddPositionalOnly("qualified_name", LogicalType::VARCHAR)
+                         .AddKeywordOnly("exact_row_count", LogicalType::BOOLEAN,
+                                         Value(LogicalType::BOOLEAN)),
+#else
                      {LogicalType::VARCHAR},
+#endif
                      ProfileTableFunction,
                      ProfileTableBind,
                      ProfileTableInitGlobal);
+#ifndef FIREBIRD_DUCKDB_V2
     fn.named_parameters["exact_row_count"] = LogicalType::BOOLEAN;
+#endif
     return fn;
 }
 

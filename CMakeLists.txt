@@ -16,6 +16,21 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 include_directories(src/include)
 
+# --- DuckDB version gate -----------------------------------------------------
+# The extension supports both the v1.5.x and the v2.x C++ API. The v2 API
+# (FunctionSignature-based table functions, encapsulated Bound expressions,
+# renamed extension-build flags) is selected at compile time via
+# FIREBIRD_DUCKDB_V2, set here from DuckDB's own version variables - in
+# scope because this file is included by DuckDB's extension build system
+# (extension_config.cmake / duckdb_extension_load).
+message(STATUS "firebird gate: DEFINED=${DUCKDB_MAJOR_VERSION} MAJOR=${DUCKDB_MAJOR_VERSION}")
+if(DEFINED DUCKDB_MAJOR_VERSION AND DUCKDB_MAJOR_VERSION GREATER_EQUAL 2)
+  message(STATUS "firebird: DuckDB v2.x C++ API (DUCKDB_MAJOR_VERSION=${DUCKDB_MAJOR_VERSION})")
+  add_compile_definitions(FIREBIRD_DUCKDB_V2=1)
+else()
+  message(STATUS "firebird: DuckDB v1.x C++ API (named_parameters/TableFunction)")
+endif()
+
 set(EXTENSION_SOURCES
     src/firebird_extension.cpp
     src/firebird_client.cpp

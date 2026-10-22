@@ -47,9 +47,11 @@
 #include "duckdb/parser/constraints/foreign_key_constraint.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
+#include "duckdb/parser/parsed_data/attach_info.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 #include "duckdb/transaction/transaction.hpp"
 #include "duckdb/transaction/transaction_manager.hpp"
@@ -93,16 +95,35 @@ public:
           none_pushdown_(none_pushdown),
           numeric_widen_int64_(numeric_widen_int64),
           cached_column_descs_(std::move(column_descs)),
-          pk_descriptor_(std::move(pk_descriptor)) {
+          pk_descriptor_(std::move(pk_descriptor))
+#ifdef FIREBIRD_DUCKDB_V2
+          // v2.0: TableCatalogEntry no longer stores the column list —
+          // GetColumns() is pure virtual, so we own a copy of info.columns.
+          ,
+          columns_(info.columns.Copy())
+#endif
+    {
         // Mirror the column list out of CreateTableInfo so we can hand
         // a fresh copy to every GetScanFunction call without re-reading
         // RDB$RELATION_FIELDS. EnsureTablesLoaded in the schema entry
         // already paid the round-trip once at attach time.
+#ifdef FIREBIRD_DUCKDB_V2
+        for (auto &col : columns_.Logical()) {
+            // v2.0: ColumnDefinition::Name() returns an Identifier.
+            cached_column_names_.push_back(col.Name().GetIdentifierName());
+#else
         for (auto &col : columns.Logical()) {
             cached_column_names_.push_back(col.Name());
+#endif
             cached_column_types_.push_back(col.Type());
         }
     }
+
+#ifdef FIREBIRD_DUCKDB_V2
+    const ColumnList &GetColumns() const override {
+        return columns_;
+    }
+#endif
 
     const PrimaryKeyDescriptor &GetPkDescriptor() const { return pk_descriptor_; }
 
@@ -119,7 +140,11 @@ public:
                                   unique_ptr<FunctionData> &bind_data) override {
         auto data = make_uniq<FirebirdBindData>();
         data->conn_info = conn_info_;
+#ifdef FIREBIRD_DUCKDB_V2
+        data->table_name = name.GetIdentifierName();  // v2.0: name is Identifier
+#else
         data->table_name = name;
+#endif
         data->column_names = cached_column_names_;   // O(1) — cached at construction
         data->column_types = cached_column_types_;
         data->column_descs = cached_column_descs_;
@@ -142,7 +167,12 @@ public:
             if (!pk_loaded_) {
                 auto conn = pool_ ? pool_->Acquire()
                                   : make_uniq<FirebirdConnection>(conn_info_);
+#ifdef FIREBIRD_DUCKDB_V2
+                pk_cache_ = ProbePrimaryKey(*conn, name.GetIdentifierName(),
+#else
                 pk_cache_ = ProbePrimaryKey(*conn, name,
+#endif
+
                                             data->column_names, data->column_types);
                 if (pool_) pool_->Release(std::move(conn));
                 pk_loaded_ = true;
@@ -157,6 +187,9 @@ public:
     }
 
 private:
+#ifdef FIREBIRD_DUCKDB_V2
+    ColumnList columns_;   // v2.0: owned copy — TableCatalogEntry::GetColumns() is pure virtual
+#endif
     FirebirdConnectionInfo conn_info_;
     std::shared_ptr<FirebirdConnectionPool> pool_;
     NoneEncoding none_encoding_;
@@ -405,9 +438,21 @@ private:
                                          col_types, col_descs,
                                          numeric_widen_int64_);
             }
+#ifdef FIREBIRD_DUCKDB_V2
+            // v2.0: CreateTableInfo takes a QualifiedName (Identifier-based).
+            CreateTableInfo info(QualifiedName(catalog.GetName(), this->name,
+                                               Identifier(table_name)));
+#else
             CreateTableInfo info(catalog.GetName(), this->name, table_name);
+#endif
             for (size_t i = 0; i < col_names.size(); ++i) {
+#ifdef FIREBIRD_DUCKDB_V2
+                // v2.0: ColumnDefinition names are Identifier.
+                info.columns.AddColumn(ColumnDefinition(Identifier(col_names[i]),
+                                                        col_types[i]));
+#else
                 info.columns.AddColumn(ColumnDefinition(col_names[i], col_types[i]));
+#endif
                 // Firebird NOT NULL → DuckDB NotNullConstraint, so
                 // information_schema.columns.is_nullable reports 'NO' for
                 // the real NOT NULL columns. LogicalIndex is the column's
@@ -422,8 +467,17 @@ private:
             auto uk_it = unique_keys.find(table_name);
             if (uk_it != unique_keys.end()) {
                 for (auto &key : uk_it->second) {
+#ifdef FIREBIRD_DUCKDB_V2
+                    // v2.0: UniqueConstraint takes Identifier column names.
+                    vector<Identifier> key_cols;
+                    key_cols.reserve(key.columns.size());
+                    for (auto &c : key.columns) key_cols.emplace_back(c);
+                    info.constraints.push_back(
+                        make_uniq<UniqueConstraint>(std::move(key_cols), key.is_primary));
+#else
                     info.constraints.push_back(
                         make_uniq<UniqueConstraint>(key.columns, key.is_primary));
+#endif
                 }
             }
             // Attach FOREIGN KEY constraints. DuckDB accepts
@@ -436,10 +490,22 @@ private:
                 for (auto &fk : fk_it->second) {
                     ForeignKeyInfo fk_info;
                     fk_info.type   = ForeignKeyType::FK_TYPE_FOREIGN_KEY_TABLE;
+#ifdef FIREBIRD_DUCKDB_V2
+                    fk_info.schema = Identifier(FIREBIRD_MAIN_SCHEMA);  // v2.0: Identifier
+                    fk_info.table  = Identifier(fk.pk_table);           // v2.0: Identifier
+                    // v2.0: ForeignKeyConstraint takes Identifier column names.
+                    vector<Identifier> fk_pk_cols;
+                    vector<Identifier> fk_fk_cols;
+                    for (auto &c : fk.pk_columns) fk_pk_cols.emplace_back(c);
+                    for (auto &c : fk.fk_columns) fk_fk_cols.emplace_back(c);
+                    info.constraints.push_back(make_uniq<ForeignKeyConstraint>(
+                        std::move(fk_pk_cols), std::move(fk_fk_cols), std::move(fk_info)));
+#else
                     fk_info.schema = FIREBIRD_MAIN_SCHEMA;
                     fk_info.table  = fk.pk_table;
                     info.constraints.push_back(make_uniq<ForeignKeyConstraint>(
                         fk.pk_columns, fk.fk_columns, std::move(fk_info)));
+#endif
                 }
             }
             // Build PrimaryKeyDescriptor from already-loaded constraint map +
@@ -639,7 +705,15 @@ public:
         // would require RDB$OWNER_NAME segmentation, which the legacy
         // OLTP catalogs we target don't actually populate meaningfully.
         CreateSchemaInfo info;
+#ifdef FIREBIRD_DUCKDB_V2
+        // v2.0: CreateSchemaInfo carries the schema in its QualifiedName
+        // path ([catalog, schema, <empty name>]), not a `schema` field.
+        info.SetQualifiedName(QualifiedName(this->GetName(),
+                                            Identifier(FIREBIRD_MAIN_SCHEMA),
+                                            Identifier()));
+#else
         info.schema = FIREBIRD_MAIN_SCHEMA;
+#endif
         info.on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
         main_schema_ = make_uniq<FirebirdSchemaEntry>(*this, info, conn_info_,
                                                       pool_, none_encoding_,
@@ -826,18 +900,32 @@ static FirebirdConnectionInfo BuildConnectionInfo(const std::string &path,
 // ClientContext. Missing or NULL -> use the supplied default. This
 // keeps the StorageExtension safe to load even if a future host
 // loader skipped the AddExtensionOption registrations.
+// (v2.0: TryGetCurrentSetting keys are Identifier; the lookup returns a
+// SettingLookupResult convertible to bool.)
+#ifdef FIREBIRD_DUCKDB_V2
+static int64_t ReadPoolInt64Setting(ClientContext &ctx,
+                                     const Identifier &key,
+                                     int64_t default_value) {
+#else
 static int64_t ReadPoolInt64Setting(ClientContext &ctx,
                                      const std::string &key,
                                      int64_t default_value) {
+#endif
     Value v;
     if (!ctx.TryGetCurrentSetting(key, v)) return default_value;
     if (v.IsNull()) return default_value;
     return v.GetValue<int64_t>();
 }
 
+#ifdef FIREBIRD_DUCKDB_V2
+static bool ReadPoolBoolSetting(ClientContext &ctx,
+                                 const Identifier &key,
+                                 bool default_value) {
+#else
 static bool ReadPoolBoolSetting(ClientContext &ctx,
                                  const std::string &key,
                                  bool default_value) {
+#endif
     Value v;
     if (!ctx.TryGetCurrentSetting(key, v)) return default_value;
     if (v.IsNull()) return default_value;
@@ -902,7 +990,12 @@ FirebirdAttach(optional_ptr<StorageExtensionInfo> /*info*/,
 FirebirdMetadataLease AcquireFirebirdCatalogLease(ClientContext &context,
                                                    const string &catalog_name) {
     ValidateFirebirdAttachAlias(context, catalog_name);
+#ifdef FIREBIRD_DUCKDB_V2
+    // v2.0: GetCatalogEntry keys by Identifier.
+    auto catalog_ptr = Catalog::GetCatalogEntry(context, Identifier(catalog_name));
+#else
     auto catalog_ptr = Catalog::GetCatalogEntry(context, catalog_name);
+#endif
     // ValidateFirebirdAttachAlias already confirmed catalog_ptr != null
     // and GetCatalogType() == "firebird"; the Cast is safe.
     auto &fb_catalog = catalog_ptr->Cast<FirebirdCatalog>();
@@ -948,7 +1041,12 @@ struct FirebirdPoolStatsRow {
 FirebirdPoolStatsRow ReadFirebirdPoolStats(ClientContext &context,
                                            const string &catalog_name) {
     ValidateFirebirdAttachAlias(context, catalog_name);
+#ifdef FIREBIRD_DUCKDB_V2
+    // v2.0: GetCatalogEntry keys by Identifier.
+    auto catalog_ptr = Catalog::GetCatalogEntry(context, Identifier(catalog_name));
+#else
     auto catalog_ptr = Catalog::GetCatalogEntry(context, catalog_name);
+#endif
     // Validated above: non-null and GetCatalogType() == "firebird".
     auto &fb_catalog = catalog_ptr->Cast<FirebirdCatalog>();
     auto &pool = *fb_catalog.pool_;
@@ -983,7 +1081,11 @@ struct PoolStatsGlobalState : public GlobalTableFunctionState {
 unique_ptr<FunctionData> PoolStatsBind(ClientContext &context,
                                        TableFunctionBindInput &input,
                                        vector<LogicalType> &return_types,
+#ifdef FIREBIRD_DUCKDB_V2
+                                       vector<Identifier> &names) {  // v2.0: Identifier names
+#else
                                        vector<string> &names) {
+#endif
     if (input.inputs.empty() || input.inputs[0].IsNull()) {
         throw BinderException(
             "firebird_pool_stats(catalog_name VARCHAR): catalog_name is "
@@ -1060,7 +1162,12 @@ void PoolStatsFunction(ClientContext &context, TableFunctionInput &input,
 
 TableFunction GetFirebirdPoolStatsFunction() {
     TableFunction fn("firebird_pool_stats",
+#ifdef FIREBIRD_DUCKDB_V2
+                     FunctionSignature()
+                         .AddPositionalOnly("catalog_name", LogicalType::VARCHAR),
+#else
                      {LogicalType::VARCHAR},
+#endif
                      PoolStatsFunction,
                      PoolStatsBind,
                      PoolStatsInitGlobal);
