@@ -378,7 +378,8 @@ LastQueryBind(ClientContext &, TableFunctionBindInput &,
 static unique_ptr<GlobalTableFunctionState>
 LastQueryInitGlobal(ClientContext &context, TableFunctionInitInput &) {
     auto g = make_uniq<LastQueryGlobalState>();
-    g->snapshot = GetObservabilityState(context)->GetLastQuery();
+    auto st = GetObservabilityState(context);
+    g->snapshot = st->GetLastQuery();
     return std::move(g);
 }
 
