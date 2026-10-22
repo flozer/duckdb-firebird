@@ -1604,18 +1604,6 @@ static bool FirebirdScanSupportsPushdownType(const FunctionData &bind_data,
     if (col_idx >= bind.column_descs.size()) return true;
     const auto &desc = bind.column_descs[col_idx];
     if (bind.none_encoding == NoneEncoding::STRICT) return true;
-    // G2 (v1.2.0): with none_pushdown=true the user opted into =/IN
-    // pushdown over NONE CHAR/VARCHAR (the builder re-encodes literals
-    // behind a charset introducer). Advertising the column as pushable
-    // lets the planner hand those filters to the scan on every DuckDB
-    // version; without it, v2.0's planner lifts text filters above the
-    // scan silently — results stay correct, but residual visibility and
-    // the firebird_unpushed_mode guard lose sight of them.
-    const bool none_text_opt_in =
-        bind.none_pushdown &&
-        (bind.none_encoding == NoneEncoding::WIN1252 ||
-         bind.none_encoding == NoneEncoding::ISO_8859_1);
-    if (none_text_opt_in) return true;
     if (desc.character_set_id != 0) return true;
     const bool is_text_or_text_blob =
         desc.sqltype == SQL_TEXT || desc.sqltype == SQL_VARYING ||
