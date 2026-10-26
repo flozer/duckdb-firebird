@@ -53,9 +53,9 @@ pacote DuckDB v2.0 falha o workflow, sem `continue-on-error`.
 
 Use o pacote construido para sua linha de DuckDB:
 
-- `duckdb-firebird-v1.3.1-linux-x64.tar.gz` e
-  `duckdb-firebird-v1.3.1-windows-x64.zip`: DuckDB v1.5.6+.
-- `duckdb-firebird-v1.3.1-linux-x64-duckdb2.tar.gz` e
-  `duckdb-firebird-v1.3.1-windows-x64-duckdb2.zip`: DuckDB v2.0+.
+- `duckdb-firebird-1.3.1-linux-x64.tar.gz` e
+  `duckdb-firebird-1.3.1-windows-x64.zip`: DuckDB v1.5.6+.
+- `duckdb-firebird-1.3.1-linux-x64-duckdb2.tar.gz` e
+  `duckdb-firebird-1.3.1-windows-x64-duckdb2.zip`: DuckDB v2.0+.
 
 O catalogo community permanece independente desta release do repositorio.

@@ -51,9 +51,9 @@ v2.0 package fails the workflow instead of being ignored with
 
 Use the package built for your DuckDB line:
 
-- `duckdb-firebird-v1.3.1-linux-x64.tar.gz` and
-  `duckdb-firebird-v1.3.1-windows-x64.zip`: DuckDB v1.5.6+.
-- `duckdb-firebird-v1.3.1-linux-x64-duckdb2.tar.gz` and
-  `duckdb-firebird-v1.3.1-windows-x64-duckdb2.zip`: DuckDB v2.0+.
+- `duckdb-firebird-1.3.1-linux-x64.tar.gz` and
+  `duckdb-firebird-1.3.1-windows-x64.zip`: DuckDB v1.5.6+.
+- `duckdb-firebird-1.3.1-linux-x64-duckdb2.tar.gz` and
+  `duckdb-firebird-1.3.1-windows-x64-duckdb2.zip`: DuckDB v2.0+.
 
 The community catalog remains independent of this repository release.
