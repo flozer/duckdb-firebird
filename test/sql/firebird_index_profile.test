@@ -87,7 +87,7 @@ SELECT COUNT(*) FROM t_idx_emp WHERE index_name IS NOT NULL AND selectivity IS N
 query I
 SELECT COUNT(*) FROM t_idx_emp
  WHERE index_name IS NOT NULL
-   AND list_contains(list_transform(alerts, a -> a.code), 'missing_statistics');
+   AND list_contains(list_transform(alerts, lambda a: a.code), 'missing_statistics');
 ----
 0
 
@@ -113,7 +113,7 @@ FROM t_idx_none;
 true
 
 query T
-SELECT list_contains(list_transform(alerts, a -> a.code), 'no_indexes_on_table')
+SELECT list_contains(list_transform(alerts, lambda a: a.code), 'no_indexes_on_table')
 FROM t_idx_none;
 ----
 true
@@ -151,7 +151,7 @@ SELECT COUNT(*) FROM t_idx_inactive;
 2
 
 query TT
-SELECT is_active, list_contains(list_transform(alerts, a -> a.code), 'index_inactive')
+SELECT is_active, list_contains(list_transform(alerts, lambda a: a.code), 'index_inactive')
 FROM t_idx_inactive WHERE index_name = 'IDX_TIDX_INACTIVE_QTY';
 ----
 false	true

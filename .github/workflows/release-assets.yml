@@ -193,14 +193,12 @@ jobs:
 
   # DuckDB v2.0 asset legs (v1.3.0+). The same dual-path source builds
   # against the v2.0 C++ API; extension-ci-tools must be on its
-  # v2.0-cyanoptera branch for the make-based build. continue-on-error:
-  # the v2.0 CI path is on its first ride — a failure must not block the
-  # v1.5.6 release assets.
+  # v2.0-cyanoptera branch for the make-based build. Since v1.3.1 all four
+  # asset legs are required: a failed DuckDB v2 build blocks the release.
   linux-x64-duckdb2:
     name: linux-x64 release asset (DuckDB v2.0)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-    continue-on-error: true
 
     steps:
       - name: Checkout
@@ -265,7 +263,6 @@ jobs:
     name: windows-x64 release asset (DuckDB v2.0)
     runs-on: windows-2022
     timeout-minutes: 120
-    continue-on-error: true
 
     steps:
       - name: Checkout

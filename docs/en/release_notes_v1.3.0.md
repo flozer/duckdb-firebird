@@ -36,7 +36,7 @@ selected automatically from the DuckDB build's major version.
   v2.0. The complex-filter hook handles `=`/`IN` transcode on both API
   generations without it.
 
-## Known behavioral deltas on DuckDB v2.0 (results always correct)
+## Behavioral deltas at the v1.3.0 release (resolved in v1.3.1)
 
 - **Residual visibility for text filters on NONE columns**: v2.0's
   planner lifts non-pushed text filters above the scan without offering
@@ -49,6 +49,22 @@ selected automatically from the DuckDB build's major version.
   harness**: reads empty on v2.0's harness context handling (records
   normally via the CLI/embedded — verified). Product behavior per
   session is unchanged.
+
+## Post-release compatibility follow-up (resolved in v1.3.1)
+
+Release v1.3.1 closes the test deltas above:
+
+- DuckDB v2.0 normalizes `NOT IN` as `OPERATOR_NOT` around `COMPARE_IN`;
+  the scanner now recognizes that shape. Remote `NOT IN` pushdown,
+  NONE-column residual telemetry, and `firebird_unpushed_mode` guards all
+  pass again.
+- The telemetry failure attributed to harness context handling did not
+  reproduce after correcting the remaining lambda syntax. Telemetry
+  between statements passes without a product-state change.
+- Windows/Firebird 5.0.3 validation is now identical on both lines:
+  **26/26 test files and 1,082 assertions** on DuckDB v1.5.6 and v2.0.0.
+
+These changes are not part of the published v1.3.0 tag or its binaries.
 
 ## Release assets
 

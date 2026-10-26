@@ -38,7 +38,7 @@ major do build de DuckDB.
   v2.0. O hook de filtros complexos faz a transcodificacao de `=`/`IN`
   nas duas geracoes de API sem ele.
 
-## Deltas comportamentais conhecidos no DuckDB v2.0 (resultados sempre corretos)
+## Deltas comportamentais na release v1.3.0 (resolvidos na v1.3.1)
 
 - **Visibilidade de residual para filtros de texto em colunas NONE**: o
   planner do v2.0 ergue filtros de texto nao-empurrados acima do scan sem
@@ -52,6 +52,22 @@ major do build de DuckDB.
   le vazio no tratamento de contexto do harness do v2.0 (grava
   normalmente via CLI/embedded — verificado). O comportamento do produto
   por sessao nao mudou.
+
+## Follow-up de compatibilidade pos-release (resolvido na v1.3.1)
+
+A release v1.3.1 fecha os deltas de teste acima:
+
+- O DuckDB v2.0 normaliza `NOT IN` como `OPERATOR_NOT` envolvendo
+  `COMPARE_IN`; o scanner agora reconhece essa forma. Pushdown remoto de
+  `NOT IN`, telemetria residual em colunas NONE e guards do
+  `firebird_unpushed_mode` voltam a passar.
+- A falha de telemetria atribuida ao contexto do harness nao se reproduziu
+  depois da correcao da sintaxe lambda restante. Telemetria entre
+  statements passa sem mudanca no estado do produto.
+- A validacao Windows/Firebird 5.0.3 agora e identica nas duas linhas:
+  **26/26 arquivos de teste e 1.082 assercoes** no DuckDB v1.5.6 e v2.0.0.
+
+Essas mudancas nao fazem parte da tag v1.3.0 publicada nem de seus binarios.
 
 ## Assets de release
 

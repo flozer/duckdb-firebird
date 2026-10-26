@@ -338,7 +338,7 @@ true
 query I
 SELECT COUNT(*) FROM (
   SELECT UNNEST(warnings) AS w,
-         UNNEST(list_transform(alerts, a -> a.message)) AS m
+         UNNEST(list_transform(alerts, lambda a: a.message)) AS m
   FROM firebird_profile_table('fb.main.V_ACTIVE_EMP')
 ) t
 WHERE w IS DISTINCT FROM m;

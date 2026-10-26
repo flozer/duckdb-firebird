@@ -1634,32 +1634,42 @@ static bool ExprValueBindable(const LogicalType &t) {
     }
 }
 
-// Detects `col NOT IN (lit, lit, ...)`. DuckDB emits this as a
-// BoundOperatorExpression with type COMPARE_NOT_IN; children[0] is the
-// column, children[1..] are the constants. We require every constant
-// to be bindable so the predicate ships through the input XSQLDA path
-// (strings always parametrise, mixed-type lists end up residual).
+// Detects `col NOT IN (lit, lit, ...)`. DuckDB v1.5 emits COMPARE_NOT_IN;
+// v2.0 normalizes it to OPERATOR_NOT around COMPARE_IN. children[0] is the
+// column, children[1..] are the constants. We require every constant to be
+// bindable so the predicate ships through the input XSQLDA path (strings
+// always parametrise, mixed-type lists end up residual).
 static bool TryExtractNotIn(Expression &expr,
                              idx_t &out_col,
                              duckdb::vector<Value> &out_values) {
     if (expr.GetExpressionClass() != ExpressionClass::BOUND_OPERATOR) return false;
-    auto &op = expr.Cast<BoundOperatorExpression>();
-    if (op.GetExpressionType() != ExpressionType::COMPARE_NOT_IN) return false;
 #ifdef FIREBIRD_DUCKDB_V2
-    if (op.GetChildren().size() < 2) return false;
-    if (op.GetChildren()[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) return false;
+    auto *op = &expr.Cast<BoundOperatorExpression>();
+    if (op->GetExpressionType() == ExpressionType::OPERATOR_NOT) {
+        if (op->GetChildren().size() != 1) return false;
+        auto &inner = *op->GetChildren()[0];
+        if (inner.GetExpressionClass() != ExpressionClass::BOUND_OPERATOR) return false;
+        op = &inner.Cast<BoundOperatorExpression>();
+        if (op->GetExpressionType() != ExpressionType::COMPARE_IN) return false;
+    } else if (op->GetExpressionType() != ExpressionType::COMPARE_NOT_IN) {
+        return false;
+    }
+    if (op->GetChildren().size() < 2) return false;
+    if (op->GetChildren()[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) return false;
 
     out_values.clear();
-    for (size_t i = 1; i < op.GetChildren().size(); ++i) {
-        auto &child = *op.GetChildren()[i];
+    for (size_t i = 1; i < op->GetChildren().size(); ++i) {
+        auto &child = *op->GetChildren()[i];
         if (child.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) return false;
         const auto &v = child.Cast<BoundConstantExpression>().GetValue();
         if (v.IsNull()) return false;                          // NULL in IN-list is squirrelly
         if (!ExprValueBindable(v.type())) return false;
         out_values.push_back(v);
     }
-    out_col = op.GetChildren()[0]->Cast<BoundColumnRefExpression>().Binding().column_index;
+    out_col = op->GetChildren()[0]->Cast<BoundColumnRefExpression>().Binding().column_index;
 #else
+    auto &op = expr.Cast<BoundOperatorExpression>();
+    if (op.GetExpressionType() != ExpressionType::COMPARE_NOT_IN) return false;
     if (op.children.size() < 2) return false;
     if (op.children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) return false;
 
