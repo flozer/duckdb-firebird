@@ -312,7 +312,7 @@ SELECT COUNT(*) FROM firebird_query_log();
 
 query T
 SELECT array_to_string(list_transform(
-         (SELECT list(binds[1]) FROM firebird_query_log()), b -> b), ',');
+         (SELECT list(binds[1]) FROM firebird_query_log()), lambda b: b), ',');
 ----
 5,4,3
 

@@ -7,7 +7,7 @@
 # copies fbclient.dll next to the test/duckdb binaries, and runs the
 # firebird_*.test SQL suite.
 #
-# - Does NOT change the committed submodule pin (restored to v1.5.3 at the end).
+# - Does NOT change the committed submodule pin (restored at the end).
 # - Each version builds into build/matrix/<tag> (isolated build tree).
 # - Never touches tags/releases/publication/community. Local only.
 #
@@ -17,11 +17,11 @@
 # dependent tests are reported ENV-MISSING (not a compatibility failure).
 #
 # Usage:  pwsh -File scripts/build_matrix.ps1
-#         pwsh -c "& ./scripts/build_matrix.ps1 -Tags v1.5.3,v1.5.4"
+#         pwsh -c "& ./scripts/build_matrix.ps1 -Tags v1.5.6,v2.0.0"
 #         (use -c "& ..." for a custom -Tags list; `-File -Tags a,b` passes one
 #          string, not an array.)
 #
-# Exit code: non-zero if the baseline v1.5.3 fails to build.
+# Exit code: non-zero if the baseline fails to build or any leg fails tests.
 
 param([string[]]$Tags = @('v1.5.6', 'v2.0.0'))
 
@@ -130,41 +130,12 @@ function Invoke-Tests([string]$buildDir, [string]$tag) {
         }
     } finally { Pop-Location }
 
-    # DuckDB v2.0: failures confined to the documented visibility deltas
-    # are counted separately, not as functional failures.
-    $isV2 = $tag -match '^v2\.'
-    $deltas = @(); $realFail = @()
-    foreach ($f in $failed) {
-        if ($isV2 -and ($knownV2Deltas -contains $f)) { $deltas += $f } else { $realFail += $f }
-    }
-    $fail = $realFail.Count
-    $failed = $realFail
-
     $status = if ($fail -gt 0) { 'TESTS-FAIL' }
               elseif ($pass -eq 0) { 'ENV-MISSING' }
-              elseif ($deltas.Count -gt 0) { "PASS ($($deltas.Count) known v2.0 deltas)" }
               elseif ($envmiss -gt 0) { 'PASS (partial)' }
               else { 'PASS' }
-    return @{ status = $status; pass = $pass; fail = $fail; envmiss = $envmiss; assertions = $asserts; deltas = ($deltas -join ','); failed = ($failed -join ',') }
+    return @{ status = $status; pass = $pass; fail = $fail; envmiss = $envmiss; assertions = $asserts; failed = ($failed -join ',') }
 }
-
-# Known DuckDB v2.0 behavioral deltas (documented in ROADMAP.md, section
-# "DuckDB v2.0 — validação de compatibilidade"): the v2.0 planner lifts
-# CHARACTER SET NONE text filters client-side without offering them to
-# pushdown_complex_filter (results stay CORRECT — verified by the count
-# identity assertions inside these files), so v1.5-era residual/telemetry
-# visibility assertions cannot pass on v2.0 legs. These files are counted
-# as KNOWN-DELTA on v2.0 tags, not failures.
-$knownV2Deltas = @(
-    'firebird_unpushed_mode.test',
-    'firebird_none_charset.test',
-    'firebird_none_pushdown.test',
-    'firebird_decfloat.test',
-    'firebird_explain_pushdown.test',
-    'firebird_observability.test',
-    'firebird_profile_table.test',
-    'firebird_index_profile.test'
-)
 
 $results = @()
 foreach ($tag in $Tags) {
@@ -204,17 +175,18 @@ foreach ($tag in $Tags) {
 
 # Restore the committed pin so the worktree is clean.
 git -C "$root/duckdb" checkout -q $pin 2>&1 | Out-Null
-Write-Host "submodule duckdb restored to $pin (v1.5.3)"
+Write-Host "submodule duckdb restored to $pin"
 
 Write-Host ""
 Write-Host "===== DuckDB build matrix (Firebird) ====="
 $results | Format-Table -AutoSize
 
 $base = $results | Where-Object { $_.Version -eq $baseline }
-if ($base -and $base.Build -eq 'ok') {
-    Write-Host "baseline ${baseline}: builds OK"
+$failedLegs = $results | Where-Object { $_.Status -match 'FAIL' }
+if ($base -and $base.Build -eq 'ok' -and -not $failedLegs) {
+    Write-Host "baseline ${baseline}: builds OK; all test legs passed"
     exit 0
 } else {
-    Write-Host "baseline ${baseline}: NOT building — failing the matrix"
+    Write-Host "matrix failed: baseline build or one/more test legs not green"
     exit 1
 }
