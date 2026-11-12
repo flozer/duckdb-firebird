@@ -4,6 +4,12 @@ name: Build + Test Linux x64
 # test suite: every push to a development branch runs the SQL tests in
 # test/sql/firebird_scan.test against an actual EMPLOYEE database, so
 # regressions in type mapping, pushdown, or BLOB handling fail fast.
+#
+# Runs the matrix against BOTH shipped DuckDB lines (v1.5.6 and v2.0.0),
+# so the FIREBIRD_DUCKDB_V2 dual path is compiled and tested on every PR,
+# not only at release. The v2.0 leg pins extension-ci-tools to its v2.0
+# branch and lets the make path auto-detect the gate from DUCKDB_VERSION
+# (same recipe as release-assets.yml). Docs-only changes skip the build.
 
 on:
   push:
@@ -11,20 +17,31 @@ on:
       - "claude/duckdb-firebird-plugin-*"
       - "dev/*"
       - main
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+      - ".github/badges/**"
   pull_request:
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+      - ".github/badges/**"
   workflow_dispatch:
 
 permissions:
   contents: read
 
-env:
-  DUCKDB_VERSION: v1.5.3
-
 jobs:
   build-test:
-    name: linux-x64
+    name: linux-x64 (DuckDB ${{ matrix.duckdb }})
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        duckdb: ["v1.5.6", "v2.0.0"]
+    env:
+      DUCKDB_VERSION: ${{ matrix.duckdb }}
 
     steps:
       - name: Checkout
@@ -88,6 +105,12 @@ jobs:
           echo "ISC_USER=$ISC_USER"                    >> $GITHUB_ENV
           echo "ISC_PASSWORD=$ISC_PASSWORD"            >> $GITHUB_ENV
 
+      - name: Pin extension-ci-tools to the v2.0 branch
+        if: matrix.duckdb == 'v2.0.0'
+        run: |
+          git -C extension-ci-tools fetch origin v2.0-cyanoptera
+          git -C extension-ci-tools checkout FETCH_HEAD
+
       - name: Pin DuckDB version
         run: |
           DUCKDB_GIT_VERSION=${DUCKDB_VERSION} make set_duckdb_version
@@ -120,7 +143,7 @@ jobs:
       - name: Upload extension artifact (linux_amd64)
         uses: actions/upload-artifact@v7
         with:
-          name: firebird.duckdb_extension-linux-x64
+          name: firebird.duckdb_extension-linux-x64-${{ matrix.duckdb }}
           path: build/release/extension/firebird/firebird.duckdb_extension
           retention-days: 30
           if-no-files-found: error

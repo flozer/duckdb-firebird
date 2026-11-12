@@ -18,14 +18,22 @@ name: Build + Test Linux x64 (FB 3/4/5 matrix)
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+      - ".github/badges/**"
   pull_request:
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+      - ".github/badges/**"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
-  DUCKDB_VERSION: v1.5.3
+  DUCKDB_VERSION: v1.5.6
 
 jobs:
   build-test:
