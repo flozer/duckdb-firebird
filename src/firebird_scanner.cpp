@@ -765,9 +765,22 @@ static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
             int64_t part_hi = (i == n - 1)
                 ? hi
                 : lo + static_cast<int64_t>(width * (i + 1)) - 1;
+            // The outer partitions are open-ended: the first has no lower
+            // bound, the last no upper bound. lo/hi are a MIN/MAX probe
+            // taken before the scan (and cached for the life of an ATTACH),
+            // so rows committed since then may lie outside [lo, hi]; with
+            // closed outer ranges they belonged to no partition and were
+            // silently skipped (#93). Stale bounds now only affect balance.
             PartitionSpec spec;
-            spec.where_clause = pk + " >= " + std::to_string(part_lo) +
-                                " AND " + pk + " <= " + std::to_string(part_hi);
+            if (i > 0) {
+                spec.where_clause = pk + " >= " + std::to_string(part_lo);
+            }
+            if (i < n - 1) {
+                if (!spec.where_clause.empty()) {
+                    spec.where_clause += " AND ";
+                }
+                spec.where_clause += pk + " <= " + std::to_string(part_hi);
+            }
             gstate->partitions.push_back(std::move(spec));
         }
         gstate->max_threads = n;

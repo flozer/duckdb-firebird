@@ -93,7 +93,11 @@ Parametros nomeados:
 - `charset`: charset enviado ao `libfbclient`; padrao recomendado `UTF8`.
 - `role`: role Firebird.
 - `dialect`: dialect Firebird.
-- `partitions`: paralelismo por faixa de PK. `0` = auto, `1` = serial.
+- `partitions`: paralelismo por faixa de PK. `0` = auto, `1` = serial. As
+  faixas vem de um probe `MIN/MAX` da PK; a primeira particao nao tem limite
+  inferior e a ultima nao tem limite superior, entao linhas fora da faixa
+  sondada (commitadas depois do probe, ou depois que um `ATTACH` guardou a
+  faixa em cache) continuam sendo lidas.
 - `row_limit`: limita linhas usando `ROWS` no Firebird.
 - `row_offset`: offset global; exige `row_limit`.
 - `none_encoding`: estrategia para colunas `CHARACTER SET NONE`.
