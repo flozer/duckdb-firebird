@@ -21,7 +21,24 @@ namespace duckdb {
 #ifdef _WIN32
 using LibHandle = HMODULE;
 static LibHandle PlatformOpen(const char *name) {
-    return LoadLibraryA(name);
+    const std::string s(name);
+    if (s.find_first_of("\\/") == std::string::npos) {
+        // Bare name (fbclient.dll): the standard DLL search order.
+        return LoadLibraryA(name);
+    }
+    // A path (DUCKDB_FIREBIRD_CLIENT_LIBRARY): resolve dependencies from
+    // the DLL's own folder first, like a Firebird install or kit lays them
+    // out (Firebird 3 ships msvcr100.dll, zlib1.dll and ICU next to
+    // fbclient.dll). Plain LoadLibraryA searches the application's folder
+    // instead, so loading such a fbclient.dll by path failed with "The
+    // specified module could not be found" unless its folder was also on
+    // PATH. LOAD_WITH_ALTERED_SEARCH_PATH needs an absolute path.
+    char full[MAX_PATH] = {};
+    DWORD n = GetFullPathNameA(name, MAX_PATH, full, nullptr);
+    if (n == 0 || n >= MAX_PATH) {
+        return LoadLibraryA(name);
+    }
+    return LoadLibraryExA(full, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 }
 static void *PlatformSym(LibHandle handle, const char *sym) {
     return reinterpret_cast<void *>(GetProcAddress(handle, sym));

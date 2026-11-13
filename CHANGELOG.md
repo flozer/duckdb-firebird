@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Windows: loading the client library from a path
+  (`DUCKDB_FIREBIRD_CLIENT_LIBRARY`) now resolves its dependent DLLs from
+  the library's own folder first (`LOAD_WITH_ALTERED_SEARCH_PATH`). A
+  Firebird 3 `fbclient.dll` (which ships `msvcr100.dll`, `zlib1.dll` and
+  ICU next to it) failed with "The specified module could not be found"
+  unless its folder was also on `PATH`.
+
 ## [v1.3.1] - 2026-10-26
 
 Patch release completing DuckDB v2.0 compatibility. No SQL functions,
