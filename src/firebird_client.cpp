@@ -25,6 +25,7 @@
 #define isc_detach_database          (::duckdb::fbapi().isc_detach_database)
 #define isc_start_transaction        (::duckdb::fbapi().isc_start_transaction)
 #define isc_rollback_transaction     (::duckdb::fbapi().isc_rollback_transaction)
+#define isc_transaction_info         (::duckdb::fbapi().isc_transaction_info)
 #define isc_dsql_allocate_statement  (::duckdb::fbapi().isc_dsql_allocate_statement)
 #define isc_dsql_prepare             (::duckdb::fbapi().isc_dsql_prepare)
 #define isc_dsql_describe            (::duckdb::fbapi().isc_dsql_describe)
@@ -497,6 +498,101 @@ void FirebirdConnection::StartReadOnlyTransaction() {
     ISC_STATUS status[20] = {};
     isc_start_transaction(status, &tr_, 1, &db_, sizeof(tpb), const_cast<unsigned char *>(tpb));
     Check(status, "isc_start_transaction");
+}
+
+// Firebird 4+ TPB / transaction-info items. The vendored headers define
+// them, but FB_SDK_ROOT may point at an older (Firebird 3) SDK that does
+// not. The values are part of the public API (consts_pub.h / inf_pub.h)
+// and never change; a Firebird 3 server rejects them at run time, which
+// is the fallback signal.
+#ifndef isc_tpb_at_snapshot_number
+#define isc_tpb_at_snapshot_number 23
+#endif
+#ifndef fb_info_tra_snapshot_number
+#define fb_info_tra_snapshot_number 12
+#endif
+
+static bool StatusIsError(const ISC_STATUS *status) {
+    return status[0] == 1 && status[1] != 0;
+}
+
+bool FirebirdConnection::TryStartSnapshotTransaction(int64_t at_snapshot_number) {
+    std::vector<char> tpb = {
+        isc_tpb_version3,
+        isc_tpb_read,
+        isc_tpb_concurrency,
+        isc_tpb_nowait,
+    };
+    if (at_snapshot_number > 0) {
+        // Length-prefixed little-endian integer, as for every numeric
+        // TPB item.
+        tpb.push_back(static_cast<char>(isc_tpb_at_snapshot_number));
+        tpb.push_back(8);
+        const uint64_t n = static_cast<uint64_t>(at_snapshot_number);
+        for (int shift = 0; shift < 64; shift += 8) {
+            tpb.push_back(static_cast<char>((n >> shift) & 0xFF));
+        }
+    }
+
+    ISC_STATUS status[20] = {};
+    if (tr_) {
+        isc_rollback_transaction(status, &tr_);
+        if (StatusIsError(status)) {
+            return false;  // still on the old transaction; nothing changed
+        }
+    }
+    in_snapshot_ = false;
+    isc_start_transaction(status, &tr_, 1, &db_,
+                          static_cast<unsigned short>(tpb.size()), tpb.data());
+    if (StatusIsError(status)) {
+        tr_ = 0;
+        StartReadOnlyTransaction();
+        return false;
+    }
+    in_snapshot_ = true;
+    return true;
+}
+
+int64_t FirebirdConnection::SnapshotNumber() {
+    if (!tr_) {
+        return 0;
+    }
+    char items[] = {static_cast<char>(fb_info_tra_snapshot_number), isc_info_end};
+    char buf[32] = {};
+    ISC_STATUS status[20] = {};
+    isc_transaction_info(status, &tr_, static_cast<short>(sizeof(items)), items,
+                         static_cast<short>(sizeof(buf)), buf);
+    if (StatusIsError(status)) {
+        return 0;
+    }
+    // Reply: item byte, 2-byte little-endian length, little-endian value.
+    // A server that doesn't know the item answers isc_info_error instead.
+    if (static_cast<unsigned char>(buf[0]) != fb_info_tra_snapshot_number) {
+        return 0;
+    }
+    const unsigned len = static_cast<unsigned char>(buf[1]) |
+                         (static_cast<unsigned>(static_cast<unsigned char>(buf[2])) << 8);
+    if (len == 0 || len > 8) {
+        return 0;
+    }
+    uint64_t value = 0;
+    for (unsigned i = 0; i < len; ++i) {
+        value |= static_cast<uint64_t>(static_cast<unsigned char>(buf[3 + i])) << (8 * i);
+    }
+    return static_cast<int64_t>(value);
+}
+
+void FirebirdConnection::RestoreDefaultTransaction() {
+    if (!in_snapshot_) {
+        return;
+    }
+    ISC_STATUS status[20] = {};
+    if (tr_) {
+        isc_rollback_transaction(status, &tr_);
+        Check(status, "isc_rollback_transaction");
+    }
+    in_snapshot_ = false;
+    StartReadOnlyTransaction();
 }
 
 std::unique_ptr<FirebirdStatement> FirebirdConnection::OpenCursor(const std::string &sql) {

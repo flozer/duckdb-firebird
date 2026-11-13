@@ -40,6 +40,14 @@ struct FirebirdQueryTelemetry {
     bool connection_reused = false;
     bool parallel_scan = false;
     int32_t partitions = 1;
+    // How the partitions of this scan relate transactionally:
+    //   "serial"      - one partition, one transaction (nothing to share);
+    //   "shared"      - every partition read one Firebird snapshot
+    //                   (isc_tpb_at_snapshot_number, Firebird 4+);
+    //   "independent" - each partition used its own read-committed
+    //                   transaction (Firebird 3, or the shared snapshot
+    //                   could not be established).
+    std::string snapshot_mode = "serial";
     // Pushdown explainability (Phase 4 #3). limit_pushed / offset_pushed
     // mirror the ROWS clause actually emitted to Firebird; invalid
     // (optional_idx default) means no paging was pushed and the column

@@ -6,7 +6,7 @@ values, pushdown metadata, and per-scan metrics. All state is scoped
 to the current DuckDB `ClientContext` — one session never reads
 another session's queries.
 
-Both functions share the same 19-column schema. The difference is the
+Both functions share the same 20-column schema. The difference is the
 window: `firebird_last_query()` returns at most one row (the most
 recent attempt on this connection); `firebird_query_log()` returns a
 ring buffer, opt-in via setting.
@@ -54,12 +54,24 @@ connection.
 | `offset_pushed` | BIGINT | The `ROWS m TO n` offset actually pushed (`row_offset`), or `NULL` when none. |
 | `not_pushed_reasons` | VARCHAR[] | One coarse reason per `residual_filters` entry, same order/length. One of `NONE_CHARSET`, `UNSUPPORTED_OP`, `ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING`. |
 | `bytes_read_estimate` | BIGINT | **ESTIMATE** (G5) of Firebird payload bytes pulled by this query: `rows_read × XSQLDA row width + BLOB segment bytes read`. Definition and exclusions below. |
+| `snapshot_mode` | VARCHAR | How the scan's partitions relate transactionally: `serial` (one partition), `shared` (all partitions read one Firebird snapshot; Firebird 4+), `independent` (each partition used its own read-committed transaction: Firebird 3, or the shared snapshot could not be established). See below. |
 
 `limit_pushed` / `offset_pushed` / `not_pushed_reasons` are the Phase 4 #3
 pushdown-explainability columns. They make it explicit what paging reached
 Firebird and why a filter stayed local, without adding a new function.
-`bytes_read_estimate` (G5) is the additive tail column — the schema is now
-19 columns, shared by `firebird_last_query()` and `firebird_query_log()`.
+`bytes_read_estimate` (G5) and `snapshot_mode` are additive tail columns —
+the schema is now 20 columns, shared by `firebird_last_query()` and
+`firebird_query_log()`.
+
+`snapshot_mode` tells whether the partitions of a parallel scan saw one
+consistent state of the table:
+
+```sql
+SELECT COUNT(*) FROM firebird_scan('<conn>', 'ORDERS', partitions=4);
+SELECT parallel_scan, partitions, snapshot_mode FROM firebird_last_query();
+-- true  4  shared        (Firebird 4/5)
+-- true  4  independent   (Firebird 3: per-partition read committed)
+```
 
 The reasons are factual and coarse, not a planner trace:
 

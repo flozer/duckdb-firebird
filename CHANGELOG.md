@@ -1,5 +1,30 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Partitioned scans (`partitions > 1`, or automatic partitioning on the
+  ATTACH path) now read **one Firebird snapshot**. A coordinating
+  connection starts a read-only SNAPSHOT transaction and every partition
+  worker joins it with `isc_tpb_at_snapshot_number` (Firebird 4+). Before,
+  each partition ran its own read-committed transaction, so partitions
+  could see different committed states of the table: a row moved or a
+  value transferred between partitions during the scan could be counted
+  twice or missed. Serial scans are unchanged.
+- On Firebird 3 (no snapshot numbers), or if the shared snapshot cannot be
+  established, partitioned scans keep the previous behavior exactly
+  (independent read-committed transactions).
+
+### Added
+
+- `snapshot_mode` column (`'serial'` / `'shared'` / `'independent'`) in
+  `firebird_last_query()` and `firebird_query_log()`, appended after
+  `bytes_read_estimate` (20 columns).
+- `scripts/check_shared_snapshot.sh`: consistency check under a concurrent
+  writer, run as its own step on every Firebird 3/4/5 leg of the Linux
+  matrix.
+
 ## [v1.3.1] - 2026-10-26
 
 Patch release completing DuckDB v2.0 compatibility. No SQL functions,

@@ -67,6 +67,7 @@ $testFixtureVar = @{
     'firebird_decfloat.test'           = 'FIREBIRD_DECFLOAT_DB'
     'firebird_none_charset.test'       = 'FIREBIRD_NONE_DB'
     'firebird_partitions_scan.test'    = 'FIREBIRD_PARTITIONS_DB'
+    'firebird_shared_snapshot.test'    = 'FIREBIRD_PARTITIONS_DB'
     'firebird_unpushed_mode.test'      = 'FIREBIRD_NONE_DB'
     'firebird_none_pushdown.test'      = 'FIREBIRD_NONE_DB'
     'firebird_numeric_widen.test'      = 'FIREBIRD_NUMERICS_DB'

@@ -86,6 +86,19 @@ struct FirebirdGlobalState : public GlobalTableFunctionState {
     std::vector<idx_t>          projection_ids;
     optional_ptr<TableFilterSet> filters;
 
+    // Shared snapshot (partitioned scans only). The coordinating
+    // connection holds a read-only SNAPSHOT transaction for the whole
+    // scan; every worker joins it with isc_tpb_at_snapshot_number, so all
+    // partitions read one consistent state of the table. snapshot_number
+    // stays 0 when the server can't do it (Firebird 3) or anything
+    // failed: workers then keep their independent read-committed
+    // transactions, exactly as before.
+    std::unique_ptr<FirebirdConnection> snapshot_conn;
+    int64_t snapshot_number = 0;
+    // Set by any worker that could not join the snapshot and fell back
+    // to its read-committed transaction.
+    std::atomic<bool> snapshot_join_failed{false};
+
     idx_t MaxThreads() const override { return max_threads; }
 
     bool NextPartition(PartitionSpec &out) {
@@ -155,6 +168,15 @@ struct FirebirdLocalState : public LocalTableFunctionState {
         // already grabbed).
         cursor.reset();
         if (pool && conn) {
+            // A worker of a shared-snapshot scan is on a SNAPSHOT
+            // transaction; pooled connections go back read-committed. If
+            // that fails the connection is dropped instead of pooled.
+            try {
+                conn->RestoreDefaultTransaction();
+            } catch (...) {
+                conn.reset();
+                return;
+            }
             pool->Release(std::move(conn));
         }
     }
@@ -738,6 +760,31 @@ idx_t PickPartitionCount(int64_t min_v, int64_t max_v) {
     return static_cast<idx_t>(std::max<int64_t>(1, result));
 }
 
+// Open the coordinating connection of a partitioned scan and pin one
+// snapshot for all its workers (see FirebirdGlobalState::snapshot_conn).
+// Uses its own attachment, not the ATTACH pool, so pool statistics keep
+// counting worker connections only. Any failure leaves snapshot_number
+// at 0, which means "independent transactions", today's behavior.
+static void StartSharedSnapshot(const FirebirdBindData &bind,
+                                FirebirdGlobalState &gstate) {
+    try {
+        auto conn = make_uniq<FirebirdConnection>(bind.conn_info);
+        if (!conn->TryStartSnapshotTransaction()) {
+            return;
+        }
+        int64_t number = conn->SnapshotNumber();
+        if (number <= 0) {
+            return;  // Firebird 3: no snapshot numbers to share
+        }
+        gstate.snapshot_number = number;
+        gstate.snapshot_conn = std::move(conn);
+    } catch (...) {
+        // Fall back to independent transactions. A real connectivity
+        // problem resurfaces, with its own message, when the workers
+        // attach.
+    }
+}
+
 static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
     ClientContext & /*context*/, TableFunctionInitInput &input) {
     auto &bind = input.bind_data->Cast<FirebirdBindData>();
@@ -776,6 +823,10 @@ static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
         gstate->max_threads = 1;
     }
 
+    if (gstate->partitions.size() > 1) {
+        StartSharedSnapshot(bind, *gstate);
+    }
+
     // Capture pushdown context for the workers.
     gstate->column_ids = std::vector<column_t>(input.column_ids.begin(),
                                                input.column_ids.end());
@@ -787,7 +838,7 @@ static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
 static unique_ptr<LocalTableFunctionState> FirebirdScanInitLocal(
     ExecutionContext & /*ctx*/,
     TableFunctionInitInput &input,
-    GlobalTableFunctionState * /*gstate*/) {
+    GlobalTableFunctionState *global_state) {
     auto &bind = input.bind_data->Cast<FirebirdBindData>();
     auto local = make_uniq<FirebirdLocalState>();
     if (bind.pool) {
@@ -802,6 +853,12 @@ static unique_ptr<LocalTableFunctionState> FirebirdScanInitLocal(
         local->connection_reused = lease.reused;
     } else {
         local->conn = make_uniq<FirebirdConnection>(bind.conn_info);
+    }
+    auto &gstate = global_state->Cast<FirebirdGlobalState>();
+    if (gstate.snapshot_number > 0 &&
+        !local->conn->TryStartSnapshotTransaction(gstate.snapshot_number)) {
+        // The worker stays on its own read-committed transaction.
+        gstate.snapshot_join_failed = true;
     }
     return std::move(local);
 }
@@ -956,6 +1013,14 @@ static bool OpenNextPartitionCursor(ClientContext &ctx,
         rec.offset_pushed = offset_to_push;
         rec.partitions    = static_cast<int32_t>(gstate.partitions.size());
         rec.parallel_scan = rec.partitions > 1;
+        if (!rec.parallel_scan) {
+            rec.snapshot_mode = "serial";
+        } else if (gstate.snapshot_number > 0 && !gstate.snapshot_join_failed &&
+                   local.conn && local.conn->InSnapshotTransaction()) {
+            rec.snapshot_mode = "shared";
+        } else {
+            rec.snapshot_mode = "independent";
+        }
         rec.captured_at   = Timestamp::GetCurrentTimestamp();
         // Phase 2 Chunk C - pool identity from the active lease. For
         // the direct firebird_scan() path the connection was not
