@@ -373,7 +373,10 @@ If the library lives somewhere non-standard, set
 `firebird_*` call. The override is authoritative: when set non-empty
 and the path cannot be loaded, the extension raises a clear
 `IO Error: DUCKDB_FIREBIRD_CLIENT_LIBRARY is set to '...' but that file
-could not be loaded.` instead of silently falling back.
+could not be loaded.` instead of silently falling back. On Windows the
+DLLs that `fbclient.dll` itself needs (for Firebird 3: `msvcr100.dll`,
+`zlib1.dll`, ICU) are looked up in that library's own folder first, so
+pointing the variable at a Firebird install or portable kit is enough.
 
 When no client is reachable, the first `firebird_*` call fails with:
 
