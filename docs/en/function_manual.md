@@ -62,10 +62,13 @@ Supported named parameters include:
 - `filter`
 - `row_limit`
 - `row_offset`
-- `partitions` — parallelism over PK ranges: `0` = auto, `1` = serial. The
-  ranges come from a `MIN`/`MAX` probe of the PK; the first partition has no
-  lower bound and the last no upper bound, so rows outside the probed range
-  (committed after the probe, or after an `ATTACH` cached it) are still read.
+- `partitions` — parallelism: `0` = auto, `1` = serial. With the default
+  `partition_by = 'pk'`, the ranges come from a `MIN`/`MAX` probe of the PK;
+  the first partition has no lower bound and the last no upper bound, so
+  rows outside the probed range (committed after the probe, or after an
+  `ATTACH` cached it) are still read.
+- `partition_by` — `'pk'` (default) or `'dbkey'`; see [Choosing how a
+  table is split (`partition_by`)](#choosing-how-a-table-is-split-partition_by)
 - `none_pushdown` — opt-in pushdown of `=` / `IN` over `CHARACTER SET NONE`
   CHAR/VARCHAR columns when `none_encoding` is `win1252` or `iso8859_1`
   (default `false`; see [Charset handling of `CHARACTER SET NONE`
@@ -111,6 +114,58 @@ connections commit changes, as a serial scan does.
   duration. It does not come from the ATTACH connection pool, so
   `firebird_pool_stats()` counters are unaffected.
 
+#### Choosing how a table is split (`partition_by`)
+
+`partition_by` selects how `firebird_scan` splits a table when
+`partitions > 1`:
+
+- `'pk'` (default): ranges of a single-column integer primary key,
+  computed from its `MIN`/`MAX`. Unchanged from earlier versions.
+- `'dbkey'`: ranges of `RDB$DB_KEY` over the table's physical record
+  space, which comes from `RDB$PAGES` and the page size. The bounds are
+  read inside the scan's shared snapshot, so no `MIN`/`MAX` probe is
+  needed. The split does not depend on how the primary key is distributed,
+  and **tables without a usable primary key can be split too**. The space
+  counts whole pointer pages (one covers about 12.8 MiB of data pages with
+  8 KiB pages), so partitions are balanced only to within one pointer
+  page: most of a table smaller than a few pointer pages lands in the
+  first partitions.
+  Without a pushed filter that can use an index, each partition is a
+  bounded full scan
+  (`RDB$DB_KEY >= MAKE_DBKEY(...) AND RDB$DB_KEY < MAKE_DBKEY(...)`,
+  plan `Full Scan (lower bound, upper bound)`). When a pushed filter can
+  use an index, Firebird reads through that index in every partition and
+  applies the DB_KEY bounds only as a filter, so each partition repeats the
+  whole index scan: prefer `'pk'` for such queries.
+
+`'dbkey'` applies only with an explicit `partitions` of 2 or more, to
+persistent base tables, on Firebird 4.x or 5.x (`MAKE_DBKEY` and bounded
+DB_KEY scans are Firebird 4.0+), and only when the scan's shared snapshot
+was started. In every other case (Firebird 3, views, `partitions` unset or
+`1`, no shared snapshot) the scan behaves as without `partition_by`. With
+an explicit `partitions` of 2 or more, the `MIN`/`MAX` probe for PK ranges
+then runs when the scan starts, on every execution.
+`firebird_last_query().partition_method` reports what was used: `pk`,
+`dbkey`, or `none` (one partition).
+
+```sql
+-- A table without a primary key, split four ways (Firebird 4/5):
+SELECT COUNT(*)
+FROM firebird_scan('<conn>', 'AUDIT_LOG', partitions=4, partition_by='dbkey');
+SELECT partition_method, snapshot_mode, partitions FROM firebird_last_query();
+-- dbkey  shared  4
+```
+
+Splitting a scan does not always make it faster. In our measurements
+(4-core VM, TCP loopback, Firebird 5.0.3 client) four partitions sped up a
+19-column scan by 1.4–1.6×, but made narrow or column-projected scans
+about 2× slower than serial. DB_KEY ranges were faster than PK ranges by
+about the cost of the `MIN`/`MAX` probe they skip (1.5–2 s on 5–10 M rows).
+In our tests most of the slowdown came from the Firebird client library,
+which serializes per-row allocations across attachments
+([FirebirdSQL/firebird#9297](https://github.com/FirebirdSQL/firebird/issues/9297)).
+Measure before relying on `partitions > 1`.
+
 #### Pagination determinism (`RDB$DB_KEY`)
 
 When paginating (`row_limit`/`row_offset`) against a table or view with no
@@ -122,8 +177,10 @@ all, so page boundaries were not deterministic — this was a bug, now fixed.)
 `RDB$DB_KEY` is a **physical row-pagination stabilizer valid only for the
 duration of one scan/transaction**. It is NOT a business ordering contract,
 is NOT stable across transactions or after row updates, and is NEVER used
-for range partitioning, incremental/watermark logic, or recommended as a
-key anywhere else in this extension.
+for incremental/watermark logic or recommended as a key anywhere else in
+this extension. The one other use is `partition_by = 'dbkey'`, where the
+DB_KEY ranges are planned and read inside one shared snapshot, the only
+scope in which they are stable.
 
 When a usable single-column numeric primary key exists, it is used for the
 `ORDER BY` instead of `RDB$DB_KEY` — preferred, since it is a real,
@@ -580,10 +637,10 @@ Alert code catalog:
 | `partition_advisory` | LOW | Recommended partitions (derived from PK range) is advisory |
 | `server_parallelism_caveat` | LOW | Server-side parallelism (Firebird 5) caveat when `partitions > 1` |
 | `pk_range_small_serial` | LOW | PK MIN/MAX span is small — serial scan recommended |
-| `no_primary_key` | HIGH | No primary key — full scan only, not range-partitionable |
-| `composite_pk_serial` | LOW | Composite PK — serial scan only |
+| `no_primary_key` | HIGH | No primary key — full scan, no PK ranges (`partition_by='dbkey'` can split it on Firebird 4/5) |
+| `composite_pk_serial` | LOW | Composite PK — serial by default (`partition_by='dbkey'` can split it on Firebird 4/5) |
 | `numeric_pk_no_range_serial` | LOW | Single numeric PK but no usable MIN/MAX range — serial scan |
-| `non_numeric_pk_serial` | LOW | Single non-numeric PK — serial scan only |
+| `non_numeric_pk_serial` | LOW | Single non-numeric PK — serial by default (`partition_by='dbkey'` can split it on Firebird 4/5) |
 | `no_indexed_filter_columns` | MEDIUM | No cheap indexed filter columns found |
 | `none_charset_text_columns` | MEDIUM | One or more text columns use CHARACTER SET NONE |
 | `filter_before_scan` | MEDIUM | HIGH-risk base table with filterable columns — the message names them |
@@ -679,10 +736,11 @@ Useful fields include:
 - rows read
 - estimated bytes read from Firebird (`bytes_read_estimate`)
 - parallel scan details, including whether the partitions shared one
-  snapshot (`snapshot_mode`)
+  snapshot (`snapshot_mode`) and how the table was split
+  (`partition_method`)
 - connection reuse details
 
-The schema is 20 columns (shared with `firebird_query_log()`). The
+The schema is 21 columns (shared with `firebird_query_log()`). The
 pushdown-explainability columns (`limit_pushed`, `offset_pushed`,
 `not_pushed_reasons`) make it explicit what reached Firebird and why a
 filter stayed local, and `bytes_read_estimate` (added last, G5) supports
@@ -846,7 +904,7 @@ FROM firebird_explain_pushdown(
 
 Returns the in-memory query log for the current DuckDB session.
 
-Each row carries the same 20-column telemetry schema as
+Each row carries the same 21-column telemetry schema as
 `firebird_last_query()` — including `bytes_read_estimate`, so a rotated
 log keeps the per-query transfer estimates of the session.
 

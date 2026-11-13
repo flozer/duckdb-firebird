@@ -2,12 +2,35 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The `firebird_profile_table()` alerts for tables without a usable primary
+  key (`no_primary_key`, `composite_pk_serial`, `non_numeric_pk_serial`) now
+  point to `partition_by = 'dbkey'` on Firebird 4/5.
+
 ### Added
 
 - `scripts/check_catalog_load_failure.sh`: kills a pooled attachment before
   the first table query of an ATTACH and checks that the failed catalog load
   leaves no connection leased; run as its own step on every Firebird 3/4/5
   leg of the Linux matrix.
+- `partition_by = 'pk' | 'dbkey'` for `firebird_scan()`. `'dbkey'` (explicit
+  `partitions >= 2`, base tables, Firebird 4 and 5) splits the table into
+  `RDB$DB_KEY` ranges over its physical record space (`RDB$PAGES`,
+  `MAKE_DBKEY`), read inside the shared snapshot: no `MIN`/`MAX` probe, a
+  split that does not depend on how the keys are distributed (balanced to
+  within one pointer page), and tables without a usable primary key can be
+  split. The default `'pk'` keeps the previous behavior;
+  anything `'dbkey'` can't handle (including a scan whose shared snapshot
+  could not be started) falls back to it. With a pushed filter that can
+  use an index, every DB_KEY partition repeats the index scan, so `'pk'` is
+  the better choice there.
+- `partition_method` column (`'none'` / `'pk'` / `'dbkey'`) in
+  `firebird_last_query()` and `firebird_query_log()`, appended after
+  `snapshot_mode` (21 columns).
+- `scripts/check_shared_snapshot.sh` also runs `partition_by = 'dbkey'`
+  scans, checks `partition_method` on every scan, and on Firebird 4/5
+  checks that every DB_KEY range of a scan holds rows.
 
 ### Fixed
 

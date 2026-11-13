@@ -60,7 +60,7 @@ static void LoadInternal(ExtensionLoader &loader) {
     loader.RegisterFunction(DescribedTableFunction(
         GetFirebirdScanFunction(), {"connection_string", "table_name"},
         "Reads a Firebird table into DuckDB with projection and predicate pushdown, "
-        "optional parallel PK-range partitioning (partitions=N), ROWS paging, and "
+        "optional parallel partitioning (partitions=N, by PK or RDB$DB_KEY ranges via partition_by), ROWS paging, and "
         "CHARACTER SET NONE decoding.",
         "SELECT * FROM firebird_scan('database=C:/data/erp.fdb user=APP_READONLY password=secret', 'CUSTOMER');",
         {"firebird", "scan"}));

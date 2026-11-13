@@ -315,6 +315,8 @@ jobs:
           # per FB version (shared on FB4+, independent on FB3), same
           # partitions fixture.
           ./build/release/test/unittest test/sql/firebird_shared_snapshot.test
+          # partition_by = 'pk' | 'dbkey' (DB_KEY ranges on FB4/FB5, fallback on FB3).
+          ./build/release/test/unittest test/sql/firebird_partition_by.test
           # G-queue coverage (v1.2.0): unpushed-mode guard + none_pushdown
           # (NONE fixture), numeric_widen (numerics fixture), session
           # stability + bytes estimate (main fixture).

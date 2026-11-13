@@ -38,13 +38,13 @@ WHERE function_name LIKE 'firebird%'
 ----
 0
 
-# firebird_scan: 2 positional + 11 named parameters, all with real names (v1.2.0 added none_pushdown and numeric_widen_int64)
+# firebird_scan: 2 positional + 12 named parameters, all with real names (v1.2.0 added none_pushdown and numeric_widen_int64; partition_by followed)
 query I
 SELECT len(parameters)
 FROM duckdb_functions()
 WHERE function_name = 'firebird_scan'
 ----
-13
+14
 
 query I
 SELECT count(*)

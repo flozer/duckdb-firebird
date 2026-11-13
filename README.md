@@ -65,7 +65,8 @@ such as GizmoSQL.
 - **Prepared statements + bind variables** - string/date/numeric filters avoid
   unsafe SQL interpolation.
 - **Paging** - `row_limit=N` and `row_offset=M` map to Firebird `ROWS`.
-- **Parallel PK-range scans** - opt in with `partitions=N`.
+- **Parallel scans** - opt in with `partitions=N`, split by PK ranges or
+  (Firebird 4/5, `partition_by='dbkey'`) by `RDB$DB_KEY` ranges.
 - **Firebird 3/4/5 type mapping** - including `INT128`, `DECIMAL(38)`,
   `TIMESTAMP WITH TIME ZONE`, text BLOBs, binary BLOBs, booleans, dates, and
   timestamps. Int64-backed `NUMERIC(18,s)` defaults to `DECIMAL(18,s)`; the
@@ -300,7 +301,7 @@ for full detail.
 | Predicate pushdown | Done |
 | Manual paging with `row_limit` / `row_offset` | Done |
 | Prepared statement bind variables | Done |
-| PK-range parallel scan via `partitions=N` | Done |
+| Parallel scan via `partitions=N` (PK or `RDB$DB_KEY` ranges) | Done |
 | `CHARACTER SET NONE` decoding | Done |
 | Metadata via `SHOW`, `DESCRIBE`, `information_schema` | Done |
 | Automatic DuckDB `LIMIT` pushdown | Deferred upstream hook |

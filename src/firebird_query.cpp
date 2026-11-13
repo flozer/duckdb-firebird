@@ -608,10 +608,10 @@ FirebirdQueryBuilder::Result FirebirdQueryBuilder::Build(
         }
     }
 
-    // --- Partition predicate (PK-range parallel scan) -----------------------
+    // --- Partition predicate (parallel scan) --------------------------------
     // Injected by the scanner once per worker. The text is built locally
-    // ("pk >= a AND pk <= b" with numeric literals only) so no escaping is
-    // needed.
+    // from integers only ("pk >= a AND pk <= b", or RDB$DB_KEY bounds with
+    // MAKE_DBKEY(relation id, record number)) so no escaping is needed.
     if (!extra_predicate.empty()) {
         if (sql.str().find(" WHERE ") == std::string::npos) {
             sql << " WHERE ";

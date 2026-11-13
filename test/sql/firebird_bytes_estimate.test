@@ -1,5 +1,5 @@
 # name: test/sql/firebird_bytes_estimate.test
-# description: G5 - bytes_read_estimate telemetry. Schema (20 columns on
+# description: G5 - bytes_read_estimate telemetry. Schema (21 columns on
 #              firebird_last_query/firebird_query_log, bytes_read_estimate
 #              at index 18; 11 on firebird_pool_stats), positivity/monotonicity,
 #              determinism between identical runs, linear scaling with
@@ -23,20 +23,20 @@ require-env FIREBIRD_TEST_DB
 require-env ISC_PASSWORD
 
 # ---------------------------------------------------------------------------
-#  Schema: both telemetry functions expose 20 columns; bytes_read_estimate
+#  Schema: both telemetry functions expose 21 columns; bytes_read_estimate
 #  (BIGINT) was the additive column after the historical 18-column prefix,
-#  snapshot_mode follows it (additive schema-evolution contract).
+#  snapshot_mode and partition_method follow it (additive schema-evolution contract).
 # ---------------------------------------------------------------------------
 
 query I
 SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM firebird_last_query());
 ----
-20
+21
 
 query I
 SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM firebird_query_log());
 ----
-20
+21
 
 query T
 SELECT column_name FROM (DESCRIBE SELECT * FROM firebird_last_query()) LIMIT 1 OFFSET 18;
@@ -83,6 +83,7 @@ offset_pushed
 not_pushed_reasons
 bytes_read_estimate
 snapshot_mode
+partition_method
 
 # ---------------------------------------------------------------------------
 #  Row-limit scan: estimate is positive, deterministic, and never below

@@ -353,6 +353,7 @@ std::string RedactBindValue(const Value &v) {
 //   bytes_read_estimate BIGINT    - G5 payload-bytes estimate (rows x
 //                                   XSQLDA width + BLOB segments)
 //   snapshot_mode       VARCHAR   - 'serial' | 'shared' | 'independent'
+//   partition_method    VARCHAR   - 'none' | 'pk' | 'dbkey'
 
 // Forward declarations - shared by firebird_last_query() and
 // firebird_query_log() below.
@@ -405,7 +406,7 @@ static Value VarcharList(const std::vector<std::string> &xs) {
 
 // Emit one FirebirdQueryTelemetry into the output chunk at index `row`.
 // Shared by firebird_last_query() and firebird_query_log() to keep the
-// 20-column schema in lockstep.
+// 21-column schema in lockstep.
 static void EmitTelemetryRow(DataChunk &output, idx_t row,
                               const FirebirdQueryTelemetry &t) {
     output.data[0].SetValue(row, Value(t.remote_sql));
@@ -439,6 +440,7 @@ static void EmitTelemetryRow(DataChunk &output, idx_t row,
     output.data[18].SetValue(row, Value::BIGINT(t.bytes_read_estimate));
     // Additive tail column (shared snapshot for partitioned scans).
     output.data[19].SetValue(row, Value(t.snapshot_mode));
+    output.data[20].SetValue(row, Value(t.partition_method));
 }
 
 // Returns the canonical (names, types) the two observability table
@@ -471,6 +473,7 @@ static void TelemetrySchema(vector<string> &names,
         "not_pushed_reasons",
         "bytes_read_estimate",
         "snapshot_mode",
+        "partition_method",
     };
     types = {
         LogicalType::VARCHAR,
@@ -492,6 +495,7 @@ static void TelemetrySchema(vector<string> &names,
         LogicalType::BIGINT,
         LogicalType::LIST(LogicalType::VARCHAR),
         LogicalType::BIGINT,
+        LogicalType::VARCHAR,
         LogicalType::VARCHAR,
     };
 }

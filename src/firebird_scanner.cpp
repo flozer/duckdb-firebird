@@ -106,6 +106,12 @@ struct FirebirdGlobalState : public GlobalTableFunctionState {
     std::mutex telemetry_lock;
     bool cursor_recorded = false;
     std::string join_error;
+    // StartSharedSnapshot already ran (it may have failed): never try twice.
+    bool snapshot_attempted = false;
+
+    // How the table was split: "none" (one partition), "pk" (PK ranges)
+    // or "dbkey" (RDB$DB_KEY ranges). Reported as partition_method.
+    std::string partition_method = "none";
 
     idx_t MaxThreads() const override { return max_threads; }
 
@@ -458,8 +464,10 @@ std::unique_ptr<PrimaryKeyInfo> ProbePrimaryKey(
             return nullptr;                              // not numeric — fall back
         }
 
-        // 4) MIN/MAX for the PK column. One round trip; Firebird hits the
-        //    index for both. Empty tables abort.
+        // 4) MIN/MAX for the PK column. One round trip. Firebird reads MIN
+        //    through the ascending PK index, but MAX (and MIN and MAX
+        //    together) with a natural scan unless a descending index exists.
+        //    Empty tables abort.
         int64_t min_v = 0, max_v = 0;
         {
             std::string sql = "SELECT MIN(" + QuoteIdent(pk_name) + "), "
@@ -556,6 +564,18 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
             auto p = val.GetValue<int64_t>();
             if (p < 0) throw BinderException("partitions must be >= 0 (0 = auto)");
             bind->partitions_override = static_cast<idx_t>(p);
+        }
+        else if (key == "partition_by") {
+            const auto v = StringUtil::Lower(val.ToString());
+            if (v == "dbkey") {
+                bind->partition_by_dbkey = true;
+            } else if (v == "pk") {
+                bind->partition_by_dbkey = false;
+            } else {
+                throw BinderException(
+                    "partition_by must be 'pk' (default) or 'dbkey', got '%s'",
+                    val.ToString());
+            }
         }
         else if (key == "row_limit") {
             auto l = val.GetValue<int64_t>();
@@ -672,7 +692,15 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
     // hot loop, so the extra round trip is a deliberate, acceptable cost
     // here — `paging` is the same local computed above from
     // limit_override/offset_override.
-    if (bind->partitions_override != 1 || paging) {
+    //
+    // partition_by='dbkey' with an explicit partitions >= 2 does not need
+    // the probe: its bounds come from the table's DB_KEY geometry. The
+    // probe is skipped here and run by FirebirdScanInitGlobal only if the
+    // scan falls back to PK ranges (MAX() of an ascending PK index is a
+    // full natural scan in Firebird, so this is not a free round trip).
+    const bool dbkey_requested =
+        bind->partition_by_dbkey && bind->partitions_override > 1;
+    if ((bind->partitions_override != 1 && !dbkey_requested) || paging) {
         bind->pk = ProbePrimaryKey(conn, bind->table_name,
                                    bind->column_names, bind->column_types);
     }
@@ -776,6 +804,10 @@ idx_t PickPartitionCount(int64_t min_v, int64_t max_v) {
 // at 0, which means "independent transactions", today's behavior.
 static void StartSharedSnapshot(const FirebirdBindData &bind,
                                 FirebirdGlobalState &gstate) {
+    if (gstate.snapshot_attempted) {
+        return;
+    }
+    gstate.snapshot_attempted = true;
     try {
         auto conn = make_uniq<FirebirdConnection>(bind.conn_info);
         if (!conn->TryStartSnapshotTransaction()) {
@@ -794,14 +826,148 @@ static void StartSharedSnapshot(const FirebirdBindData &bind,
     }
 }
 
+// partition_by='dbkey': split a base table into n ranges of RDB$DB_KEY.
+//
+// A table's DB_KEY carries its relation id and a 40-bit record number; the
+// record numbers of a table run over a space fixed by its pointer pages:
+//   pointer pages (RDB$PAGES, RDB$PAGE_TYPE = 4)
+//     x data pages per pointer page x record slots per data page,
+// both derived from the page size with the ODS formulas of
+// src/jrd/ods.cpp (stable across ODS 12..14). Equal slices of that space
+// are equal slices of the table's physical layout: they do not depend on
+// the PK's distribution, need no MIN/MAX probe, and work for tables
+// without a usable PK. The space counts whole pointer pages, so the
+// partitions balance only to within one pointer page; most of a table
+// smaller than a few pointer pages lands in the first partitions.
+//
+// The predicate uses MAKE_DBKEY(relation id, zero-based record number)
+// (Firebird 4.0+), which builds the key in the server's own layout (byte
+// order, 1-based record number), so the extension does not reproduce it.
+// Without a pushed filter that can use an index, the plan is a bounded
+// full scan ("Full Scan (lower bound, upper bound)", CORE-6278); with one,
+// each partition repeats the index scan and the DB_KEY bounds are only a
+// filter.
+// The outer partitions are open-ended so rows added after the geometry
+// was read are still covered.
+//
+// The geometry is read on the coordinating snapshot connection, i.e. in
+// the same snapshot the partitions will read; DB_KEY ranges are only used
+// inside that one snapshot. Returns false (caller falls back) when there
+// is no shared snapshot (Firebird 3, or it could not be started), for
+// views and non-persistent relations, or if anything cannot be read.
+static bool BuildDbKeyPartitions(const FirebirdBindData &bind,
+                                 FirebirdGlobalState &gstate, idx_t n) {
+    try {
+        FirebirdConnection *conn = gstate.snapshot_conn.get();
+        if (!conn || gstate.snapshot_number <= 0) {
+            return false;
+        }
+        int64_t relation_id = -1;
+        int64_t pointer_pages = 0;
+        std::string engine;
+        {
+            std::vector<Value> params {Value(bind.table_name)};
+            auto cur = conn->OpenCursor(
+                "SELECT CAST(r.RDB$RELATION_ID AS INTEGER), "
+                "       (SELECT CAST(COUNT(*) AS INTEGER) FROM RDB$PAGES p "
+                "         WHERE p.RDB$RELATION_ID = r.RDB$RELATION_ID "
+                "           AND p.RDB$PAGE_TYPE = 4), "
+                "       RDB$GET_CONTEXT('SYSTEM', 'ENGINE_VERSION') "
+                "  FROM RDB$RELATIONS r "
+                " WHERE r.RDB$RELATION_NAME = ? "
+                "   AND r.RDB$VIEW_BLR IS NULL "
+                "   AND COALESCE(r.RDB$RELATION_TYPE, 0) = 0",
+                params);
+            if (!cur->Fetch() || cur->IsNull(0)) {
+                return false;  // not a persistent base table
+            }
+            relation_id = cur->GetLong(0);
+            pointer_pages = cur->IsNull(1) ? 0 : cur->GetLong(1);
+            engine = cur->IsNull(2) ? std::string() : cur->GetText(2);
+        }
+        // MAKE_DBKEY and bounded DB_KEY scans are Firebird 4.0+. Only the
+        // tested 4.x and 5.x are accepted: Firebird 6 adds schemas, which
+        // the relation-name lookup above does not handle.
+        if (engine.size() < 2 || (engine[0] != '4' && engine[0] != '5') ||
+            engine[1] != '.') {
+            return false;
+        }
+        const int64_t page_size = conn->PageSize();
+        if (relation_id < 0 || pointer_pages <= 0 || page_size < 1024) {
+            return false;
+        }
+        const uint64_t ps = static_cast<uint64_t>(page_size);
+        const uint64_t data_pages_per_pp = ((ps - 32) * 8 / 40) & ~7ULL;
+        const uint64_t records_per_dp = (ps - 28) / 17;
+        const uint64_t space = data_pages_per_pp * records_per_dp *
+                               static_cast<uint64_t>(pointer_pages);
+        if (space == 0) {
+            return false;
+        }
+        const uint64_t step = (space + n - 1) / n;
+        const std::string rel = std::to_string(relation_id);
+        for (idx_t i = 0; i < n; ++i) {
+            PartitionSpec spec;
+            if (i > 0) {
+                spec.where_clause = "RDB$DB_KEY >= MAKE_DBKEY(" + rel + ", " +
+                                    std::to_string(i * step) + ")";
+            }
+            if (i < n - 1) {
+                if (!spec.where_clause.empty()) {
+                    spec.where_clause += " AND ";
+                }
+                spec.where_clause += "RDB$DB_KEY < MAKE_DBKEY(" + rel + ", " +
+                                     std::to_string((i + 1) * step) + ")";
+            }
+            gstate.partitions.push_back(std::move(spec));
+        }
+        return true;
+    } catch (...) {
+        gstate.partitions.clear();
+        return false;
+    }
+}
+
 static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
     ClientContext & /*context*/, TableFunctionInitInput &input) {
     auto &bind = input.bind_data->Cast<FirebirdBindData>();
     auto gstate = make_uniq<FirebirdGlobalState>();
 
-    if (bind.pk) {
-        int64_t lo = bind.pk->min_value;
-        int64_t hi = bind.pk->max_value;
+    // partition_by='dbkey' (explicit partitions >= 2, base tables): pin the
+    // shared snapshot first so the DB_KEY geometry is read in it.
+    bool dbkey_done = false;
+    if (bind.partition_by_dbkey && bind.partitions_override > 1 && !bind.is_view) {
+        StartSharedSnapshot(bind, *gstate);
+        dbkey_done = BuildDbKeyPartitions(bind, *gstate, bind.partitions_override);
+        if (dbkey_done) {
+            gstate->max_threads = gstate->partitions.size();
+            gstate->partition_method = "dbkey";
+        }
+    }
+
+    // The bind skipped the PK probe for an explicit 'dbkey' request; if the
+    // scan falls back to PK ranges, probe now (inside the shared snapshot
+    // when there is one).
+    std::unique_ptr<PrimaryKeyInfo> fallback_pk;
+    const PrimaryKeyInfo *pk_info = bind.pk.get();
+    if (!dbkey_done && !pk_info && bind.partition_by_dbkey &&
+        bind.partitions_override > 1) {
+        std::unique_ptr<FirebirdConnection> own;
+        FirebirdConnection *conn = gstate->snapshot_conn.get();
+        if (!conn) {
+            own = make_uniq<FirebirdConnection>(bind.conn_info);
+            conn = own.get();
+        }
+        fallback_pk = ProbePrimaryKey(*conn, bind.table_name,
+                                      bind.column_names, bind.column_types);
+        pk_info = fallback_pk.get();
+    }
+
+    if (dbkey_done) {
+        // partitions already built
+    } else if (pk_info) {
+        int64_t lo = pk_info->min_value;
+        int64_t hi = pk_info->max_value;
         idx_t n = bind.partitions_override > 0
                       ? bind.partitions_override
                       : PickPartitionCount(lo, hi);
@@ -815,7 +981,7 @@ static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
         // remainder. Using long double for the multiply protects against
         // overflow on near-INT64_MAX PK ranges.
         long double width = (static_cast<long double>(hi) - lo + 1.0L) / n;
-        std::string pk = QuoteIdent(bind.pk->column);
+        std::string pk = QuoteIdent(pk_info->column);
         for (idx_t i = 0; i < n; ++i) {
             int64_t part_lo = lo + static_cast<int64_t>(width * i);
             int64_t part_hi = (i == n - 1)
@@ -840,6 +1006,9 @@ static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
             gstate->partitions.push_back(std::move(spec));
         }
         gstate->max_threads = n;
+        if (n > 1) {
+            gstate->partition_method = "pk";
+        }
     } else {
         gstate->partitions.push_back(PartitionSpec{});  // single "whole table" slice
         gstate->max_threads = 1;
@@ -847,6 +1016,10 @@ static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
 
     if (gstate->partitions.size() > 1) {
         StartSharedSnapshot(bind, *gstate);
+    } else if (gstate->snapshot_conn) {
+        // A dbkey attempt pinned a snapshot but the scan ended up serial.
+        gstate->snapshot_conn.reset();
+        gstate->snapshot_number = 0;
     }
 
     // Capture pushdown context for the workers.
@@ -1071,6 +1244,7 @@ static bool OpenNextPartitionCursor(ClientContext &ctx,
         } else {
             rec.snapshot_mode = "independent";
         }
+        rec.partition_method = gstate.partition_method;
         rec.captured_at   = Timestamp::GetCurrentTimestamp();
         // Phase 2 Chunk C - pool identity from the active lease. For
         // the direct firebird_scan() path the connection was not
@@ -2405,6 +2579,7 @@ TableFunction GetFirebirdScanFunction() {
                          .AddKeywordOnly("role", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
                          .AddKeywordOnly("dialect", LogicalType::INTEGER, Value(LogicalType::INTEGER))
                          .AddKeywordOnly("partitions", LogicalType::BIGINT, Value(LogicalType::BIGINT))
+                         .AddKeywordOnly("partition_by", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
                          .AddKeywordOnly("row_limit", LogicalType::BIGINT, Value(LogicalType::BIGINT))
                          .AddKeywordOnly("row_offset", LogicalType::BIGINT, Value(LogicalType::BIGINT))
                          .AddKeywordOnly("none_encoding", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
@@ -2424,6 +2599,7 @@ TableFunction GetFirebirdScanFunction() {
     fn.named_parameters["role"]          = LogicalType::VARCHAR;
     fn.named_parameters["dialect"]       = LogicalType::INTEGER;
     fn.named_parameters["partitions"]    = LogicalType::BIGINT;
+    fn.named_parameters["partition_by"]  = LogicalType::VARCHAR;
     fn.named_parameters["row_limit"]     = LogicalType::BIGINT;
     fn.named_parameters["row_offset"]    = LogicalType::BIGINT;
     fn.named_parameters["none_encoding"] = LogicalType::VARCHAR;

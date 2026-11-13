@@ -64,6 +64,11 @@ struct FirebirdBindData : public TableFunctionData {
     // ClassifyPkRange; populated by FirebirdTableEntry::GetScanFunction.
     PrimaryKeyDescriptor pk_descriptor;
     idx_t partitions_override = 0;
+    // partition_by = 'pk' (default) | 'dbkey'. With 'dbkey' and an explicit
+    // partitions >= 2, a base table on Firebird 4/5 is split into RDB$DB_KEY
+    // ranges (MAKE_DBKEY) over its physical record space instead of PK
+    // ranges; anything else falls back to the PK path (or serial).
+    bool partition_by_dbkey = false;
     // Optional ROWS N hint pushed into every per-partition Firebird query.
     // 0 = unset (no limit). DuckDB's TableFunction API has no built-in
     // LIMIT pushdown hook, so this is opt-in via the `row_limit=N` named

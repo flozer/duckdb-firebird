@@ -38,6 +38,7 @@
 #define isc_get_segment              (::duckdb::fbapi().isc_get_segment)
 #define isc_sqlcode                  (::duckdb::fbapi().isc_sqlcode)
 #define fb_interpret                 (::duckdb::fbapi().fb_interpret)
+#define isc_database_info            (::duckdb::fbapi().isc_database_info)
 
 namespace duckdb {
 
@@ -620,6 +621,28 @@ int64_t FirebirdConnection::SnapshotNumber() {
         value |= static_cast<uint64_t>(static_cast<unsigned char>(buf[3 + i])) << (8 * i);
     }
     return static_cast<int64_t>(value);
+}
+
+int64_t FirebirdConnection::PageSize() {
+    char items[] = {isc_info_page_size, isc_info_end};
+    char buf[32] = {};
+    ISC_STATUS status[20] = {};
+    isc_database_info(status, &db_, static_cast<short>(sizeof(items)), items,
+                      static_cast<short>(sizeof(buf)), buf);
+    if (StatusIsError(status) || buf[0] != isc_info_page_size) {
+        return 0;
+    }
+    // Reply: item byte, 2-byte LE length, LE value.
+    const unsigned len = static_cast<unsigned char>(buf[1]) |
+                         (static_cast<unsigned>(static_cast<unsigned char>(buf[2])) << 8);
+    if (len == 0 || len > 4) {
+        return 0;
+    }
+    int64_t value = 0;
+    for (unsigned i = 0; i < len; ++i) {
+        value |= static_cast<int64_t>(static_cast<unsigned char>(buf[3 + i])) << (8 * i);
+    }
+    return value;
 }
 
 void FirebirdConnection::RestoreDefaultTransaction() {
