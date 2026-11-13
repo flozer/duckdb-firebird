@@ -60,3 +60,97 @@ query T
 SELECT typeof(warnings) FROM firebird_health('fb');
 ----
 VARCHAR[]
+
+# ---------------------------------------------------------------------------
+#  Inline blobs (Firebird 5.0.3+ client AND server). client_version is the
+#  loaded fbclient (normalized to major.minor.patch.build); inline_blob_size
+#  is the effective limit, or NULL when either side is older than 5.0.3
+#  or the attachment is not TCP (a 5.0.3+ client reports a size even where
+#  nothing is inlined, so the server version and network_protocol decide
+#  too).
+# ---------------------------------------------------------------------------
+
+query I
+SELECT regexp_matches(client_version, '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+FROM firebird_health('fb');
+----
+true
+
+# network_protocol is the attachment's transport, NULL when embedded.
+query I
+SELECT network_protocol IS NULL OR network_protocol IN ('TCPv4', 'TCPv6', 'XNET', 'WNET')
+FROM firebird_health('fb');
+----
+true
+
+statement ok
+CREATE OR REPLACE TABLE inline_expect AS
+SELECT
+  (CAST(split_part(engine_version, '.', 1) AS INTEGER) * 10000 +
+   CAST(split_part(engine_version, '.', 2) AS INTEGER) * 100 +
+   CAST(split_part(engine_version, '.', 3) AS INTEGER)) >= 50003 AS server_ok,
+  (CAST(split_part(client_version, '.', 1) AS INTEGER) * 10000 +
+   CAST(split_part(client_version, '.', 2) AS INTEGER) * 100 +
+   CAST(split_part(client_version, '.', 3) AS INTEGER)) >= 50003 AS client_ok,
+  -- The server inlines blobs only over TCP (not XNET, not embedded).
+  coalesce(network_protocol LIKE 'TCP%', false) AS tcp
+FROM firebird_health('fb');
+
+# Default (setting -1, nothing sent): the client default 65535 when both
+# sides support it over TCP, NULL otherwise. The warning fires only for a
+# 5.0.3+ server reached over TCP through an older client.
+query II
+SELECT
+  CASE WHEN e.server_ok AND e.tcp AND e.client_ok THEN h.inline_blob_size = 65535
+       ELSE h.inline_blob_size IS NULL END,
+  list_contains(h.warnings, 'inline_blobs_unavailable') = (e.server_ok AND e.tcp AND NOT e.client_ok)
+FROM firebird_health('fb') h, inline_expect e;
+----
+true	true
+
+# A new ATTACH picks up the session setting: 0 disables inlining.
+statement ok
+SET firebird_max_inline_blob_size = 0;
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb_noinline (TYPE firebird);
+
+query I
+SELECT CASE WHEN e.server_ok AND e.tcp AND e.client_ok THEN h.inline_blob_size = 0
+            ELSE h.inline_blob_size IS NULL END
+FROM firebird_health('fb_noinline') h, inline_expect e;
+----
+true
+
+statement ok
+DETACH fb_noinline;
+
+# Out of range: rejected when a connection would be opened (ATTACH or a
+# firebird_scan() bind), with the accepted range in the message.
+statement ok
+SET firebird_max_inline_blob_size = 70000;
+
+statement error
+ATTACH '${FIREBIRD_TEST_DB}' AS fb_bad (TYPE firebird);
+----
+firebird_max_inline_blob_size must be -1 (client default) or 0..65535
+
+statement error
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE');
+----
+firebird_max_inline_blob_size must be -1 (client default) or 0..65535
+
+statement ok
+SET firebird_max_inline_blob_size = -1;
+
+# Scans keep working with inlining tuned down (blob values unchanged).
+statement ok
+SET firebird_max_inline_blob_size = 16;
+
+query I
+SELECT COUNT(*) > 0 FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE');
+----
+true
+
+statement ok
+RESET firebird_max_inline_blob_size;

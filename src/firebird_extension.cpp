@@ -171,7 +171,8 @@ static void LoadInternal(ExtensionLoader &loader) {
         GetFirebirdHealthFunction(), {"alias"},
         "Returns a single-row database and server health diagnostic (engine and ODS "
         "version, dialect, charset, page size, transaction counters OIT/OAT/OST, "
-        "attachments, warning codes) read from MON$ tables.",
+        "attachments, warning codes) read from MON$ tables, plus the client "
+        "library version and the effective inline-blob limit.",
         "SELECT * FROM firebird_health('fb');",
         {"firebird", "diagnostics"}));
     loader.RegisterFunction(DescribedTableFunction(
@@ -273,6 +274,22 @@ static void LoadInternal(ExtensionLoader &loader) {
         "is required instead.",
         LogicalType::BIGINT,
         Value::BIGINT(0));
+
+    // Inline blobs (Firebird 5.0.3+ client AND server): blobs up to N
+    // bytes are sent together with their row, so reading them costs no
+    // extra round trips. Read at firebird_scan() bind time and at ATTACH
+    // time, like firebird_dummy_packet_interval. -1 (default) sends
+    // nothing and keeps the client's default (65535 for a 5.0.3+ client).
+    // firebird_health() reports whether inlining is in effect.
+    config.AddExtensionOption(
+        "firebird_max_inline_blob_size",
+        "Maximum size, in BYTES, of blobs Firebird sends inline with their "
+        "row (isc_dpb_max_inline_blob_size). -1 (default) = client default "
+        "(65535 with a 5.0.3+ client), 0 = disable, max 65535. Needs a "
+        "Firebird 5.0.3+ client library and server; older ones ignore it. "
+        "See firebird_health().inline_blob_size.",
+        LogicalType::BIGINT,
+        Value::BIGINT(-1));
 }
 
 void FirebirdExtension::Load(ExtensionLoader &loader) {

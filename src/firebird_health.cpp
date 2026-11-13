@@ -35,7 +35,30 @@ struct HealthInfo {
     int32_t attachments = 0;
 
     std::vector<std::string> warnings;
+
+    // Inline blobs (Firebird 5.0.3+ client and server).
+    std::string client_version;
+    std::string network_protocol;  // TCPv4 / TCPv6 / XNET (WNET before 5.0), empty when embedded
+    // Effective max inline blob size; -1 = inlining not available on this
+    // attachment (client or server older than 5.0.3, or not over TCP).
+    int64_t inline_blob_size = -1;
 };
+
+// "5.0.3" (or "5.0.3.1683") >= 5.0.3 ?
+static bool VersionAtLeast503(const std::string &v) {
+    int parts[3] = {0, 0, 0};
+    size_t i = 0;
+    for (int k = 0; k < 3 && i < v.size(); ++k) {
+        size_t start = i;
+        while (i < v.size() && v[i] >= '0' && v[i] <= '9') ++i;
+        if (i == start) return false;
+        parts[k] = std::stoi(v.substr(start, i - start));
+        if (i < v.size() && v[i] == '.') ++i;
+    }
+    if (parts[0] != 5) return parts[0] > 5;
+    if (parts[1] != 0) return parts[1] > 0;
+    return parts[2] >= 3;
+}
 
 static HealthInfo BuildHealth(FirebirdConnection &conn) {
     HealthInfo h;
@@ -45,11 +68,14 @@ static HealthInfo BuildHealth(FirebirdConnection &conn) {
     {
         auto cur = conn.OpenCursor(
             "SELECT rdb$get_context('SYSTEM','ENGINE_VERSION'), "
-            "       TRIM(RDB$CHARACTER_SET_NAME) "
+            "       TRIM(RDB$CHARACTER_SET_NAME), "
+            "       rdb$get_context('SYSTEM','NETWORK_PROTOCOL') "
             "  FROM RDB$DATABASE");
         if (cur->Fetch()) {
             h.engine_version = cur->IsNull(0) ? std::string() : cur->GetText(0);
             h.default_charset = cur->IsNull(1) ? std::string() : cur->GetText(1);
+            // TCPv4 / TCPv6 / XNET (WNET before 5.0); NULL when embedded.
+            h.network_protocol = cur->IsNull(2) ? std::string() : cur->GetText(2);
         }
     }
 
@@ -102,6 +128,20 @@ static HealthInfo BuildHealth(FirebirdConnection &conn) {
         h.mon_ok = false;
     }
 
+    // 2b) Inline blobs. A 5.0.3+ server sends them over TCP only: it skips
+    //     XNET (rem_port::sendInlineBlobs), 5.0 has no WNET, and an embedded
+    //     attachment has no wire at all.
+    //     A 5.0.3+ client answers fb_info_max_inline_blob_size itself, even
+    //     where nothing is inlined, so the protocol and the server version
+    //     decide too. An older client answers isc_info_error.
+    h.client_version = FirebirdClientVersion();
+    const int64_t client_inline = conn.MaxInlineBlobSize();
+    const bool server_inline = VersionAtLeast503(h.engine_version);
+    const bool tcp = h.network_protocol.rfind("TCP", 0) == 0;
+    if (client_inline >= 0 && server_inline && tcp) {
+        h.inline_blob_size = client_inline;
+    }
+
     // 3) Warnings — explicit, documented criteria, deterministic order.
     if (h.mon_ok) {
         if ((h.next_tx - h.oit) > FB_HEALTH_GAP_THRESHOLD) {
@@ -122,6 +162,12 @@ static HealthInfo BuildHealth(FirebirdConnection &conn) {
     }
     if (!h.mon_ok) {
         h.warnings.push_back("mon_unavailable");
+    }
+    // The server could inline blobs over this TCP attachment but the loaded
+    // client library can't: actionable (load a 5.0.3+ fbclient), unlike an
+    // old server or a local attachment.
+    if (server_inline && tcp && client_inline < 0) {
+        h.warnings.push_back("inline_blobs_unavailable");
     }
 
     return h;
@@ -160,7 +206,8 @@ HealthBind(ClientContext &context, TableFunctionBindInput &input,
         "engine_version", "ods_version", "sql_dialect", "default_charset",
         "page_size", "forced_writes", "sweep_interval", "oldest_transaction",
         "oldest_active", "oldest_snapshot", "next_transaction", "oit_gap",
-        "oat_gap", "attachments", "warnings",
+        "oat_gap", "attachments", "warnings", "client_version",
+        "inline_blob_size", "network_protocol",
     };
     return_types = {
         LogicalType::VARCHAR,                  // engine_version
@@ -178,6 +225,9 @@ HealthBind(ClientContext &context, TableFunctionBindInput &input,
         LogicalType::BIGINT,                   // oat_gap
         LogicalType::INTEGER,                  // attachments
         LogicalType::LIST(LogicalType::VARCHAR), // warnings
+        LogicalType::VARCHAR,                  // client_version
+        LogicalType::INTEGER,                  // inline_blob_size
+        LogicalType::VARCHAR,                  // network_protocol
     };
     return std::move(bind);
 }
@@ -237,6 +287,12 @@ static void HealthFunction(ClientContext &context, TableFunctionInput &input,
     output.data[12].SetValue(0, bigint_or_null(h.next_tx - h.oat));
     output.data[13].SetValue(0, int_or_null(h.attachments));
     output.data[14].SetValue(0, VarcharList(h.warnings));
+    output.data[15].SetValue(0, Value(h.client_version));
+    output.data[16].SetValue(0, h.inline_blob_size >= 0
+        ? Value::INTEGER(static_cast<int32_t>(h.inline_blob_size))
+        : Value(LogicalType::INTEGER));
+    output.data[17].SetValue(0, h.network_protocol.empty()
+        ? Value(LogicalType::VARCHAR) : Value(h.network_protocol));
     g.emitted = true;
 }
 

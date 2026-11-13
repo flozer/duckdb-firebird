@@ -67,3 +67,27 @@ query I
 SELECT octet_length(PAYLOAD) FROM fb.main.FILE_STORAGE WHERE FILE_ID = 3;
 ----
 5
+
+# --- same bytes with inline blobs disabled -----------------------------
+# On a Firebird 5.0.3+ client and server, the 4020-byte blobs above were
+# sent inline with their row (default limit 65535). Re-read them through an
+# attachment with inlining disabled (firebird_max_inline_blob_size = 0):
+# the separate isc_open_blob2/isc_get_segment path must return the same
+# bytes. On older clients/servers both reads take that path anyway.
+
+statement ok
+SET firebird_max_inline_blob_size = 0;
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb_noinline (TYPE firebird);
+
+query II
+SELECT md5(NOTE), md5(DATA) FROM fb_noinline.main.TBLOB_MULTISEG WHERE ID = 1;
+----
+8b0ecc5b1da53e0cd50a096b6c61884f	5a5473ca6ca300831ce18ee4066a6741
+
+statement ok
+DETACH fb_noinline;
+
+statement ok
+RESET firebird_max_inline_blob_size;

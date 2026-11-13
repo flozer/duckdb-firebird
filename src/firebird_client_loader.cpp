@@ -112,6 +112,7 @@ static void BindSymbols(FirebirdClientApi &api,
     BIND(isc_sqlcode);
     BIND(fb_interpret);
     BIND(isc_database_info);
+    BIND(isc_get_client_version);
 #undef BIND
 }
 

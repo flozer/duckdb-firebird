@@ -1,6 +1,7 @@
 #include "firebird_client.hpp"
 #include "firebird_client_loader.hpp"
 
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -39,6 +40,7 @@
 #define isc_sqlcode                  (::duckdb::fbapi().isc_sqlcode)
 #define fb_interpret                 (::duckdb::fbapi().fb_interpret)
 #define isc_database_info            (::duckdb::fbapi().isc_database_info)
+#define isc_get_client_version       (::duckdb::fbapi().isc_get_client_version)
 
 namespace duckdb {
 
@@ -274,6 +276,85 @@ void ValidateDummyPacketInterval(int64_t seconds) {
     }
 }
 
+// --- inline blobs ------------------------------------------------------------
+
+// Firebird 5.0.3 items. The vendored headers define them; FB_SDK_ROOT may
+// point at an older SDK that does not. Values are fixed public API.
+#ifndef isc_dpb_max_inline_blob_size
+#define isc_dpb_max_inline_blob_size 104
+#endif
+#ifndef fb_info_max_inline_blob_size
+#define fb_info_max_inline_blob_size 160
+#endif
+
+// Firebird caps the inline size at 65535 bytes; reject what it would
+// silently cap, so the setting never claims more than it does.
+void ValidateMaxInlineBlobSize(int64_t bytes) {
+    if (bytes < -1 || bytes > 65535) {
+        throw BinderException(
+            "firebird_max_inline_blob_size must be -1 (client default) or "
+            "0..65535 bytes (0 = disable inline blobs), got %lld",
+            static_cast<long long>(bytes));
+    }
+}
+
+std::string FirebirdClientVersion() {
+    char buf[256] = {};
+    isc_get_client_version(buf);
+    const std::string raw(buf);
+    // "WI-V6.3.<patch>.<build> Firebird <major>.<minor>"; the letter after
+    // the dash is the build type (V release, T snapshot, B beta, ...).
+    const auto v = raw.find('-');
+    const auto fb = raw.find("Firebird ");
+    if (v == std::string::npos || fb == std::string::npos || v + 2 >= raw.size() ||
+        !std::isalpha(static_cast<unsigned char>(raw[v + 1]))) {
+        return raw;
+    }
+    std::vector<std::string> impl;  // 6, 3, patch, build
+    {
+        std::string part;
+        for (size_t i = v + 2; i < raw.size() && raw[i] != ' '; ++i) {
+            if (raw[i] == '.') { impl.push_back(part); part.clear(); }
+            else part.push_back(raw[i]);
+        }
+        impl.push_back(part);
+    }
+    std::string major_minor;
+    for (size_t i = fb + 9; i < raw.size() && raw[i] != ' '; ++i) {
+        major_minor.push_back(raw[i]);
+    }
+    if (impl.size() != 4 || major_minor.empty()) {
+        return raw;
+    }
+    return major_minor + "." + impl[2] + "." + impl[3];
+}
+
+int64_t FirebirdConnection::MaxInlineBlobSize() {
+    char items[] = {static_cast<char>(fb_info_max_inline_blob_size), isc_info_end};
+    char buf[32] = {};
+    ISC_STATUS status[20] = {};
+    isc_database_info(status, &db_, static_cast<short>(sizeof(items)), items,
+                      static_cast<short>(sizeof(buf)), buf);
+    if (NoteStatus(status)) {
+        return -1;
+    }
+    // Reply: item, 2-byte LE length, LE value. An older client answers
+    // isc_info_error for the item instead.
+    if (static_cast<unsigned char>(buf[0]) != fb_info_max_inline_blob_size) {
+        return -1;
+    }
+    const unsigned len = static_cast<unsigned char>(buf[1]) |
+                         (static_cast<unsigned>(static_cast<unsigned char>(buf[2])) << 8);
+    if (len == 0 || len > 4) {
+        return -1;
+    }
+    int64_t value = 0;
+    for (unsigned i = 0; i < len; ++i) {
+        value |= static_cast<int64_t>(static_cast<unsigned char>(buf[3 + i])) << (8 * i);
+    }
+    return value;
+}
+
 // --- DPB / TPB helpers -------------------------------------------------------
 
 // Firebird 4+ DPB item; FB_SDK_ROOT may point at an older SDK without it.
@@ -491,6 +572,17 @@ void FirebirdConnection::Attach() {
             static_cast<ISC_LONG>(info_.dummy_packet_interval_secs);
         for (size_t shift = 0; shift < sizeof(ISC_LONG); ++shift) {
             dpb.push_back(static_cast<char>((secs >> (shift * 8)) & 0xFF));
+        }
+    }
+
+    if (info_.max_inline_blob_size >= 0) {
+        // Inline blobs (Firebird 5.0.3+): numeric DPB item, 4-byte LE.
+        // Not sent at the default -1, keeping the historical attach.
+        dpb.push_back(static_cast<char>(isc_dpb_max_inline_blob_size));
+        dpb.push_back(4);
+        const ISC_LONG bytes = static_cast<ISC_LONG>(info_.max_inline_blob_size);
+        for (size_t shift = 0; shift < sizeof(ISC_LONG); ++shift) {
+            dpb.push_back(static_cast<char>((bytes >> (shift * 8)) & 0xFF));
         }
     }
 

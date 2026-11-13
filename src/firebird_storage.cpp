@@ -1005,6 +1005,11 @@ FirebirdAttach(optional_ptr<StorageExtensionInfo> /*info*/,
     conn.dummy_packet_interval_secs =
         ReadPoolInt64Setting(context, "firebird_dummy_packet_interval", 0);
     ValidateDummyPacketInterval(conn.dummy_packet_interval_secs);
+    // Inline blobs: same lifecycle as the keepalive (a later SET does not
+    // retune an existing attachment).
+    conn.max_inline_blob_size =
+        ReadPoolInt64Setting(context, "firebird_max_inline_blob_size", -1);
+    ValidateMaxInlineBlobSize(conn.max_inline_blob_size);
     auto pool_config = BuildPoolConfig(context);
     return make_uniq<FirebirdCatalog>(db, std::move(conn), none_encoding,
                                       none_pushdown, numeric_widen_int64,

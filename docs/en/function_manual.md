@@ -1041,7 +1041,7 @@ SELECT *
 FROM firebird_health('fb');
 ```
 
-Output columns (15):
+Output columns (18):
 
 | Column | Type | Description |
 | --- | --- | --- |
@@ -1060,6 +1060,9 @@ Output columns (15):
 | `oat_gap` | BIGINT | `next_transaction - oldest_active` |
 | `attachments` | INTEGER | Number of connections visible to the current user |
 | `warnings` | LIST(VARCHAR) | Active warning codes (empty when everything is healthy) |
+| `client_version` | VARCHAR | Version of the loaded Firebird client library, e.g. `'5.0.3.1683'` |
+| `inline_blob_size` | INTEGER | Largest blob, in bytes, that Firebird sends inline with its row on this attachment (`0` = inlining disabled); `NULL` when the client or the server is older than 5.0.3, and for local (XNET) and embedded attachments, where the server does not inline blobs. See [`firebird_max_inline_blob_size`](#set-firebird_max_inline_blob_size--bytes) |
+| `network_protocol` | VARCHAR | Transport of this attachment: `'TCPv4'`, `'TCPv6'`, `'XNET'` (Windows local), `'WNET'` (Firebird 3/4 named pipes); `NULL` when embedded |
 
 Warning codes:
 
@@ -1071,6 +1074,7 @@ Warning codes:
 | `forced_writes_off` | `forced_writes = false` |
 | `charset_none` | `default_charset = 'NONE'` |
 | `mon_unavailable` | Real monitoring-query failure |
+| `inline_blobs_unavailable` | A TCP attachment to a 5.0.3+ server through a client library older than 5.0.3, so blobs are not inlined (load a 5.0.3+ `fbclient`) |
 
 The first four codes (`oit_gap_high`, `oat_gap_high`, `sweep_disabled`,
 `forced_writes_off`) are evaluated only when the monitoring read succeeds; if
@@ -1200,6 +1204,41 @@ and the server-side `DummyPacketInterval` configuration is what
 actually schedules dummy packets. Setting it here is still the correct
 client-side ask and is harmless on servers that ignore it; the
 error-context message (below) is the reliable half of the diagnosis.
+
+### `SET firebird_max_inline_blob_size = BYTES`
+
+Inline blobs (Firebird 5.0.3+). When both the loaded client library and
+the server are 5.0.3 or later, Firebird sends blobs up to this size
+together with the row that references them. Reading them then needs no
+extra round trips, which is several times faster for tables with many
+small blobs (about 12× for 200,000 small text blobs over TCP in our
+measurement). The extension sends the value as
+`isc_dpb_max_inline_blob_size` on every connection it opens.
+
+- **Default `-1`**: nothing is sent and the client's own default applies,
+  which is 65,535 bytes for a 5.0.3+ client. **Inlining is therefore
+  already on by default** on TCP attachments whenever client and server
+  are both 5.0.3+.
+- `0` disables inlining; `1..65535` sets the limit. Values outside
+  `-1..65535` are rejected (Firebird caps the size at 65,535).
+- Read at `firebird_scan()` bind time and at `ATTACH` time, like
+  `firebird_dummy_packet_interval`. For an existing attachment a later
+  `SET` does not apply.
+- Older clients and servers ignore the setting.
+- **Check what is in effect** with `firebird_health(alias)`:
+  `inline_blob_size` shows the effective limit, or `NULL` when either side
+  is older than 5.0.3 or the attachment is local (XNET) or embedded: the
+  server inlines blobs only over TCP (see `network_protocol`). The warning
+  `inline_blobs_unavailable` flags the fixable case, a 5.0.3+ server
+  reached over TCP through an older `fbclient`.
+
+```sql
+ATTACH 'firebird://srv:/data/erp.fdb' AS erp (TYPE firebird);
+SELECT client_version, engine_version, inline_blob_size, warnings
+FROM firebird_health('erp');
+
+SET firebird_max_inline_blob_size = 0;   -- disable for new connections
+```
 
 ## Type mapping notes
 

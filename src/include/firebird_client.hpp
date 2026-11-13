@@ -58,6 +58,13 @@ struct FirebirdConnectionInfo {
     // connections, metadata leases, schema/table catalog entries and
     // scanner connections all attach through FirebirdConnection::Attach().
     int64_t dummy_packet_interval_secs = 0;
+    // Inline blobs (Firebird 5.0.3+ client and server): blobs up to this
+    // many bytes travel with the row instead of needing their own
+    // round trips. Sent as isc_dpb_max_inline_blob_size. -1 (default) =
+    // the DPB item is NOT sent and the client's own default applies
+    // (65535 for a 5.0.3+ client); 0 disables inlining. Older clients
+    // and servers ignore the item.
+    int64_t max_inline_blob_size = -1;
     // v1.2.1 — NONE-charset preferences parsed straight from the
     // connection string (URI query `?none_encoding=...&none_pushdown=...`
     // or key=value `;none_encoding=...;none_pushdown=...`). Empty string /
@@ -75,6 +82,12 @@ struct FirebirdConnectionInfo {
 // payload range. Shared by the firebird_scan() bind path and the
 // ATTACH path so both reject identical values with identical text.
 void ValidateDummyPacketInterval(int64_t seconds);
+// firebird_max_inline_blob_size: -1 (not sent) or 0..65535 bytes.
+void ValidateMaxInlineBlobSize(int64_t bytes);
+// Version of the loaded Firebird client library, normalized from
+// isc_get_client_version()'s "WI-V6.3.3.1683 Firebird 5.0" form to
+// "5.0.3.1683". Falls back to the raw string when it can't be parsed.
+std::string FirebirdClientVersion();
 
 // Throws a BinderException if `charset` would deliver bytes DuckDB's
 // UTF-8-only string vectors can't ingest. UTF8, UTF-8, NONE, OCTETS pass;
@@ -379,6 +392,13 @@ public:
     // Firebird attachment id and is only meant to correlate
     // extension-side pool reuse.
     int64_t Id() const { return id_; }
+
+    // fb_info_max_inline_blob_size for this attachment, or -1 when it is
+    // not answered (client older than 5.0.3, or an embedded attachment).
+    // NOTE: a 5.0.3+ client answers it locally, so against an older server
+    // or over XNET it reports its configured size although nothing is
+    // inlined; callers must also check the server version and the transport.
+    int64_t MaxInlineBlobSize();
 
     // Convenience: prepare+execute a SELECT and return an open cursor.
     std::unique_ptr<FirebirdStatement> OpenCursor(const std::string &sql);
