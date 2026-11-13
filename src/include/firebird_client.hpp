@@ -383,6 +383,27 @@ public:
     std::unique_ptr<FirebirdStatement> OpenCursor(const std::string &sql,
                                                   const std::vector<Value> &params);
 
+    // --- Shared snapshot for partitioned scans -----------------------------
+    //
+    // Swap the connection's default read-committed transaction for a
+    // read-only SNAPSHOT (isc_tpb_concurrency) one. With a non-zero
+    // at_snapshot_number the new transaction joins that existing snapshot
+    // (isc_tpb_at_snapshot_number, Firebird 4+), so several attachments
+    // see the database in exactly one state.
+    //
+    // Never throws for a server or client that cannot do it: on any error
+    // the connection is put back on a fresh read-committed transaction
+    // and false is returned. Must not be called with an open cursor.
+    bool TryStartSnapshotTransaction(int64_t at_snapshot_number = 0);
+    // fb_info_tra_snapshot_number of the current transaction; 0 when the
+    // server does not report one (Firebird 3, or not a snapshot).
+    int64_t SnapshotNumber();
+    // Return to the default read-committed transaction if a snapshot
+    // transaction is active. Pooled connections must be in this state
+    // before Release().
+    void RestoreDefaultTransaction();
+    bool InSnapshotTransaction() const { return in_snapshot_; }
+
     // Throws an IOException carrying isc_interprete'd messages, if status is
     // an error vector.
     static void Check(const ISC_STATUS *status, const std::string &context);
@@ -392,6 +413,7 @@ private:
     isc_db_handle db_ = 0;
     isc_tr_handle tr_ = 0;
     int64_t id_ = 0;
+    bool in_snapshot_ = false;
 
     void Attach();
     void StartReadOnlyTransaction();

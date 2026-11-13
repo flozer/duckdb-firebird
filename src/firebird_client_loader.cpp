@@ -81,6 +81,7 @@ static void BindSymbols(FirebirdClientApi &api,
     BIND(isc_detach_database);
     BIND(isc_start_transaction);
     BIND(isc_rollback_transaction);
+    BIND(isc_transaction_info);
     BIND(isc_dsql_allocate_statement);
     BIND(isc_dsql_prepare);
     BIND(isc_dsql_describe);

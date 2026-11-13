@@ -1,0 +1,130 @@
+# name: test/sql/firebird_shared_snapshot.test
+# description: Shared snapshot for partitioned scans. A scan split into
+#              partitions reads one Firebird snapshot (Firebird 4+:
+#              isc_tpb_at_snapshot_number) and reports it as
+#              snapshot_mode = 'shared' in firebird_last_query() and
+#              firebird_query_log(); on Firebird 3 it falls back to
+#              independent read-committed transactions ('independent');
+#              a single-partition scan reports 'serial'. Results are
+#              identical in every mode.
+#              The consistency guarantee itself (no partition sees a commit
+#              made during the scan) needs a concurrent writer, which
+#              sqllogictest cannot interleave: see
+#              scripts/check_shared_snapshot.sh, run per Firebird version
+#              in the Linux FB matrix.
+# group: [firebird]
+#
+# Requires the PART_RANGE / PART_NO_LEVER fixture from
+# scripts/fixture_partitions.sql (FIREBIRD_PARTITIONS_DB). Runs on all
+# Firebird 3/4/5 matrix legs; the expected mode is derived from the
+# server's engine_version.
+
+require firebird
+
+require-env FIREBIRD_PARTITIONS_DB
+
+require-env ISC_PASSWORD
+
+statement ok
+SET firebird_query_log_size = 10;
+
+statement ok
+ATTACH '${FIREBIRD_PARTITIONS_DB}' AS fbp (TYPE firebird);
+
+# 'shared' on Firebird 4+, 'independent' on Firebird 3.
+statement ok
+CREATE OR REPLACE TABLE expected AS
+SELECT CASE WHEN CAST(split_part(engine_version, '.', 1) AS INTEGER) >= 4
+            THEN 'shared' ELSE 'independent' END AS mode
+FROM firebird_health('fbp');
+
+# ---------------------------------------------------------------------------
+#  firebird_scan(): explicit partitions=4
+# ---------------------------------------------------------------------------
+
+query II
+SELECT COUNT(*), SUM(ID)
+FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_RANGE', partitions=4);
+----
+300	1794000000
+
+query TII
+SELECT l.snapshot_mode = e.mode, l.parallel_scan, l.partitions
+FROM firebird_last_query() l, expected e;
+----
+true	true	4
+
+# The query log carries the same column (shared telemetry schema): every
+# partition cursor of that scan was logged with the same mode.
+query I
+SELECT COUNT(*) FROM (
+  SELECT * FROM firebird_query_log() LIMIT 4
+) q, expected e
+WHERE q.snapshot_mode = e.mode;
+----
+4
+
+# ---------------------------------------------------------------------------
+#  firebird_scan(): partitions=1 is serial, same result
+# ---------------------------------------------------------------------------
+
+query II
+SELECT COUNT(*), SUM(ID)
+FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_RANGE', partitions=1);
+----
+300	1794000000
+
+query TT
+SELECT snapshot_mode, parallel_scan FROM firebird_last_query();
+----
+serial	false
+
+query T
+SELECT snapshot_mode FROM firebird_query_log() LIMIT 1;
+----
+serial
+
+# ---------------------------------------------------------------------------
+#  ATTACH path: the ~12M PK span is partitioned automatically, and the
+#  workers lease pooled connections. Run it twice so the second scan
+#  reuses connections the first one returned to the pool (they must come
+#  back on their default read-committed transaction, ready to join the
+#  next snapshot).
+# ---------------------------------------------------------------------------
+
+query II
+SELECT COUNT(*), SUM(ID) FROM fbp.main.PART_RANGE;
+----
+300	1794000000
+
+query TT
+SELECT l.snapshot_mode = e.mode, l.parallel_scan
+FROM firebird_last_query() l, expected e;
+----
+true	true
+
+query II
+SELECT COUNT(*), SUM(ID) FROM fbp.main.PART_RANGE;
+----
+300	1794000000
+
+query TTT
+SELECT l.snapshot_mode = e.mode, l.parallel_scan, l.connection_reused
+FROM firebird_last_query() l, expected e;
+----
+true	true	true
+
+# A serial ATTACH scan right after (no PK -> one partition) on a reused
+# pooled connection.
+query I
+SELECT COUNT(*) > 0 FROM fbp.main.PART_NO_LEVER;
+----
+true
+
+query TT
+SELECT snapshot_mode, connection_reused FROM firebird_last_query();
+----
+serial	true
+
+statement ok
+DETACH fbp;

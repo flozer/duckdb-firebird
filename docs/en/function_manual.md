@@ -77,6 +77,32 @@ Supported named parameters include:
 Use this when you need one direct table scan without attaching the whole
 database catalog.
 
+#### Partitioned scans read one snapshot
+
+With `partitions > 1` (or when the ATTACH path partitions a large table on
+its own), every partition is read by its own connection. On Firebird 4 and
+later all of them read **one snapshot** of the database: a coordinating
+connection starts a read-only SNAPSHOT transaction, and each partition
+joins it (`isc_tpb_at_snapshot_number`). A partitioned scan therefore
+returns exactly the rows of one committed state, even while other
+connections commit changes, as a serial scan does.
+
+- The snapshot is held, read-only, until the scan ends, like any Firebird
+  snapshot transaction. On Firebird 4+ with the default
+  `ReadConsistency = 1`, a running read-committed cursor already pins its
+  own statement snapshot for as long as it runs, so garbage collection is
+  held back for about the same time as before.
+- On Firebird 3 (no snapshot numbers), or if the shared snapshot cannot be
+  established, each partition uses its own read-committed transaction, as
+  in earlier versions. Partitions can then see different committed states.
+- Serial scans are unchanged: one connection, one read-committed
+  transaction.
+- `firebird_last_query().snapshot_mode` reports which case applied:
+  `shared`, `independent` or `serial`.
+- A partitioned scan opens one extra attachment (the coordinator) for its
+  duration. It does not come from the ATTACH connection pool, so
+  `firebird_pool_stats()` counters are unaffected.
+
 #### Pagination determinism (`RDB$DB_KEY`)
 
 When paginating (`row_limit`/`row_offset`) against a table or view with no
@@ -644,10 +670,11 @@ Useful fields include:
 - elapsed time
 - rows read
 - estimated bytes read from Firebird (`bytes_read_estimate`)
-- parallel scan details
+- parallel scan details, including whether the partitions shared one
+  snapshot (`snapshot_mode`)
 - connection reuse details
 
-The schema is 19 columns (shared with `firebird_query_log()`). The
+The schema is 20 columns (shared with `firebird_query_log()`). The
 pushdown-explainability columns (`limit_pushed`, `offset_pushed`,
 `not_pushed_reasons`) make it explicit what reached Firebird and why a
 filter stayed local, and `bytes_read_estimate` (added last, G5) supports
@@ -811,7 +838,7 @@ FROM firebird_explain_pushdown(
 
 Returns the in-memory query log for the current DuckDB session.
 
-Each row carries the same 19-column telemetry schema as
+Each row carries the same 20-column telemetry schema as
 `firebird_last_query()` — including `bytes_read_estimate`, so a rotated
 log keeps the per-query transfer estimates of the session.
 
