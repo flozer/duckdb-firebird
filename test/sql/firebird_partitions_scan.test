@@ -83,6 +83,50 @@ FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_RANGE', partitions=1);
 300	1794000000
 
 # ---------------------------------------------------------------------------
+#  Outer partitions are open-ended (#93): the PK bounds are a MIN/MAX probe
+#  taken before the scan (cached for the life of an ATTACH), so rows
+#  committed after it may lie outside them. The first partition therefore
+#  has no lower bound and the last no upper bound; only inner partitions
+#  are closed ranges. A single-partition scan carries no range at all.
+# ---------------------------------------------------------------------------
+
+statement ok
+SET firebird_query_log_size = 10;
+
+query II
+SELECT COUNT(*), SUM(ID)
+FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_RANGE', partitions=4);
+----
+300	1794000000
+
+# The 4 partition cursors of that scan (most recent first): one with only an
+# upper bound, one with only a lower bound, two closed inner ranges.
+query III
+SELECT count(*) FILTER (WHERE remote_sql LIKE '%<=%' AND remote_sql NOT LIKE '%>=%'),
+       count(*) FILTER (WHERE remote_sql LIKE '%>=%' AND remote_sql NOT LIKE '%<=%'),
+       count(*) FILTER (WHERE remote_sql LIKE '%>=%' AND remote_sql LIKE '%<=%')
+FROM (SELECT remote_sql FROM firebird_query_log() LIMIT 4);
+----
+1	1	2
+
+# A single-partition scan that still probes the PK: row_limit forces one
+# partition but keeps the probe (for its ORDER BY). Before #93 this cursor
+# carried the closed range "ID >= min AND ID <= max".
+query I
+SELECT COUNT(*)
+FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_RANGE', row_limit=5);
+----
+5
+
+query I
+SELECT remote_sql LIKE '%WHERE%' FROM firebird_last_query();
+----
+false
+
+statement ok
+SET firebird_query_log_size = 0;
+
+# ---------------------------------------------------------------------------
 #  No-lever table (F1's materialize case): no PK, no index, and no
 #  numeric/date column at all -> HIGH risk, no estimate, and the
 #  materialize recommendation instead of a filter recommendation.

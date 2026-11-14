@@ -591,7 +591,8 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
     //    silently *forced* to serial. The user wrote
     //    `firebird_scan(..., row_limit=100)` (which used to work in
     //    v0.4) and expects 100 rows; we honour that by collapsing
-    //    partitions to 1 internally and skipping the PK probe below.
+    //    partitions to 1 internally (the PK probe below still runs,
+    //    for the ORDER BY of the ROWS pushdown).
     //    This preserves the v0.4 contract without giving up
     //    correctness — paging via the auto-partition heuristic on a
     //    large table would otherwise over-fetch silently.
@@ -608,7 +609,7 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
     }
     if (paging) {
         // Force serial — the partition queue below will get exactly
-        // one entry, the PK probe is skipped, and the builder emits
+        // one entry (with no range predicate), and the builder emits
         // one ROWS m TO n statement.
         bind->partitions_override = 1;
     }
@@ -765,9 +766,22 @@ static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
             int64_t part_hi = (i == n - 1)
                 ? hi
                 : lo + static_cast<int64_t>(width * (i + 1)) - 1;
+            // The outer partitions are open-ended: the first has no lower
+            // bound, the last no upper bound. lo/hi are a MIN/MAX probe
+            // taken before the scan (and cached for the life of an ATTACH),
+            // so rows committed since then may lie outside [lo, hi]; with
+            // closed outer ranges they belonged to no partition and were
+            // silently skipped (#93). Stale bounds now only affect balance.
             PartitionSpec spec;
-            spec.where_clause = pk + " >= " + std::to_string(part_lo) +
-                                " AND " + pk + " <= " + std::to_string(part_hi);
+            if (i > 0) {
+                spec.where_clause = pk + " >= " + std::to_string(part_lo);
+            }
+            if (i < n - 1) {
+                if (!spec.where_clause.empty()) {
+                    spec.where_clause += " AND ";
+                }
+                spec.where_clause += pk + " <= " + std::to_string(part_hi);
+            }
             gstate->partitions.push_back(std::move(spec));
         }
         gstate->max_threads = n;

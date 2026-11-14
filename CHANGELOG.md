@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Scans of a table with a single-column integer primary key no longer skip
+  rows whose key lies outside the `MIN`/`MAX` probed before the scan (#93).
+  On the ATTACH path the bounds are probed the first time a query references
+  a table and then cached, so every row inserted afterwards with a key above
+  the cached `MAX` or below the cached `MIN` was silently missing from every
+  later scan of that table, partitioned or not, including filtered ones,
+  until the database was re-attached. The first partition now has no lower
+  bound and the last no upper bound; a single-partition scan sends no range
+  predicate at all.
+
 ## [v1.3.1] - 2026-10-26
 
 Patch release completing DuckDB v2.0 compatibility. No SQL functions,
