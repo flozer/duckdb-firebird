@@ -12,7 +12,7 @@
 #   FIREBIRD_PARTITIONS_DB  connection string of the partitions fixture database
 #   FB_ISQL                 command that runs isql against that same database and
 #                           reads SQL from stdin, e.g.
-#                           "docker exec -i fb isql -u SYSDBA -p masterkey /var/lib/firebird/data/partitions.fdb"
+#                           "docker exec -i fb isql -q -u SYSDBA -p masterkey localhost:/var/lib/firebird/data/partitions.fdb"
 #
 # The table PART_GROWTH is created at the start and dropped at the end.
 # Rows 0, 40000, ..., 11960000 (300 rows) span ~12M keys, so the ATTACH scan
