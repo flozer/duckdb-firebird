@@ -591,7 +591,8 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
     //    silently *forced* to serial. The user wrote
     //    `firebird_scan(..., row_limit=100)` (which used to work in
     //    v0.4) and expects 100 rows; we honour that by collapsing
-    //    partitions to 1 internally and skipping the PK probe below.
+    //    partitions to 1 internally (the PK probe below still runs,
+    //    for the ORDER BY of the ROWS pushdown).
     //    This preserves the v0.4 contract without giving up
     //    correctness — paging via the auto-partition heuristic on a
     //    large table would otherwise over-fetch silently.
@@ -608,7 +609,7 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
     }
     if (paging) {
         // Force serial — the partition queue below will get exactly
-        // one entry, the PK probe is skipped, and the builder emits
+        // one entry (with no range predicate), and the builder emits
         // one ROWS m TO n statement.
         bind->partitions_override = 1;
     }

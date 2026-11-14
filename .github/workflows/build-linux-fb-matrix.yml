@@ -301,14 +301,6 @@ jobs:
           # self-skips on FB3 via its require-env gate.
           ./build/release/test/unittest test/sql/firebird_decfloat.test
 
-      - name: ATTACH cached PK bounds regression (#93)
-        # One CLI session: scan an ATTACHed table (caches its PK bounds),
-        # insert rows outside them from isql via `.shell`, scan again.
-        # sqllogictest can't do this: the extension never writes.
-        env:
-          FB_ISQL: docker exec -i fb isql -q -bail -u SYSDBA -p masterkey localhost:/var/lib/firebird/data/partitions.fdb
-        run: bash test/cli/attach_cached_bounds.sh
-
       - name: FB4+ live type smoke (INT128 / DECIMAL(38) / TIMESTAMP_TZ)
         if: matrix.fb_major != '3'
         env:
@@ -332,6 +324,18 @@ jobs:
            LIMIT 1;
           EOF
           ./build/release/test/unittest test/sql/firebird_type_audit_fb4.test
+
+      - name: ATTACH cached PK bounds regression (#93)
+        env:
+          ISC_USER: SYSDBA
+          ISC_PASSWORD: masterkey
+        run: |
+          # sqllogictest can't insert rows mid-session (the extension never
+          # writes), so this script scans ATTACHed tables (caching their PK
+          # bounds), inserts rows outside them from isql via `.shell`, and
+          # checks that later scans in the same session read them, both
+          # partitioned and single-partition. All FB versions.
+          bash scripts/check_attach_cached_bounds.sh
 
       - name: Stop Firebird container
         if: always()
