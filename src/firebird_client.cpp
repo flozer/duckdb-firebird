@@ -464,8 +464,7 @@ void FirebirdConnection::Attach() {
         // Numeric DPB item: 1-byte length tag + 4-byte little-endian ISC_LONG,
         // the canonical encoding for Firebird's numeric DPB parameters.
         // Unit is seconds (same unit as DummyPacketInterval in firebird.conf).
-        // Default 0 leaves the DPB byte-for-byte identical to the historical
-        // attach — the item is simply never appended.
+        // Default 0 leaves this item out of the DPB entirely.
         dpb.push_back(isc_dpb_dummy_packet_interval);
         dpb.push_back(4);
         const ISC_LONG secs =

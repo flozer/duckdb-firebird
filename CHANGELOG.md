@@ -6,10 +6,10 @@
 
 - Read `INT128`, `NUMERIC(19+)`, `DECFLOAT`, `TIMESTAMP`/`TIME WITH TIME ZONE`
   and `BOOLEAN` correctly from servers with `DataTypeCompatibility = 3.0`
-  or `2.5`. Before, `INT128` and `BOOLEAN` hit a DuckDB internal assertion
-  that invalidated the session, and the time zone types came back shifted
-  or garbled without an error. The extension now asks for the native types
-  on every attachment (`isc_dpb_set_bind`).
+  or `2.5`. Before, `INT128` and `BOOLEAN` raised a DuckDB `INTERNAL Error`,
+  which invalidates the database instance, and the time zone types came
+  back shifted or garbled without an error. The extension now asks for the
+  native types on every attachment (`isc_dpb_set_bind`).
 
 ## [v1.3.1] - 2026-10-26
 

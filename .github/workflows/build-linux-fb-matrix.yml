@@ -155,6 +155,13 @@ jobs:
             printf "%s\n" "CREATE DATABASE 'localhost:compat25' DEFAULT CHARACTER SET UTF8;" \
               | docker exec -i fb bash -c "isql -u SYSDBA -p masterkey"
             docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_type_compat.sql localhost:compat25
+            # The alias must really be in legacy mode (BOOLEAN described as
+            # CHAR(5) = sqltype 452 TEXT), or firebird_type_compat.test would
+            # pass without the extension's fix.
+            printf "%s\n" "SET SQLDA_DISPLAY ON;" "SELECT FLAG FROM TYPE_COMPAT WHERE ID = 1;" \
+              | docker exec -i fb isql -u SYSDBA -p masterkey localhost:compat25 | tee /tmp/compat25-sqlda.txt
+            grep -q "sqltype: 452 TEXT" /tmp/compat25-sqlda.txt \
+              || { echo "compat25 is not in DataTypeCompatibility = 2.5 mode"; exit 1; }
           fi
 
           # Suite tests connect over TCP — expose the URL form.

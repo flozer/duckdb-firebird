@@ -1955,8 +1955,8 @@ envia `BOOLEAN` como `CHAR(5)`. A extensao obtem os tipos das colunas dos
 metadados declarados (`RDB$FIELDS`), entao pede os tipos nativos em toda
 conexao (`isc_dpb_set_bind` com regras `... TO NATIVE`). Isso sobrepoe a
 configuracao do servidor apenas nas conexoes da propria extensao; outras
-aplicacoes continuam recebendo a forma legada. O Firebird 3 nao tem esses
-tipos e ignora o pedido.
+aplicacoes continuam recebendo a forma legada. O Firebird 3 nao tem essa
+configuracao e ignora o pedido.
 
 ### `NUMERIC(18,s)` / `DECIMAL(18,s)` — o dominio do int64 escalado
 

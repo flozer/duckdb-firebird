@@ -1142,8 +1142,8 @@ in `databases.conf`) sends `INT128` as `BIGINT`, `DECFLOAT` as
 from the declared metadata (`RDB$FIELDS`), so it asks for the native types
 on every attachment (`isc_dpb_set_bind` with `... TO NATIVE` rules). This
 overrides the server setting for the extension's own attachments only;
-other applications keep the legacy form. Firebird 3 has none of these
-types and ignores the request.
+other applications keep the legacy form. Firebird 3 has no such setting
+and ignores the request.
 
 ### `NUMERIC(18,s)` / `DECIMAL(18,s)` — the int64 scaled-integer domain
 
