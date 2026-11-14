@@ -301,6 +301,14 @@ jobs:
           # self-skips on FB3 via its require-env gate.
           ./build/release/test/unittest test/sql/firebird_decfloat.test
 
+      - name: ATTACH cached PK bounds regression (#93)
+        # One CLI session: scan an ATTACHed table (caches its PK bounds),
+        # insert rows outside them from isql via `.shell`, scan again.
+        # sqllogictest can't do this: the extension never writes.
+        env:
+          FB_ISQL: docker exec -i fb isql -q -u SYSDBA -p masterkey localhost:/var/lib/firebird/data/partitions.fdb
+        run: bash test/cli/attach_cached_bounds.sh
+
       - name: FB4+ live type smoke (INT128 / DECIMAL(38) / TIMESTAMP_TZ)
         if: matrix.fb_major != '3'
         env:
