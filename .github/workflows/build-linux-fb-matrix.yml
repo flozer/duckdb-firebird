@@ -143,6 +143,20 @@ jobs:
             | docker exec -i fb bash -c "isql -u SYSDBA -p masterkey"
           docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_numerics.sql /var/lib/firebird/data/numerics.fdb
 
+          # DataTypeCompatibility fixture (FB4+): its own database, opened
+          # through a databases.conf alias with DataTypeCompatibility = 2.5,
+          # so the server describes INT128 / DECFLOAT / WITH TIME ZONE /
+          # BOOLEAN in their legacy form unless the client asks for the
+          # native types (isc_dpb_set_bind). databases.conf is re-read on
+          # attach, so the running server picks the alias up.
+          if [ "${{ matrix.fb_major }}" != "3" ]; then
+            docker exec fb bash -c "printf '%s\n' '' 'compat25 = /var/lib/firebird/data/compat25.fdb' '{' '    DataTypeCompatibility = 2.5' '}' >> /opt/firebird/databases.conf"
+            docker cp scripts/fixture_type_compat.sql fb:/tmp/fixture_type_compat.sql
+            printf "%s\n" "CREATE DATABASE 'localhost:compat25' DEFAULT CHARACTER SET UTF8;" \
+              | docker exec -i fb bash -c "isql -u SYSDBA -p masterkey"
+            docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_type_compat.sql localhost:compat25
+          fi
+
           # Suite tests connect over TCP — expose the URL form.
           echo "FIREBIRD_TEST_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/test.fdb?charset=UTF8" >> $GITHUB_ENV
           # charset=NONE (not UTF8/WIN1252/etc) -- ValidateClientCharset
@@ -164,6 +178,8 @@ jobs:
           # require-env gate.
           if [ "${{ matrix.fb_major }}" != "3" ]; then
             echo "FIREBIRD_DECFLOAT_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/biz4.fdb?charset=UTF8" >> $GITHUB_ENV
+            # An alias needs the key=value form (the URL form keeps a leading '/').
+            echo "FIREBIRD_TYPE_COMPAT_DB=user=SYSDBA;password=masterkey;database=localhost/3050:compat25;charset=UTF8" >> $GITHUB_ENV
           fi
 
       - name: Extract matching libfbclient from the fb${{ matrix.fb_major }} container
@@ -300,6 +316,9 @@ jobs:
           # wherever FIREBIRD_DECFLOAT_DB is exported (FB4/FB5 legs);
           # self-skips on FB3 via its require-env gate.
           ./build/release/test/unittest test/sql/firebird_decfloat.test
+          # DataTypeCompatibility guard: FB4/FB5 legs (FIREBIRD_TYPE_COMPAT_DB
+          # exported above); self-skips on FB3.
+          ./build/release/test/unittest test/sql/firebird_type_compat.test
 
       - name: FB4+ live type smoke (INT128 / DECIMAL(38) / TIMESTAMP_TZ)
         if: matrix.fb_major != '3'

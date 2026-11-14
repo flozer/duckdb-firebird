@@ -65,6 +65,7 @@ $testFixtureVar = @{
     'firebird_dbt_sources.test'        = 'FIREBIRD_TEST_DB'
     'firebird_metadata_bridge.test'    = 'FIREBIRD_TEST_DB'
     'firebird_decfloat.test'           = 'FIREBIRD_DECFLOAT_DB'
+    'firebird_type_compat.test'        = 'FIREBIRD_TYPE_COMPAT_DB'
     'firebird_none_charset.test'       = 'FIREBIRD_NONE_DB'
     'firebird_partitions_scan.test'    = 'FIREBIRD_PARTITIONS_DB'
     'firebird_unpushed_mode.test'      = 'FIREBIRD_NONE_DB'

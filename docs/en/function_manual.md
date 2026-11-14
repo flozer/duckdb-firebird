@@ -1132,6 +1132,19 @@ One known, tracked exception to this policy exists today:
 `isc_segstr_eof`, the only real end-of-blob signal, instead of
 incorrectly stopping on the first `rc == 0`.)
 
+### Servers with `DataTypeCompatibility`
+
+A Firebird 4+ server can describe newer types to clients in their legacy
+form: `DataTypeCompatibility = 3.0` (in `firebird.conf` or per database
+in `databases.conf`) sends `INT128` as `BIGINT`, `DECFLOAT` as
+`DOUBLE PRECISION` and the `WITH TIME ZONE` types without their zone;
+`2.5` also sends `BOOLEAN` as `CHAR(5)`. The extension takes column types
+from the declared metadata (`RDB$FIELDS`), so it asks for the native types
+on every attachment (`isc_dpb_set_bind` with `... TO NATIVE` rules). This
+overrides the server setting for the extension's own attachments only;
+other applications keep the legacy form. Firebird 3 has none of these
+types and ignores the request.
+
 ### `NUMERIC(18,s)` / `DECIMAL(18,s)` — the int64 scaled-integer domain
 
 Firebird stores dialect-3 `NUMERIC`/`DECIMAL` with precision 10–18 as a
