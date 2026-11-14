@@ -10,6 +10,12 @@
   which invalidates the database instance, and the time zone types came
   back shifted or garbled without an error. The extension now asks for the
   native types on every attachment (`isc_dpb_set_bind`).
+- Windows: loading the client library from a path
+  (`DUCKDB_FIREBIRD_CLIENT_LIBRARY`) now resolves its dependent DLLs from
+  the library's own folder first (`LOAD_WITH_ALTERED_SEARCH_PATH`). A
+  Firebird 3 `fbclient.dll` (which ships `msvcr100.dll`, `zlib1.dll` and
+  ICU next to it) failed with "The specified module could not be found"
+  unless its folder was also on `PATH`.
 
 ## [v1.3.1] - 2026-10-26
 

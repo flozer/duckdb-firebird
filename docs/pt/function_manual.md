@@ -32,7 +32,10 @@ Quando a biblioteca esta em caminho nao-padrao, defina
 `DUCKDB_FIREBIRD_CLIENT_LIBRARY` com o caminho absoluto antes da
 primeira chamada `firebird_*`. O override e autoritativo: se o caminho
 nao puder ser carregado, a extensao levanta um erro claro em vez de
-cair em fallback silencioso.
+cair em fallback silencioso. No Windows, as DLLs de que o proprio
+`fbclient.dll` precisa (no Firebird 3: `msvcr100.dll`, `zlib1.dll`, ICU)
+sao procuradas primeiro na pasta da propria biblioteca, entao basta
+apontar a variavel para uma instalacao ou kit portatil do Firebird.
 
 Mensagem de erro quando nenhum cliente esta acessivel:
 
