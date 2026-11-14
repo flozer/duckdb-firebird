@@ -306,7 +306,7 @@ jobs:
         # insert rows outside them from isql via `.shell`, scan again.
         # sqllogictest can't do this: the extension never writes.
         env:
-          FB_ISQL: docker exec -i fb isql -q -u SYSDBA -p masterkey localhost:/var/lib/firebird/data/partitions.fdb
+          FB_ISQL: docker exec -i fb isql -q -bail -u SYSDBA -p masterkey localhost:/var/lib/firebird/data/partitions.fdb
         run: bash test/cli/attach_cached_bounds.sh
 
       - name: FB4+ live type smoke (INT128 / DECIMAL(38) / TIMESTAMP_TZ)

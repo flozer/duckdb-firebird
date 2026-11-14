@@ -109,11 +109,14 @@ FROM (SELECT remote_sql FROM firebird_query_log() LIMIT 4);
 ----
 1	1	2
 
+# A single-partition scan that still probes the PK: row_limit forces one
+# partition but keeps the probe (for its ORDER BY). Before #93 this cursor
+# carried the closed range "ID >= min AND ID <= max".
 query I
 SELECT COUNT(*)
-FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_RANGE', partitions=1);
+FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_RANGE', row_limit=5);
 ----
-300
+5
 
 query I
 SELECT remote_sql LIKE '%WHERE%' FROM firebird_last_query();
