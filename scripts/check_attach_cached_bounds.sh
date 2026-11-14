@@ -135,7 +135,7 @@ SELECT CASE WHEN n = ${after} THEN '${t} count after insert: ok'
 FROM (SELECT count(*) AS n FROM fbg.${t});
 SELECT CASE WHEN ${cursors} THEN '${t} cursors: ok (' || n || ')'
             ELSE error('${t} cursors: expected ${cursors}, got ' || n) END
-FROM (SELECT count(*) AS n FROM firebird_query_log() WHERE remote_sql LIKE '%"${t}"%');
+FROM (SELECT count(*) AS n FROM firebird_query_log() WHERE table_name = '${t}');
 SET firebird_query_log_size = 0;
 
 SELECT CASE WHEN n = 1 THEN '${t} key ${hi} above cached MAX: ok'
