@@ -270,6 +270,12 @@ void ValidateDummyPacketInterval(int64_t seconds) {
 
 // --- DPB / TPB helpers -------------------------------------------------------
 
+// Firebird 4+ DPB item; FB_SDK_ROOT may point at an older SDK without it.
+// The value is part of the public API (consts_pub.h) and never changes.
+#ifndef isc_dpb_set_bind
+#define isc_dpb_set_bind 93
+#endif
+
 static void DpbAppend(std::vector<char> &dpb, char tag, const std::string &val) {
     dpb.push_back(tag);
     dpb.push_back(static_cast<char>(val.size()));
@@ -444,13 +450,21 @@ void FirebirdConnection::Attach() {
         dpb.push_back(1);
         dpb.push_back(static_cast<char>(info_.dialect));
     }
+    // Always ask for the native data types. The scanner binds DuckDB types
+    // from RDB$FIELDS, so the rows must arrive in exactly those types. A
+    // server with DataTypeCompatibility = 3.0 / 2.5 (firebird.conf or
+    // databases.conf) would otherwise send INT128 as BIGINT, DECFLOAT as
+    // DOUBLE PRECISION, the WITH TIME ZONE types without their zone and
+    // (2.5) BOOLEAN as CHAR(5). Firebird 4+ applies DPB rules over the
+    // .conf setting, for this attachment only; Firebird 3 ignores the item.
+    DpbAppend(dpb, isc_dpb_set_bind,
+              "INT128 TO NATIVE; DECFLOAT TO NATIVE; TIME ZONE TO NATIVE; BOOLEAN TO NATIVE");
     if (info_.dummy_packet_interval_secs > 0) {
         // G4 session stability — per-attachment keepalive (isc_dpb_dummy_packet_interval).
         // Numeric DPB item: 1-byte length tag + 4-byte little-endian ISC_LONG,
         // the canonical encoding for Firebird's numeric DPB parameters.
         // Unit is seconds (same unit as DummyPacketInterval in firebird.conf).
-        // Default 0 leaves the DPB byte-for-byte identical to the historical
-        // attach — the item is simply never appended.
+        // Default 0 leaves this item out of the DPB entirely.
         dpb.push_back(isc_dpb_dummy_packet_interval);
         dpb.push_back(4);
         const ISC_LONG secs =
