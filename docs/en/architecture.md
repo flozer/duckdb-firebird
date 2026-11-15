@@ -102,7 +102,10 @@ in parallel:
    equal numeric width — coarse but cheap). N defaults to a conservative
    pick (one partition for ranges under ~4 M rows, then up to
    `hardware_concurrency`), and is overridable via the named parameter
-   `partitions=`.
+   `partitions=`. The outer partitions are open-ended (the first has no
+   lower bound, the last no upper bound), so rows outside the probed
+   `[min, max]` (committed after the probe, or after an ATTACH cached it)
+   are still read; stale bounds only affect how evenly rows spread.
 3. **Each worker** has its own `FirebirdConnection`, pulls one
    `PartitionSpec` at a time off a mutex-protected queue, opens a cursor
    scoped to that PK window, drains it, then pops the next.

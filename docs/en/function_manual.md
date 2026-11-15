@@ -62,7 +62,10 @@ Supported named parameters include:
 - `filter`
 - `row_limit`
 - `row_offset`
-- `partitions`
+- `partitions` — parallelism over PK ranges: `0` = auto, `1` = serial. The
+  ranges come from a `MIN`/`MAX` probe of the PK; the first partition has no
+  lower bound and the last no upper bound, so rows outside the probed range
+  (committed after the probe, or after an `ATTACH` cached it) are still read.
 - `none_pushdown` — opt-in pushdown of `=` / `IN` over `CHARACTER SET NONE`
   CHAR/VARCHAR columns when `none_encoding` is `win1252` or `iso8859_1`
   (default `false`; see [Charset handling of `CHARACTER SET NONE`
@@ -1161,6 +1164,19 @@ One known, tracked exception to this policy exists today:
 `ReadBlob` — is fixed; `ReadBlob` now keeps reading segments until
 `isc_segstr_eof`, the only real end-of-blob signal, instead of
 incorrectly stopping on the first `rc == 0`.)
+
+### Servers with `DataTypeCompatibility`
+
+A Firebird 4+ server can describe newer types to clients in their legacy
+form: `DataTypeCompatibility = 3.0` (in `firebird.conf` or per database
+in `databases.conf`) sends `INT128` as `BIGINT`, `DECFLOAT` as
+`DOUBLE PRECISION` and the `WITH TIME ZONE` types without their zone;
+`2.5` also sends `BOOLEAN` as `CHAR(5)`. The extension takes column types
+from the declared metadata (`RDB$FIELDS`), so it asks for the native types
+on every attachment (`isc_dpb_set_bind` with `... TO NATIVE` rules). This
+overrides the server setting for the extension's own attachments only;
+other applications keep the legacy form. Firebird 3 has no such setting
+and ignores the request.
 
 ### `NUMERIC(18,s)` / `DECIMAL(18,s)` — the int64 scaled-integer domain
 
