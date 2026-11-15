@@ -568,7 +568,9 @@ bool FirebirdConnection::TryStartSnapshotTransaction(int64_t at_snapshot_number,
         isc_rollback_transaction(status, &tr_);
         if (StatusIsError(status)) {
             if (error) *error = "isc_rollback_transaction: " + StatusText(status);
-            return false;  // still on the old transaction; nothing changed
+            // tr_ keeps the old handle, which may be dead (for example,
+            // the attachment was killed on the server).
+            return false;
         }
     }
     in_snapshot_ = false;

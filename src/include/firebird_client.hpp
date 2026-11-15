@@ -307,8 +307,7 @@ public:
 
     // Connections handed out by Acquire/AcquireWithInfo and not yet
     // returned via Release() or Discard(). Process-relative; a caller that
-    // destroyed a connection without either would inflate it (all
-    // extension paths go through the pool).
+    // destroys a leased connection without either inflates it.
     int64_t ActiveCount() const { return active_.load(std::memory_order_relaxed); }
 
     // Sanitized message of the most recent failed connection creation,
@@ -397,10 +396,11 @@ public:
     // see the database in exactly one state.
     //
     // Never throws: on any error it returns false, with the reason in
-    // *error when error is not null. The connection is then back on a
-    // fresh read-committed transaction or, if even that could not be
-    // started, on none (see RestoreDefaultTransaction). Must not be called
-    // with an open cursor.
+    // *error when error is not null. The connection is then still on its
+    // previous transaction (if rolling that back failed), back on a fresh
+    // read-committed one, or, if even that could not be started, on none
+    // (see RestoreDefaultTransaction). After a failure the connection may
+    // be unusable. Must not be called with an open cursor.
     bool TryStartSnapshotTransaction(int64_t at_snapshot_number = 0,
                                      std::string *error = nullptr);
     // fb_info_tra_snapshot_number of the current transaction; 0 when the

@@ -876,6 +876,12 @@ static unique_ptr<LocalTableFunctionState> FirebirdScanInitLocal(
         std::string error;
         if (!local->conn->TryStartSnapshotTransaction(gstate.snapshot_number,
                                                       &error)) {
+            // The connection may be unusable: a pooled attachment killed
+            // on the server fails the rollback and keeps its old handle.
+            // Never put it back in the pool.
+            if (local->pool) {
+                local->pool->Discard(std::move(local->conn));
+            }
             throw IOException(
                 "Firebird partitioned scan of table '" + bind.table_name +
                 "' stopped: a worker could not join the scan's shared "

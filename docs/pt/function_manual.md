@@ -1534,7 +1534,7 @@ Colunas de saida (11):
   da fila idle atingidos, ou uma conexao cuja transacao nao pode ser
   restaurada depois de um scan particionado).
 - `active_connections`: conexoes emprestadas agora e ainda nao devolvidas
-  via Release.
+  via Release nem descartadas.
 - `last_error`: mensagem sanitizada da criacao de conexao com falha mais
   recente (`NULL` quando nenhuma); a senha e redigida antes de armazenar.
 - `bytes_read_estimate`: (G5) estimativa acumulada ao longo da vida dos

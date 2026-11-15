@@ -878,7 +878,7 @@ Output columns (11):
 | `total_created` | BIGINT | Lifetime physical connections created |
 | `total_reused` | BIGINT | Lifetime connections served from the idle queue |
 | `total_discarded` | BIGINT | Lifetime connections destroyed (pool disabled, idle cap/expiry hit, or a connection whose transaction could not be reset after a partitioned scan) |
-| `active_connections` | BIGINT | Connections currently leased out and not yet returned via Release |
+| `active_connections` | BIGINT | Connections currently leased out and not yet returned via Release or discarded |
 | `last_error` | VARCHAR | Sanitized message of the most recent failed connection creation (`NULL` when none); the password is redacted before storage |
 | `bytes_read_estimate` | BIGINT | G5 — lifetime estimate of Firebird payload bytes fetched by scans that ran **inside this catalog** (ATTACH path). Same semantics as the other lifetime counters: process-relative, never reset. Direct `firebird_scan()` calls are **not** included — they belong to no catalog. Estimate definition: see [`firebird_last_query()`](#firebird_last_query) |
 
