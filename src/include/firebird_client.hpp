@@ -391,16 +391,21 @@ public:
     // (isc_tpb_at_snapshot_number, Firebird 4+), so several attachments
     // see the database in exactly one state.
     //
-    // Never throws for a server or client that cannot do it: on any error
-    // the connection is put back on a fresh read-committed transaction
-    // and false is returned. Must not be called with an open cursor.
-    bool TryStartSnapshotTransaction(int64_t at_snapshot_number = 0);
+    // Never throws: on any error it returns false, with the reason in
+    // *error when error is not null. The connection is then back on a
+    // fresh read-committed transaction or, if even that could not be
+    // started, on none (see RestoreDefaultTransaction). Must not be called
+    // with an open cursor.
+    bool TryStartSnapshotTransaction(int64_t at_snapshot_number = 0,
+                                     std::string *error = nullptr);
     // fb_info_tra_snapshot_number of the current transaction; 0 when the
     // server does not report one (Firebird 3, or not a snapshot).
     int64_t SnapshotNumber();
     // Return to the default read-committed transaction if a snapshot
-    // transaction is active. Pooled connections must be in this state
-    // before Release().
+    // transaction is active, or start one if the connection has none
+    // (a failed TryStartSnapshotTransaction can leave it so). Throws if
+    // that fails. Pooled connections must be in this state before
+    // Release().
     void RestoreDefaultTransaction();
     bool InSnapshotTransaction() const { return in_snapshot_; }
 
@@ -417,6 +422,8 @@ private:
 
     void Attach();
     void StartReadOnlyTransaction();
+    // Same, but leaves any error in status instead of throwing.
+    void StartReadOnlyTransaction(ISC_STATUS *status);
 };
 
 } // namespace duckdb

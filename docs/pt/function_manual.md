@@ -126,6 +126,10 @@ conexoes commitando alteracoes, como faz um scan serial.
   puder ser estabelecido, cada particao usa sua propria transacao read
   committed, como nas versoes anteriores. As particoes podem entao ver
   estados commitados diferentes.
+- Depois que o snapshot compartilhado e estabelecido, todo worker de
+  particao precisa entrar nele. Se algum nao conseguir, o scan falha com um
+  erro que cita a tabela e o motivo informado pelo servidor; nenhuma
+  particao e lida fora do snapshot.
 - Scans seriais nao mudam: uma conexao, uma transacao read committed.
 - `firebird_last_query().snapshot_mode` informa qual caso valeu: `shared`,
   `independent` ou `serial`.

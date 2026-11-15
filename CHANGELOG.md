@@ -15,6 +15,9 @@
 - On Firebird 3 (no snapshot numbers), or if the shared snapshot cannot be
   established, partitioned scans keep the previous behavior exactly
   (independent read-committed transactions).
+- Once the shared snapshot is established, a partition worker that cannot
+  join it fails the scan with an error; no partition is read outside the
+  snapshot.
 
 ### Added
 

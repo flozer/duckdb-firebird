@@ -232,10 +232,9 @@ NoneEncoding ParseNoneEncoding(const std::string &s) {
 
 // --- error reporting ---------------------------------------------------------
 
-void FirebirdConnection::Check(const ISC_STATUS *status, const std::string &context) {
-    if (status[0] != 1 || status[1] == 0) return;
-    // Decode the full error vector.
-    std::string msg = context + ": ";
+// Decodes a full error vector: one fb_interpret line each, then the SQLCODE.
+static std::string StatusText(const ISC_STATUS *status) {
+    std::string msg;
     const ISC_STATUS *p = status;
     char buf[512];
     long sql_code = isc_sqlcode(status);
@@ -244,7 +243,12 @@ void FirebirdConnection::Check(const ISC_STATUS *status, const std::string &cont
         msg.push_back('\n');
     }
     msg.append("[isc sqlcode=").append(std::to_string(sql_code)).append("]");
-    throw IOException(msg);
+    return msg;
+}
+
+void FirebirdConnection::Check(const ISC_STATUS *status, const std::string &context) {
+    if (status[0] != 1 || status[1] == 0) return;
+    throw IOException(context + ": " + StatusText(status));
 }
 
 // --- keepalive validation ----------------------------------------------------
@@ -484,7 +488,7 @@ void FirebirdConnection::Attach() {
     Check(status, "isc_attach_database(" + info_.database + ")");
 }
 
-void FirebirdConnection::StartReadOnlyTransaction() {
+void FirebirdConnection::StartReadOnlyTransaction(ISC_STATUS *status) {
     // Read-only, read-committed, no wait, no auto-undo — same shape used by
     // the peregrine extractor for its long-running scans.
     static const unsigned char tpb[] = {
@@ -495,8 +499,12 @@ void FirebirdConnection::StartReadOnlyTransaction() {
         isc_tpb_nowait,
         isc_tpb_no_auto_undo,
     };
-    ISC_STATUS status[20] = {};
     isc_start_transaction(status, &tr_, 1, &db_, sizeof(tpb), const_cast<unsigned char *>(tpb));
+}
+
+void FirebirdConnection::StartReadOnlyTransaction() {
+    ISC_STATUS status[20] = {};
+    StartReadOnlyTransaction(status);
     Check(status, "isc_start_transaction");
 }
 
@@ -516,7 +524,8 @@ static bool StatusIsError(const ISC_STATUS *status) {
     return status[0] == 1 && status[1] != 0;
 }
 
-bool FirebirdConnection::TryStartSnapshotTransaction(int64_t at_snapshot_number) {
+bool FirebirdConnection::TryStartSnapshotTransaction(int64_t at_snapshot_number,
+                                                     std::string *error) {
     std::vector<char> tpb = {
         isc_tpb_version3,
         isc_tpb_read,
@@ -538,6 +547,7 @@ bool FirebirdConnection::TryStartSnapshotTransaction(int64_t at_snapshot_number)
     if (tr_) {
         isc_rollback_transaction(status, &tr_);
         if (StatusIsError(status)) {
+            if (error) *error = "isc_rollback_transaction: " + StatusText(status);
             return false;  // still on the old transaction; nothing changed
         }
     }
@@ -545,8 +555,16 @@ bool FirebirdConnection::TryStartSnapshotTransaction(int64_t at_snapshot_number)
     isc_start_transaction(status, &tr_, 1, &db_,
                           static_cast<unsigned short>(tpb.size()), tpb.data());
     if (StatusIsError(status)) {
+        if (error) *error = "isc_start_transaction: " + StatusText(status);
         tr_ = 0;
-        StartReadOnlyTransaction();
+        // Back to read committed, without throwing. If that fails too, the
+        // connection is left with no transaction; RestoreDefaultTransaction()
+        // starts one or throws, so it is never pooled in that state.
+        ISC_STATUS restore_status[20] = {};
+        StartReadOnlyTransaction(restore_status);
+        if (StatusIsError(restore_status)) {
+            tr_ = 0;
+        }
         return false;
     }
     in_snapshot_ = true;
@@ -583,8 +601,8 @@ int64_t FirebirdConnection::SnapshotNumber() {
 }
 
 void FirebirdConnection::RestoreDefaultTransaction() {
-    if (!in_snapshot_) {
-        return;
+    if (!in_snapshot_ && tr_) {
+        return;  // already on the default read-committed transaction
     }
     ISC_STATUS status[20] = {};
     if (tr_) {

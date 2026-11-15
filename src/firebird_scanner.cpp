@@ -90,14 +90,12 @@ struct FirebirdGlobalState : public GlobalTableFunctionState {
     // connection holds a read-only SNAPSHOT transaction for the whole
     // scan; every worker joins it with isc_tpb_at_snapshot_number, so all
     // partitions read one consistent state of the table. snapshot_number
-    // stays 0 when the server can't do it (Firebird 3) or anything
+    // stays 0 when the server can't do it (Firebird 3) or starting it
     // failed: workers then keep their independent read-committed
-    // transactions, exactly as before.
+    // transactions, exactly as before. Once it is set, a worker that
+    // cannot join fails the scan (FirebirdScanInitLocal).
     std::unique_ptr<FirebirdConnection> snapshot_conn;
     int64_t snapshot_number = 0;
-    // Set by any worker that could not join the snapshot and fell back
-    // to its read-committed transaction.
-    std::atomic<bool> snapshot_join_failed{false};
 
     idx_t MaxThreads() const override { return max_threads; }
 
@@ -855,10 +853,22 @@ static unique_ptr<LocalTableFunctionState> FirebirdScanInitLocal(
         local->conn = make_uniq<FirebirdConnection>(bind.conn_info);
     }
     auto &gstate = global_state->Cast<FirebirdGlobalState>();
-    if (gstate.snapshot_number > 0 &&
-        !local->conn->TryStartSnapshotTransaction(gstate.snapshot_number)) {
-        // The worker stays on its own read-committed transaction.
-        gstate.snapshot_join_failed = true;
+    if (gstate.snapshot_number > 0) {
+        // The coordinator publishes a snapshot number only after it has
+        // started a SNAPSHOT transaction and read the number back, so the
+        // server can do this. A worker that still cannot join must not go
+        // on with its own read-committed transaction: its partitions would
+        // be read at a different point in time than the others'.
+        std::string error;
+        if (!local->conn->TryStartSnapshotTransaction(gstate.snapshot_number,
+                                                      &error)) {
+            throw IOException(
+                "Firebird partitioned scan of table '" + bind.table_name +
+                "' stopped: a worker could not join the scan's shared "
+                "snapshot (number " + std::to_string(gstate.snapshot_number) +
+                "), and reading its partitions outside it would mix two "
+                "states of the table. Original error: " + error);
+        }
     }
     return std::move(local);
 }
@@ -1015,8 +1025,8 @@ static bool OpenNextPartitionCursor(ClientContext &ctx,
         rec.parallel_scan = rec.partitions > 1;
         if (!rec.parallel_scan) {
             rec.snapshot_mode = "serial";
-        } else if (gstate.snapshot_number > 0 && !gstate.snapshot_join_failed &&
-                   local.conn && local.conn->InSnapshotTransaction()) {
+        } else if (gstate.snapshot_number > 0 && local.conn &&
+                   local.conn->InSnapshotTransaction()) {
             rec.snapshot_mode = "shared";
         } else {
             rec.snapshot_mode = "independent";

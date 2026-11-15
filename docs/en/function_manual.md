@@ -95,6 +95,9 @@ connections commit changes, as a serial scan does.
 - On Firebird 3 (no snapshot numbers), or if the shared snapshot cannot be
   established, each partition uses its own read-committed transaction, as
   in earlier versions. Partitions can then see different committed states.
+- Once the shared snapshot is established, every partition worker must
+  join it. If one cannot, the scan fails with an error naming the table and
+  the server's reason; no partition is read outside the snapshot.
 - Serial scans are unchanged: one connection, one read-committed
   transaction.
 - `firebird_last_query().snapshot_mode` reports which case applied:
