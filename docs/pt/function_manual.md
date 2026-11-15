@@ -32,7 +32,10 @@ Quando a biblioteca esta em caminho nao-padrao, defina
 `DUCKDB_FIREBIRD_CLIENT_LIBRARY` com o caminho absoluto antes da
 primeira chamada `firebird_*`. O override e autoritativo: se o caminho
 nao puder ser carregado, a extensao levanta um erro claro em vez de
-cair em fallback silencioso.
+cair em fallback silencioso. No Windows, as DLLs de que o proprio
+`fbclient.dll` precisa (no Firebird 3: `msvcr100.dll`, `zlib1.dll`, ICU)
+sao procuradas primeiro na pasta da propria biblioteca, entao basta
+apontar a variavel para uma instalacao ou kit portatil do Firebird.
 
 Mensagem de erro quando nenhum cliente esta acessivel:
 
@@ -1948,6 +1951,19 @@ Uma excecao conhecida e rastreada a essa politica existe hoje:
 segmentos de `ReadBlob` — foi corrigida; `ReadBlob` agora continua lendo
 segmentos ate `isc_segstr_eof`, o unico sinal real de fim de BLOB, em
 vez de parar erroneamente no primeiro `rc == 0`.)
+
+### Servidores com `DataTypeCompatibility`
+
+Um servidor Firebird 4+ pode descrever tipos novos aos clientes na forma
+legada: `DataTypeCompatibility = 3.0` (no `firebird.conf` ou por banco no
+`databases.conf`) envia `INT128` como `BIGINT`, `DECFLOAT` como
+`DOUBLE PRECISION` e os tipos `WITH TIME ZONE` sem a zona; `2.5` tambem
+envia `BOOLEAN` como `CHAR(5)`. A extensao obtem os tipos das colunas dos
+metadados declarados (`RDB$FIELDS`), entao pede os tipos nativos em toda
+conexao (`isc_dpb_set_bind` com regras `... TO NATIVE`). Isso sobrepoe a
+configuracao do servidor apenas nas conexoes da propria extensao; outras
+aplicacoes continuam recebendo a forma legada. O Firebird 3 nao tem essa
+configuracao e ignora o pedido.
 
 ### `NUMERIC(18,s)` / `DECIMAL(18,s)` — o dominio do int64 escalado
 

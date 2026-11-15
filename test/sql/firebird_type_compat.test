@@ -1,0 +1,54 @@
+# name: test/sql/firebird_type_compat.test
+# description: Rows keep their declared types when the server uses
+#              DataTypeCompatibility (2.5 / 3.0). The extension sends
+#              isc_dpb_set_bind with NATIVE rules on every attachment;
+#              without it INT128 hit a DuckDB internal assertion and the
+#              WITH TIME ZONE types came back shifted or garbled.
+# group: [firebird]
+#
+# Requires the TYPE_COMPAT fixture from scripts/fixture_type_compat.sql in a
+# Firebird 4/5 database opened through a databases.conf alias with
+# DataTypeCompatibility = 2.5, referenced by FIREBIRD_TYPE_COMPAT_DB. The
+# test skips wherever that env var is unset (FB3 legs, local setups without
+# the alias).
+
+require firebird
+
+require-env FIREBIRD_TYPE_COMPAT_DB
+
+# Declared types, from RDB$FIELDS.
+query TTTTTT
+SELECT typeof(I128), typeof(N38), typeof(D34), typeof(TSTZ), typeof(TMTZ), typeof(FLAG)
+  FROM firebird_scan('${FIREBIRD_TYPE_COMPAT_DB}', 'TYPE_COMPAT') WHERE ID = 1
+----
+HUGEINT	DECIMAL(38,4)	VARCHAR	TIMESTAMP WITH TIME ZONE	TIME WITH TIME ZONE	BOOLEAN
+
+# Exact values, including the extremes that don't fit the legacy types
+# (INT128 max overflows BIGINT; NUMERIC(38,4) overflows NUMERIC(18,4)).
+query ITTTTTTT
+SELECT ID, I128::VARCHAR, N38::VARCHAR, D34, TSTZ::VARCHAR, TMTZ::VARCHAR, FLAG::VARCHAR, (FLAG IS NULL)::VARCHAR
+  FROM firebird_scan('${FIREBIRD_TYPE_COMPAT_DB}', 'TYPE_COMPAT') ORDER BY ID
+----
+1	170141183460469231731687303715884105727	12345678901234567890123456789012.3456	1234567890123456789012345678.901234	2027-01-28 10:16:01+00	05:16:01+00	true	false
+2	-1000000007	-1.5000	0.1	2003-08-11 08:03:46+00	00:30:00+00	false	false
+3	NULL	NULL	NULL	NULL	NULL	NULL	true
+
+# Filters on the coerced types still match (applied by DuckDB; time zone
+# and boolean comparisons are not pushed down today).
+query I
+SELECT ID FROM firebird_scan('${FIREBIRD_TYPE_COMPAT_DB}', 'TYPE_COMPAT')
+ WHERE TSTZ = TIMESTAMPTZ '2027-01-28 10:16:01+00' AND FLAG
+----
+1
+
+# The ATTACH path reads the same values.
+statement ok
+ATTACH '${FIREBIRD_TYPE_COMPAT_DB}' AS tc (TYPE firebird)
+
+query ITT
+SELECT ID, I128::VARCHAR, TSTZ::VARCHAR FROM tc.TYPE_COMPAT WHERE ID = 1
+----
+1	170141183460469231731687303715884105727	2027-01-28 10:16:01+00
+
+statement ok
+DETACH tc
