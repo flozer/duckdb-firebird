@@ -15,7 +15,7 @@
 #   1. scans PART_RANGE (300 rows, snapshot_mode = 'shared'), which leaves
 #      the workers' connections idle in the pool;
 #   2. kills attachments from isql via `.shell` (DELETE FROM MON$ATTACHMENTS)
-#      and checks how many it killed (1, or every idle pooled connection);
+#      and checks how many it targets (1, or every idle pooled connection);
 #   3. scans again: it must fail with the "could not join the scan's shared
 #      snapshot" error naming the table, and right after it
 #      firebird_pool_stats() must show no connection still leased and at
@@ -25,8 +25,8 @@
 #      must still show the warm-up scan's record, untouched;
 #   4. scans up to RETRIES more times: any scan that still gets a dead
 #      connection must fail with that same error, a later one must return
-#      all 300 rows with snapshot_mode = 'shared', and every scan after it
-#      must succeed too.
+#      all 300 rows with snapshot_mode = 'shared', and so must every scan
+#      after it.
 # Any other error fails the check. Firebird 3 has no shared snapshot, so the
 # check is skipped there.
 #
@@ -82,7 +82,7 @@ kill_helper() {
         echo 'set -euo pipefail'
         printf '%s -q -bail -u %q -p %q %q <<'"'"'SQL'"'"'\n' "$FB_ISQL" "$FB_USER" "$FB_PASS" "$FB_ISQL_DB"
         echo 'SET HEADING OFF;'
-        echo "SELECT 'killing ' || MINVALUE(COUNT(*), ${3}) || ' attachments' FROM MON\$ATTACHMENTS"
+        echo "SELECT 'targeting ' || MINVALUE(COUNT(*), ${3}) || ' attachments' FROM MON\$ATTACHMENTS"
         echo " WHERE MON\$ATTACHMENT_ID <> CURRENT_CONNECTION AND MON\$SYSTEM_FLAG = 0"
         echo "   AND MON\$REMOTE_PROCESS CONTAINING 'duckdb';"
         echo "DELETE FROM MON\$ATTACHMENTS"
@@ -160,13 +160,15 @@ check_phase() {
     idle=${BASH_REMATCH[1]}; disc0=${BASH_REMATCH[2]}
     [ "$idle" -ge 2 ] || fail "$p: only $idle idle pooled connection(s); the scan was not partitioned"
     [ "$want" = all ] && want=$idle
-    killed=$(sed -nE 's/^ *killing ([0-9]+) attachments *$/\1/p' "$sec")
-    [ "$killed" = "$want" ] || fail "$p: killed '$killed' attachments, expected $want (idle pooled: $idle)"
+    # Counted just before the DELETE; that the kill took effect is shown by
+    # the failed scan and the discard checks below.
+    killed=$(sed -nE 's/^ *targeting ([0-9]+) attachments *$/\1/p' "$sec")
+    [ "$killed" = "$want" ] || fail "$p: targeted '$killed' attachments, expected $want (idle pooled: $idle)"
     grep -q "^$p scan2 rows=" "$sec" && fail "$p: the scan after the kill did not fail"
 
     local join_errors all_errors
     join_errors=$(count -F "$JOIN_ERROR" "$sec")
-    all_errors=$(count -E '[A-Za-z]+ Error: ' "$sec")
+    all_errors=$(count -E '(^|[A-Za-z]+ )Error: ' "$sec")
     [ "$join_errors" -ge 1 ] || fail "$p: no 'could not join the scan's shared snapshot' error"
     [ "$all_errors" -eq "$join_errors" ] || fail "$p: $((all_errors - join_errors)) error(s) of another kind"
 
@@ -198,19 +200,22 @@ check_phase() {
 
     for i in $(seq 3 $((RETRIES + 2))); do
         if has "$p scan$i rows=300"; then
-            if [ -z "$first_ok" ]; then
-                first_ok=$i
-                has "$p scan$i mode=shared" || fail "$p: scan $i after recovery was not 'shared'"
-            fi
+            [ -n "$first_ok" ] || first_ok=$i
+            has "$p scan$i mode=shared" || fail "$p: scan $i returned 300 rows but was not 'shared'"
+        elif grep -q "^$p scan$i rows=" "$sec"; then
+            fail "$p: scan $i returned the wrong number of rows"
         elif [ -n "$first_ok" ]; then
             fail "$p: scan $i failed after scan $first_ok had recovered"
         fi
     done
     [ -n "$first_ok" ] || fail "$p: no scan recovered within $RETRIES retries"
+    # Every scan before the recovery (scan 2 included) failed with the join
+    # error, and no other scan did.
+    [ "$join_errors" -eq $((first_ok - 2)) ] || fail "$p: $join_errors join error(s) for $((first_ok - 2)) failed scan(s)"
 
     line=$(grep "^$p pool after active=" "$sec" || true)
     [[ "$line" =~ ^$p\ pool\ after\ active=0\ discarded=([0-9]+)\ idle= ]] || fail "$p: unexpected final pool stats: '$line'"
-    summary+=" $p: killed $killed of $idle, $join_errors failed scan(s), $((disc - disc0)) discarded by the first, recovered at scan $first_ok, telemetry: $telemetry;"
+    summary+=" $p: targeted $killed of $idle, $join_errors failed scan(s), $((disc - disc0)) discarded by the first, recovered at scan $first_ok, telemetry: $telemetry;"
 }
 
 check_phase one 1

@@ -137,8 +137,8 @@ conexoes commitando alteracoes, como faz um scan serial.
   particao precisa entrar nele. Se algum nao conseguir, o scan falha com um
   erro que cita a tabela e o motivo informado pelo servidor; nenhuma
   particao e lida fora do snapshot. O erro tambem fica em
-  `firebird_last_query().error_message` quando outro worker do scan ja
-  abriu um cursor.
+  `firebird_last_query().error_message` quando outro worker do scan abre
+  um cursor, antes ou depois da falha.
 - Scans seriais nao mudam: uma conexao, uma transacao read committed.
 - `firebird_last_query().snapshot_mode` informa qual caso valeu: `shared`,
   `independent` ou `serial`.

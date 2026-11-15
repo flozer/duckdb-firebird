@@ -17,7 +17,9 @@
   (independent read-committed transactions).
 - Once the shared snapshot is established, a partition worker that cannot
   join it fails the scan with an error; no partition is read outside the
-  snapshot, and the worker's pooled connection is discarded.
+  snapshot, and the worker's pooled connection is discarded. The error is
+  also set in `firebird_last_query()` when another worker of the scan opens
+  a cursor.
 
 ### Added
 

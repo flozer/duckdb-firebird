@@ -102,7 +102,7 @@ connections commit changes, as a serial scan does.
   join it. If one cannot, the scan fails with an error naming the table and
   the server's reason; no partition is read outside the snapshot. The error
   is also set in `firebird_last_query().error_message` when another worker
-  of the scan has already opened a cursor.
+  of the scan opens a cursor, before or after the failure.
 - Serial scans are unchanged: one connection, one read-committed
   transaction.
 - `firebird_last_query().snapshot_mode` reports which case applied:
