@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v1.4.0] - 2026-11-15
+
 ### Changed
 
 - Partitioned scans (`partitions > 1`, or automatic partitioning on the
