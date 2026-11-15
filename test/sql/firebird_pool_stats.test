@@ -27,12 +27,12 @@ firebird_pool_stats(catalog_name VARCHAR): catalog_name is required
 statement error
 SELECT * FROM firebird_pool_stats('nope_does_not_exist_xyz');
 ----
-no attached catalog named 'nope_does_not_exist_xyz'
+firebird_pool_stats: no attached catalog named 'nope_does_not_exist_xyz'
 
 statement error
 SELECT * FROM firebird_pool_stats('memory');
 ----
-is not a Firebird ATTACH
+firebird_pool_stats: catalog 'memory' is not a Firebird ATTACH
 
 # ---------------------------------------------------------------------------
 #  Schema: 11 columns, one row per call. (10 Phase-4 columns + G5

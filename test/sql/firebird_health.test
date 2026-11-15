@@ -18,7 +18,12 @@ firebird_health(alias VARCHAR): alias is required
 statement error
 SELECT * FROM firebird_health('nope_does_not_exist_xyz');
 ----
-no attached catalog named 'nope_does_not_exist_xyz'
+firebird_health: no attached catalog named 'nope_does_not_exist_xyz'
+
+statement error
+SELECT * FROM firebird_health('memory');
+----
+firebird_health: catalog 'memory' is not a Firebird ATTACH
 
 statement ok
 ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird);

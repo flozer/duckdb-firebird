@@ -25,6 +25,11 @@ SELECT * FROM firebird_index_profile('fb.main.EMPLOYEE.EXTRA');
 ----
 firebird_index_profile(qualified_name VARCHAR): expected
 
+statement error
+SELECT * FROM firebird_index_profile('nope_does_not_exist_xyz.main.EMPLOYEE');
+----
+firebird_index_profile: no attached catalog named 'nope_does_not_exist_xyz'
+
 statement ok
 ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird);
 

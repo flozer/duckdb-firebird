@@ -38,12 +38,12 @@ firebird_profile_table: schema 'dbo' is not exposed
 statement error
 SELECT * FROM firebird_profile_table('nope_does_not_exist_xyz.main.EMPLOYEE');
 ----
-firebird_generate_dbt_sources: no attached catalog named 'nope_does_not_exist_xyz'
+firebird_profile_table: no attached catalog named 'nope_does_not_exist_xyz'
 
 statement error
 SELECT * FROM firebird_profile_table('memory.main.EMPLOYEE');
 ----
-catalog 'memory' is not a Firebird ATTACH
+firebird_profile_table: catalog 'memory' is not a Firebird ATTACH
 
 # ---------------------------------------------------------------------------
 #  Happy-path: ATTACH the fixture and snapshot each profile into a local

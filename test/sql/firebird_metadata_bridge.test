@@ -8,6 +8,17 @@ require-env FIREBIRD_TEST_DB
 
 require-env ISC_PASSWORD
 
+# --- an unknown alias is reported under the function's own name -----
+statement error
+SELECT * FROM firebird_indexes('nope_does_not_exist_xyz');
+----
+firebird_indexes: no attached catalog named 'nope_does_not_exist_xyz'
+
+statement error
+SELECT * FROM firebird_generators('memory');
+----
+firebird_generators: catalog 'memory' is not a Firebird ATTACH
+
 statement ok
 ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird);
 
