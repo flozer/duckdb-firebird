@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- Scans of a table with a single-column integer primary key no longer skip
+  rows whose key lies outside the `MIN`/`MAX` probed before the scan (#93).
+  On the ATTACH path the bounds are probed the first time a query references
+  a table and then cached, so every row inserted afterwards with a key above
+  the cached `MAX` or below the cached `MIN` was silently missing from every
+  later scan of that table, partitioned or not, including filtered ones,
+  until the database was re-attached. The first partition now has no lower
+  bound and the last no upper bound; a single-partition scan sends no range
+  predicate at all.
 - Read `INT128`, `NUMERIC(19+)`, `DECFLOAT`, `TIMESTAMP`/`TIME WITH TIME ZONE`
   and `BOOLEAN` correctly from servers with `DataTypeCompatibility = 3.0`
   or `2.5`. Before, `INT128` and `BOOLEAN` raised a DuckDB `INTERNAL Error`,

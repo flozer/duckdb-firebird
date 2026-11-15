@@ -62,7 +62,10 @@ Supported named parameters include:
 - `filter`
 - `row_limit`
 - `row_offset`
-- `partitions`
+- `partitions` — parallelism over PK ranges: `0` = auto, `1` = serial. The
+  ranges come from a `MIN`/`MAX` probe of the PK; the first partition has no
+  lower bound and the last no upper bound, so rows outside the probed range
+  (committed after the probe, or after an `ATTACH` cached it) are still read.
 - `none_pushdown` — opt-in pushdown of `=` / `IN` over `CHARACTER SET NONE`
   CHAR/VARCHAR columns when `none_encoding` is `win1252` or `iso8859_1`
   (default `false`; see [Charset handling of `CHARACTER SET NONE`
