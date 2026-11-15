@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Read `INT128`, `NUMERIC(19+)`, `DECFLOAT`, `TIMESTAMP`/`TIME WITH TIME ZONE`
+  and `BOOLEAN` correctly from servers with `DataTypeCompatibility = 3.0`
+  or `2.5`. Before, `INT128` and `BOOLEAN` raised a DuckDB `INTERNAL Error`,
+  which invalidates the database instance, and the time zone types came
+  back shifted or garbled without an error. The extension now asks for the
+  native types on every attachment (`isc_dpb_set_bind`).
 - Windows: loading the client library from a path
   (`DUCKDB_FIREBIRD_CLIENT_LIBRARY`) now resolves its dependent DLLs from
   the library's own folder first (`LOAD_WITH_ALTERED_SEARCH_PATH`). A
