@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/check_catalog_load_failure.sh`: kills a pooled attachment before
+  the first table query of an ATTACH and checks that the failed catalog load
+  leaves no connection leased; run as its own step on every Firebird 3/4/5
+  leg of the Linux matrix.
+
+### Fixed
+
+- ATTACH: when loading the table list failed (for example because the
+  pooled connection's attachment had been killed on the server), the
+  connection was dropped without telling the pool, so each failed load left
+  `firebird_pool_stats().active_connections` one too high for the rest of
+  the ATTACH. The connection is now counted as discarded.
+
 ## [v1.4.0] - 2026-11-15
 
 ### Changed
