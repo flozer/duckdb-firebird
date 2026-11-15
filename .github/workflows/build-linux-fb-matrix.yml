@@ -311,6 +311,10 @@ jobs:
           # F4: real recommended_partitions > 1 coverage on a dedicated
           # sparse-wide-PK fixture (all FB versions).
           ./build/release/test/unittest test/sql/firebird_partitions_scan.test
+          # Shared snapshot for partitioned scans: snapshot_mode reported
+          # per FB version (shared on FB4+, independent on FB3), same
+          # partitions fixture.
+          ./build/release/test/unittest test/sql/firebird_shared_snapshot.test
           # G-queue coverage (v1.2.0): unpushed-mode guard + none_pushdown
           # (NONE fixture), numeric_widen (numerics fixture), session
           # stability + bytes estimate (main fixture).
@@ -326,6 +330,19 @@ jobs:
           # DataTypeCompatibility guard: FB4/FB5 legs (FIREBIRD_TYPE_COMPAT_DB
           # exported above); self-skips on FB3.
           ./build/release/test/unittest test/sql/firebird_type_compat.test
+
+      - name: Shared-snapshot consistency under a concurrent writer
+        env:
+          ISC_USER: SYSDBA
+          ISC_PASSWORD: masterkey
+        run: |
+          # sqllogictest can't interleave a writer with a scan, so this
+          # script proves the guarantee directly: a second connection
+          # commits transfers between partitions for the whole scan, and
+          # every partitioned scan must return the one committed state
+          # (FB4+, snapshot_mode = 'shared'). On FB3 it checks the
+          # fallback ('independent') and only reports the torn reads.
+          bash scripts/check_shared_snapshot.sh
 
       - name: FB4+ live type smoke (INT128 / DECIMAL(38) / TIMESTAMP_TZ)
         if: matrix.fb_major != '3'
@@ -362,6 +379,19 @@ jobs:
           # checks that later scans in the same session read them, both
           # partitioned and single-partition. All FB versions.
           bash scripts/check_attach_cached_bounds.sh
+
+      - name: Shared snapshot - worker that cannot join fails the scan
+        env:
+          ISC_USER: SYSDBA
+          ISC_PASSWORD: masterkey
+        run: |
+          # Kills one, then all, of the pooled attachments of an ATTACH from
+          # isql via `.shell` (DELETE FROM MON$ATTACHMENTS), then checks
+          # that the next partitioned scan fails with the "could not join
+          # the scan's shared snapshot" error, that the dead connections are
+          # discarded rather than pooled, what firebird_last_query() shows,
+          # and that a later scan succeeds. FB4+; skips itself on FB3.
+          bash scripts/check_snapshot_join_failure.sh
 
       - name: Stop Firebird container
         if: always()

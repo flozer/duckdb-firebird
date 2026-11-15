@@ -114,6 +114,38 @@ Parametros nomeados:
   para que toda a faixa escalada do int64 do Firebird sobreviva (padrao
   `false`; veja "Notas de mapeamento de tipos").
 
+#### Scans particionados leem um unico snapshot
+
+Com `partitions > 1` (ou quando o caminho `ATTACH` particiona sozinho uma
+tabela grande), cada particao e lida por uma conexao propria. No Firebird 4
+em diante todas leem **um unico snapshot** do banco: uma conexao
+coordenadora abre uma transacao SNAPSHOT somente leitura e cada particao
+entra nela (`isc_tpb_at_snapshot_number`). Assim um scan particionado
+devolve exatamente as linhas de um unico estado commitado, mesmo com outras
+conexoes commitando alteracoes, como faz um scan serial.
+
+- O snapshot fica aberto, somente leitura, ate o fim do scan, como qualquer
+  transacao snapshot do Firebird. No Firebird 4+ com o padrao
+  `ReadConsistency = 1`, um cursor read committed em execucao ja prende o
+  proprio snapshot de statement enquanto roda, entao a coleta de lixo fica
+  retida por praticamente o mesmo tempo de antes.
+- No Firebird 3 (sem numero de snapshot), ou se o snapshot compartilhado nao
+  puder ser estabelecido, cada particao usa sua propria transacao read
+  committed, como nas versoes anteriores. As particoes podem entao ver
+  estados commitados diferentes.
+- Depois que o snapshot compartilhado e estabelecido, todo worker de
+  particao precisa entrar nele. Se algum nao conseguir, o scan falha com um
+  erro que cita a tabela e o motivo informado pelo servidor; nenhuma
+  particao e lida fora do snapshot. O erro tambem fica em
+  `firebird_last_query().error_message` quando outro worker do scan abre
+  um cursor, antes ou depois da falha.
+- Scans seriais nao mudam: uma conexao, uma transacao read committed.
+- `firebird_last_query().snapshot_mode` informa qual caso valeu: `shared`,
+  `independent` ou `serial`.
+- Um scan particionado abre um attachment extra (o coordenador) enquanto
+  dura. Ele nao vem do pool de conexoes do `ATTACH`, entao os contadores de
+  `firebird_pool_stats()` nao mudam.
+
 Internamente, a extensao usa `libfbclient` para abrir cursor no Firebird e
 entrega os chunks ao DuckDB como table function. O DuckDB continua responsavel
 por joins, agregacoes analiticas, materializacao em tabelas locais, Parquet,
@@ -1142,6 +1174,12 @@ Saida compartilhada com `firebird_query_log()`:
   catalogo, nao bug.
 - `parallel_scan`: `true` quando `partitions > 1`.
 - `partitions`: numero de particoes.
+- `snapshot_mode`: como as particoes do scan se relacionam
+  transacionalmente: `serial` (uma particao), `shared` (todas as particoes
+  leram um unico snapshot do Firebird; Firebird 4+) ou `independent` (cada
+  particao usou sua propria transacao read committed: Firebird 3, ou o
+  snapshot compartilhado nao pode ser estabelecido). Veja "Scans
+  particionados leem um unico snapshot".
 - `captured_at`: timestamp de captura.
 - `error_message`: erro sanitizado, vazio quando a query terminou limpa.
 - `limit_pushed`: limite `ROWS` realmente empurrado ao Firebird
@@ -1156,9 +1194,9 @@ Saida compartilhada com `firebird_query_log()`:
 As tres ultimas (`limit_pushed` / `offset_pushed` / `not_pushed_reasons`)
 sao as colunas de explicabilidade de pushdown (Fase 4 #3). Deixam explicito
 o que de paginacao chegou ao Firebird e por que um filtro ficou local, sem
-funcao nova. `bytes_read_estimate` (G5) entra como coluna aditiva no fim -
-o schema agora tem 19 colunas, compartilhado por `firebird_last_query()` e
-`firebird_query_log()`. As razoes sao factuais e
+funcao nova. `bytes_read_estimate` (G5) e `snapshot_mode` entram como
+colunas aditivas no fim - o schema agora tem 20 colunas, compartilhado por
+`firebird_last_query()` e `firebird_query_log()`. As razoes sao factuais e
 coarse, nao um trace de planner:
 
 - `NONE_CHARSET`: a coluna e texto `CHARACTER SET NONE` e o pushdown e
@@ -1401,7 +1439,7 @@ FROM firebird_explain_pushdown(
 
 Mostra um historico curto das queries Firebird tentadas na conexao DuckDB
 atual. O log e desligado por padrao. Cada linha carrega o mesmo schema de
-telemetria de 19 colunas do `firebird_last_query()` - incluindo
+telemetria de 20 colunas do `firebird_last_query()` - incluindo
 `bytes_read_estimate`, entao o log rotacionado preserva as estimativas de
 transferencia por query da sessao.
 
@@ -1494,10 +1532,12 @@ Colunas de saida (11):
 - `idle_connections`: conexoes paradas na fila idle agora.
 - `total_created`: conexoes fisicas criadas ao longo da vida.
 - `total_reused`: conexoes servidas da fila idle ao longo da vida.
-- `total_discarded`: conexoes destruidas (pool desligado, ou limite/expiracao
-  da fila idle atingidos).
+- `total_discarded`: conexoes destruidas (pool desligado, limite/expiracao
+  da fila idle atingidos, uma conexao de worker que nao conseguiu entrar no
+  snapshot de um scan particionado, ou uma conexao cuja transacao nao pode
+  ser restaurada depois de um scan particionado).
 - `active_connections`: conexoes emprestadas agora e ainda nao devolvidas
-  via Release.
+  via Release nem descartadas.
 - `last_error`: mensagem sanitizada da criacao de conexao com falha mais
   recente (`NULL` quando nenhuma); a senha e redigida antes de armazenar.
 - `bytes_read_estimate`: (G5) estimativa acumulada ao longo da vida dos

@@ -19,6 +19,7 @@ struct FirebirdClientApi {
     decltype(&::isc_detach_database)         isc_detach_database;
     decltype(&::isc_start_transaction)       isc_start_transaction;
     decltype(&::isc_rollback_transaction)    isc_rollback_transaction;
+    decltype(&::isc_transaction_info)        isc_transaction_info;
     decltype(&::isc_dsql_allocate_statement) isc_dsql_allocate_statement;
     decltype(&::isc_dsql_prepare)            isc_dsql_prepare;
     decltype(&::isc_dsql_describe)           isc_dsql_describe;

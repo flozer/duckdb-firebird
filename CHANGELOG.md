@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Partitioned scans (`partitions > 1`, or automatic partitioning on the
+  ATTACH path) now read **one Firebird snapshot**. A coordinating
+  connection starts a read-only SNAPSHOT transaction and every partition
+  worker joins it with `isc_tpb_at_snapshot_number` (Firebird 4+). Before,
+  each partition ran its own read-committed transaction, so partitions
+  could see different committed states of the table: a row moved or a
+  value transferred between partitions during the scan could be counted
+  twice or missed. Serial scans are unchanged.
+- On Firebird 3 (no snapshot numbers), or if the shared snapshot cannot be
+  established, partitioned scans keep the previous behavior exactly
+  (independent read-committed transactions).
+- Once the shared snapshot is established, a partition worker that cannot
+  join it fails the scan with an error; no partition is read outside the
+  snapshot, and the worker's pooled connection is discarded. The error is
+  also set in `firebird_last_query()` when another worker of the scan opens
+  a cursor.
+
+### Added
+
+- `snapshot_mode` column (`'serial'` / `'shared'` / `'independent'`) in
+  `firebird_last_query()` and `firebird_query_log()`, appended after
+  `bytes_read_estimate` (20 columns).
+- `scripts/check_shared_snapshot.sh`: consistency check under a concurrent
+  writer, run as its own step on every Firebird 3/4/5 leg of the Linux
+  matrix.
+- `scripts/check_snapshot_join_failure.sh`: kills one, then all, of the
+  pooled attachments of an ATTACH and checks that the next partitioned scan
+  fails with the "could not join" error, that the dead connections are
+  discarded rather than pooled, what `firebird_last_query()` shows, and that
+  a later scan succeeds (Firebird 4+; its own step in the Linux matrix,
+  skipped on Firebird 3).
+
 ### Fixed
 
 - Scans of a table with a single-column integer primary key no longer skip

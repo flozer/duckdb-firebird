@@ -291,6 +291,11 @@ public:
     // parked.
     void Release(std::unique_ptr<FirebirdConnection> conn);
 
+    // Destroy a leased connection that must not be reused (for example,
+    // one whose transaction could not be reset). Counts it as discarded
+    // and ends its lease, like a Release() that does not park it.
+    void Discard(std::unique_ptr<FirebirdConnection> conn);
+
     // Pool size hint (mostly for testing / introspection).
     size_t IdleCount();
 
@@ -301,9 +306,8 @@ public:
     int64_t TotalDiscarded() const { return total_discarded_.load(std::memory_order_relaxed); }
 
     // Connections handed out by Acquire/AcquireWithInfo and not yet
-    // returned via Release(). Process-relative; a caller that destroyed a
-    // connection without Release() would inflate it (all extension paths
-    // release through the pool).
+    // returned via Release() or Discard(). Process-relative; a caller that
+    // destroys a leased connection without either inflates it.
     int64_t ActiveCount() const { return active_.load(std::memory_order_relaxed); }
 
     // Sanitized message of the most recent failed connection creation,
@@ -383,6 +387,33 @@ public:
     std::unique_ptr<FirebirdStatement> OpenCursor(const std::string &sql,
                                                   const std::vector<Value> &params);
 
+    // --- Shared snapshot for partitioned scans -----------------------------
+    //
+    // Swap the connection's default read-committed transaction for a
+    // read-only SNAPSHOT (isc_tpb_concurrency) one. With a non-zero
+    // at_snapshot_number the new transaction joins that existing snapshot
+    // (isc_tpb_at_snapshot_number, Firebird 4+), so several attachments
+    // see the database in exactly one state.
+    //
+    // Never throws: on any error it returns false, with the reason in
+    // *error when error is not null. The connection is then still on its
+    // previous transaction (if rolling that back failed), back on a fresh
+    // read-committed one, or, if even that could not be started, on none
+    // (see RestoreDefaultTransaction). After a failure the connection may
+    // be unusable. Must not be called with an open cursor.
+    bool TryStartSnapshotTransaction(int64_t at_snapshot_number = 0,
+                                     std::string *error = nullptr);
+    // fb_info_tra_snapshot_number of the current transaction; 0 when the
+    // server does not report one (Firebird 3, or not a snapshot).
+    int64_t SnapshotNumber();
+    // Return to the default read-committed transaction if a snapshot
+    // transaction is active, or start one if the connection has none
+    // (a failed TryStartSnapshotTransaction can leave it so). Throws if
+    // that fails. Pooled connections must be in this state before
+    // Release().
+    void RestoreDefaultTransaction();
+    bool InSnapshotTransaction() const { return in_snapshot_; }
+
     // Throws an IOException carrying isc_interprete'd messages, if status is
     // an error vector.
     static void Check(const ISC_STATUS *status, const std::string &context);
@@ -392,9 +423,12 @@ private:
     isc_db_handle db_ = 0;
     isc_tr_handle tr_ = 0;
     int64_t id_ = 0;
+    bool in_snapshot_ = false;
 
     void Attach();
     void StartReadOnlyTransaction();
+    // Same, but leaves any error in status instead of throwing.
+    void StartReadOnlyTransaction(ISC_STATUS *status);
 };
 
 } // namespace duckdb
