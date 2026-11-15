@@ -405,6 +405,12 @@ void FirebirdConnectionPool::Release(std::unique_ptr<FirebirdConnection> conn) {
     idle_.push_back(std::move(e));
 }
 
+void FirebirdConnectionPool::Discard(std::unique_ptr<FirebirdConnection> conn) {
+    if (!conn) return;
+    active_.fetch_sub(1, std::memory_order_relaxed);
+    total_discarded_.fetch_add(1, std::memory_order_relaxed);
+}
+
 size_t FirebirdConnectionPool::IdleCount() {
     std::lock_guard<std::mutex> g(lock_);
     return idle_.size();

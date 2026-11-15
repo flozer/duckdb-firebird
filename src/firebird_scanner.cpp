@@ -168,11 +168,11 @@ struct FirebirdLocalState : public LocalTableFunctionState {
         if (pool && conn) {
             // A worker of a shared-snapshot scan is on a SNAPSHOT
             // transaction; pooled connections go back read-committed. If
-            // that fails the connection is dropped instead of pooled.
+            // that fails the connection is discarded instead of pooled.
             try {
                 conn->RestoreDefaultTransaction();
             } catch (...) {
-                conn.reset();
+                pool->Discard(std::move(conn));
                 return;
             }
             pool->Release(std::move(conn));

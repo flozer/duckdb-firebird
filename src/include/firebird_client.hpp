@@ -291,6 +291,11 @@ public:
     // parked.
     void Release(std::unique_ptr<FirebirdConnection> conn);
 
+    // Destroy a leased connection that must not be reused (for example,
+    // one whose transaction could not be reset). Counts it as discarded
+    // and ends its lease, like a Release() that does not park it.
+    void Discard(std::unique_ptr<FirebirdConnection> conn);
+
     // Pool size hint (mostly for testing / introspection).
     size_t IdleCount();
 
@@ -301,9 +306,9 @@ public:
     int64_t TotalDiscarded() const { return total_discarded_.load(std::memory_order_relaxed); }
 
     // Connections handed out by Acquire/AcquireWithInfo and not yet
-    // returned via Release(). Process-relative; a caller that destroyed a
-    // connection without Release() would inflate it (all extension paths
-    // release through the pool).
+    // returned via Release() or Discard(). Process-relative; a caller that
+    // destroyed a connection without either would inflate it (all
+    // extension paths go through the pool).
     int64_t ActiveCount() const { return active_.load(std::memory_order_relaxed); }
 
     // Sanitized message of the most recent failed connection creation,

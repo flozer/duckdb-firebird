@@ -1530,8 +1530,9 @@ Colunas de saida (11):
 - `idle_connections`: conexoes paradas na fila idle agora.
 - `total_created`: conexoes fisicas criadas ao longo da vida.
 - `total_reused`: conexoes servidas da fila idle ao longo da vida.
-- `total_discarded`: conexoes destruidas (pool desligado, ou limite/expiracao
-  da fila idle atingidos).
+- `total_discarded`: conexoes destruidas (pool desligado, limite/expiracao
+  da fila idle atingidos, ou uma conexao cuja transacao nao pode ser
+  restaurada depois de um scan particionado).
 - `active_connections`: conexoes emprestadas agora e ainda nao devolvidas
   via Release.
 - `last_error`: mensagem sanitizada da criacao de conexao com falha mais
