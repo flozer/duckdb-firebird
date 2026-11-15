@@ -136,7 +136,9 @@ conexoes commitando alteracoes, como faz um scan serial.
 - Depois que o snapshot compartilhado e estabelecido, todo worker de
   particao precisa entrar nele. Se algum nao conseguir, o scan falha com um
   erro que cita a tabela e o motivo informado pelo servidor; nenhuma
-  particao e lida fora do snapshot.
+  particao e lida fora do snapshot. O erro tambem fica em
+  `firebird_last_query().error_message` quando outro worker do scan ja
+  abriu um cursor.
 - Scans seriais nao mudam: uma conexao, uma transacao read committed.
 - `firebird_last_query().snapshot_mode` informa qual caso valeu: `shared`,
   `independent` ou `serial`.
@@ -1531,8 +1533,9 @@ Colunas de saida (11):
 - `total_created`: conexoes fisicas criadas ao longo da vida.
 - `total_reused`: conexoes servidas da fila idle ao longo da vida.
 - `total_discarded`: conexoes destruidas (pool desligado, limite/expiracao
-  da fila idle atingidos, ou uma conexao cuja transacao nao pode ser
-  restaurada depois de um scan particionado).
+  da fila idle atingidos, uma conexao de worker que nao conseguiu entrar no
+  snapshot de um scan particionado, ou uma conexao cuja transacao nao pode
+  ser restaurada depois de um scan particionado).
 - `active_connections`: conexoes emprestadas agora e ainda nao devolvidas
   via Release nem descartadas.
 - `last_error`: mensagem sanitizada da criacao de conexao com falha mais

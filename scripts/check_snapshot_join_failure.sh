@@ -7,23 +7,31 @@
 # whose attachment was killed on the server is the natural way to get there:
 # the worker leases it, cannot join, and the scan must stop.
 #
-# One DuckDB CLI session on the ATTACH path:
-#   1. scan PART_RANGE once (snapshot_mode = 'shared'), which leaves the
-#      workers' connections idle in the pool;
-#   2. kill those attachments from isql via `.shell`
-#      (DELETE FROM MON$ATTACHMENTS);
-#   3. scan again: it must fail with the "could not join the scan's shared
-#      snapshot" error naming the table;
-#   4. scan a few more times: any scan that still gets a dead connection
-#      must fail with that same error, and a later one must return all 300
-#      rows with snapshot_mode = 'shared' on new connections; every scan
-#      after it must succeed too;
-#   5. firebird_pool_stats() must show no connection still leased and at
-#      least one discarded.
+# One DuckDB CLI session on the ATTACH path, in two phases:
+#   * one:  kill ONE of the idle pooled attachments, so the next scan has
+#           workers that join the snapshot and one worker that cannot;
+#   * all:  kill ALL of them, so no worker can join.
+# In each phase the script
+#   1. scans PART_RANGE (300 rows, snapshot_mode = 'shared'), which leaves
+#      the workers' connections idle in the pool;
+#   2. kills attachments from isql via `.shell` (DELETE FROM MON$ATTACHMENTS)
+#      and checks how many it killed (1, or every idle pooled connection);
+#   3. scans again: it must fail with the "could not join the scan's shared
+#      snapshot" error naming the table, and right after it
+#      firebird_pool_stats() must show no connection still leased and at
+#      least one more discarded;
+#      If a worker that did join recorded a cursor of the failed scan,
+#      firebird_last_query() must carry the join error; if none did, it
+#      must still show the warm-up scan's record, untouched;
+#   4. scans up to RETRIES more times: any scan that still gets a dead
+#      connection must fail with that same error, a later one must return
+#      all 300 rows with snapshot_mode = 'shared', and every scan after it
+#      must succeed too.
 # Any other error fails the check. Firebird 3 has no shared snapshot, so the
 # check is skipped there.
 #
-# Uses PART_RANGE from scripts/fixture_partitions.sql (read only).
+# Uses PART_RANGE from scripts/fixture_partitions.sql (read only). Needs a
+# machine with at least 2 cores, so that the ATTACH scan is partitioned.
 #
 # Defaults match the Linux FB matrix (server in the `fb` container, port
 # 3050). Override for local runs:
@@ -63,101 +71,149 @@ if [ "$major" -lt 4 ]; then
     exit 0
 fi
 
-# Kills every attachment of a DuckDB process to this database except isql's
-# own, and prints how many it killed.
-kill_sh="$work/kill_attachments.sh"
-{
-    echo '#!/usr/bin/env bash'
-    echo 'set -euo pipefail'
-    printf '%s -q -bail -u %q -p %q %q <<'"'"'SQL'"'"'\n' "$FB_ISQL" "$FB_USER" "$FB_PASS" "$FB_ISQL_DB"
-    cat <<'SQL'
-SET HEADING OFF;
-SELECT 'killing ' || COUNT(*) || ' attachments' FROM MON$ATTACHMENTS
- WHERE MON$ATTACHMENT_ID <> CURRENT_CONNECTION AND MON$SYSTEM_FLAG = 0
-   AND MON$REMOTE_PROCESS CONTAINING 'duckdb';
-DELETE FROM MON$ATTACHMENTS
- WHERE MON$ATTACHMENT_ID <> CURRENT_CONNECTION AND MON$SYSTEM_FLAG = 0
-   AND MON$REMOTE_PROCESS CONTAINING 'duckdb';
-COMMIT;
-SQL
-    echo 'SQL'
-    # isql leaves its last prompt without a newline; end the line here so
-    # the next scan's error starts on its own line.
-    echo 'echo'
-} > "$kill_sh"
-chmod +x "$kill_sh"
-kill_cmd=$kill_sh
-case "${OSTYPE:-}" in
-    msys* | cygwin*)
-        # Local runs from Git Bash on Windows: `.shell` goes through cmd.exe,
-        # and the CLI drops backslashes, so use forward slashes. One argument
-        # only: the CLI quotes each one, which cmd.exe mangles.
-        printf '@bash "%s"\r\n' "$(cygpath -m "$kill_sh")" > "$work/kill_attachments.bat"
-        kill_cmd=$(cygpath -m "$work/kill_attachments.bat")
-        ;;
-esac
+# kill_helper <name> <ROWS clause or empty>: writes a script that kills the
+# attachments of DuckDB processes to this database (never isql's own; at
+# most one with "ROWS 1"), printing how many, and prints the command to pass
+# to `.shell`.
+kill_helper() {
+    local sh="$work/kill_$1.sh"
+    {
+        echo '#!/usr/bin/env bash'
+        echo 'set -euo pipefail'
+        printf '%s -q -bail -u %q -p %q %q <<'"'"'SQL'"'"'\n' "$FB_ISQL" "$FB_USER" "$FB_PASS" "$FB_ISQL_DB"
+        echo 'SET HEADING OFF;'
+        echo "SELECT 'killing ' || MINVALUE(COUNT(*), ${3}) || ' attachments' FROM MON\$ATTACHMENTS"
+        echo " WHERE MON\$ATTACHMENT_ID <> CURRENT_CONNECTION AND MON\$SYSTEM_FLAG = 0"
+        echo "   AND MON\$REMOTE_PROCESS CONTAINING 'duckdb';"
+        echo "DELETE FROM MON\$ATTACHMENTS"
+        echo " WHERE MON\$ATTACHMENT_ID <> CURRENT_CONNECTION AND MON\$SYSTEM_FLAG = 0"
+        echo "   AND MON\$REMOTE_PROCESS CONTAINING 'duckdb' $2;"
+        echo 'COMMIT;'
+        echo 'SQL'
+        # isql leaves its last prompt without a newline; end the line here so
+        # the next scan's error starts on its own line.
+        echo 'echo'
+    } > "$sh"
+    chmod +x "$sh"
+    case "${OSTYPE:-}" in
+        msys* | cygwin*)
+            # Local runs from Git Bash on Windows: `.shell` goes through
+            # cmd.exe, and the CLI drops backslashes, so use forward slashes.
+            # One argument only: the CLI quotes each one, which cmd.exe
+            # mangles.
+            printf '@bash "%s"\r\n' "$(cygpath -m "$sh")" > "$work/kill_$1.bat"
+            cygpath -m "$work/kill_$1.bat"
+            ;;
+        *) echo "$sh" ;;
+    esac
+}
 
-scans=""
-for i in $(seq 3 $((RETRIES + 2))); do
-    scans+="SELECT 'scan${i} rows=' || count(*) FROM fbk.main.PART_RANGE;
-SELECT 'scan${i} mode=' || snapshot_mode FROM firebird_last_query();
-"
-done
+# phase_sql <phase> <kill command>: the SQL of one phase. Scans are numbered
+# 1 (warm-up), 2 (after the kill) and 3.. (retries).
+phase_sql() {
+    local p=$1 i
+    echo ".print === phase $p"
+    echo "SELECT '$p scan1 rows=' || count(*) FROM fbk.main.PART_RANGE;"
+    echo "SELECT '$p scan1 mode=' || snapshot_mode FROM firebird_last_query();"
+    echo "SELECT '$p telemetry after scan1: captured_at=' || captured_at || ' log_rows=' || (SELECT count(*) FROM firebird_query_log()) || ' join_error=' || (coalesce(error_message, '') LIKE '%could not join the scan''s shared snapshot%') FROM firebird_last_query();"
+    echo "SELECT '$p pool before idle=' || idle_connections || ' discarded=' || total_discarded FROM firebird_pool_stats('fbk');"
+    echo ".shell $2"
+    echo "SELECT '$p scan2 rows=' || count(*) FROM fbk.main.PART_RANGE;"
+    echo "SELECT '$p pool after failed scan active=' || active_connections || ' discarded=' || total_discarded FROM firebird_pool_stats('fbk');"
+    echo "SELECT '$p telemetry after failed scan: captured_at=' || captured_at || ' log_rows=' || (SELECT count(*) FROM firebird_query_log()) || ' join_error=' || (coalesce(error_message, '') LIKE '%could not join the scan''s shared snapshot%') FROM firebird_last_query();"
+    for i in $(seq 3 $((RETRIES + 2))); do
+        echo "SELECT '$p scan$i rows=' || count(*) FROM fbk.main.PART_RANGE;"
+        echo "SELECT '$p scan$i mode=' || snapshot_mode FROM firebird_last_query();"
+    done
+    echo "SELECT '$p pool after active=' || active_connections || ' discarded=' || total_discarded || ' idle=' || idle_connections FROM firebird_pool_stats('fbk');"
+}
 
 out="$work/session.out"
 # No -bail: the failing scans are expected; the output is checked below.
-"$DUCKDB" -unsigned -list -noheader > "$out" 2>&1 <<EOF || true
-${DUCKDB_PRELUDE}
-ATTACH '${FIREBIRD_PARTITIONS_DB}' AS fbk (TYPE firebird);
-SELECT 'scan1 rows=' || count(*) FROM fbk.main.PART_RANGE;
-SELECT 'scan1 mode=' || snapshot_mode FROM firebird_last_query();
-SELECT 'pool before idle=' || idle_connections FROM firebird_pool_stats('fbk');
-.shell ${kill_cmd}
-SELECT 'scan2 rows=' || count(*) FROM fbk.main.PART_RANGE;
-SELECT 'pool after failed scan active=' || active_connections || ' discarded=' || total_discarded
-       FROM firebird_pool_stats('fbk');
-${scans}
-SELECT 'pool after active=' || active_connections || ' discarded=' || total_discarded
-       || ' idle=' || idle_connections FROM firebird_pool_stats('fbk');
-EOF
+{
+    echo "${DUCKDB_PRELUDE}"
+    echo "ATTACH '${FIREBIRD_PARTITIONS_DB}' AS fbk (TYPE firebird);"
+    echo "SET firebird_query_log_size = 1000;"
+    phase_sql one "$(kill_helper one 'ROWS 1' 1)"
+    phase_sql all "$(kill_helper all '' 1000000)"
+} | "$DUCKDB" -unsigned -list -noheader > "$out" 2>&1 || true
 tr -d '\r' < "$out" > "$out.lf"
 cat "$out.lf"
 
 fail() { echo "check_snapshot_join_failure: FAILED: $*"; exit 1; }
 has() { grep -qxF -- "$1" "$out.lf"; }
+# count <grep option> <pattern> <file>: occurrences, 0 when none.
+count() { grep -o "$1" -- "$2" "$3" | wc -l || true; }
 
-has 'scan1 rows=300' || fail "first scan did not return 300 rows"
-has 'scan1 mode=shared' || fail "first scan was not 'shared'"
-grep -qE '^ *killing [1-9][0-9]* attachments *$' "$out.lf" || fail "no DuckDB attachment was killed"
-grep -q '^scan2 rows=' "$out.lf" && fail "the scan after the kill did not fail"
+summary=""
+telemetry=""
+# check_phase <phase> <expected kill count, or "all">
+check_phase() {
+    local p=$1 want=$2 sec="$work/$1.out" line idle disc0 disc killed i first_ok=""
+    # This phase's part of the output: from its marker to the next one.
+    awk -v m="=== phase $p" '$0 == m {f = 1; next} /^=== phase / {f = 0} f' "$out.lf" > "$sec"
 
-join_errors=$(grep -oF -- "$JOIN_ERROR" "$out.lf" | wc -l)
-all_errors=$(grep -oE '[A-Za-z]+ Error: ' "$out.lf" | wc -l)
-[ "$join_errors" -ge 1 ] || fail "no 'could not join the scan's shared snapshot' error"
-[ "$all_errors" -eq "$join_errors" ] || fail "$((all_errors - join_errors)) error(s) of another kind"
+    has "$p scan1 rows=300" || fail "$p: first scan did not return 300 rows"
+    has "$p scan1 mode=shared" || fail "$p: first scan was not 'shared'"
+    line=$(grep "^$p pool before idle=" "$sec" || true)
+    [[ "$line" =~ idle=([0-9]+)\ discarded=([0-9]+)$ ]] || fail "$p: unexpected pool stats: '$line'"
+    idle=${BASH_REMATCH[1]}; disc0=${BASH_REMATCH[2]}
+    [ "$idle" -ge 2 ] || fail "$p: only $idle idle pooled connection(s); the scan was not partitioned"
+    [ "$want" = all ] && want=$idle
+    killed=$(sed -nE 's/^ *killing ([0-9]+) attachments *$/\1/p' "$sec")
+    [ "$killed" = "$want" ] || fail "$p: killed '$killed' attachments, expected $want (idle pooled: $idle)"
+    grep -q "^$p scan2 rows=" "$sec" && fail "$p: the scan after the kill did not fail"
 
-# The worker that failed must have discarded its connection, not returned
-# it to the pool (a killed attachment fails the rollback and would otherwise
-# be leased again by the next scan).
-line=$(grep '^pool after failed scan ' "$out.lf" || true)
-[[ "$line" =~ active=0\ discarded=([0-9]+) ]] || fail "unexpected pool stats: '$line'"
-[ "${BASH_REMATCH[1]}" -ge 1 ] || fail "the failed scan discarded no connection: '$line'"
+    local join_errors all_errors
+    join_errors=$(count -F "$JOIN_ERROR" "$sec")
+    all_errors=$(count -E '[A-Za-z]+ Error: ' "$sec")
+    [ "$join_errors" -ge 1 ] || fail "$p: no 'could not join the scan's shared snapshot' error"
+    [ "$all_errors" -eq "$join_errors" ] || fail "$p: $((all_errors - join_errors)) error(s) of another kind"
 
-first_ok=""
-for i in $(seq 3 $((RETRIES + 2))); do
-    if has "scan${i} rows=300"; then
-        if [ -z "$first_ok" ]; then
-            first_ok=$i
-            has "scan${i} mode=shared" || fail "scan $i after recovery was not 'shared'"
-        fi
-    elif [ -n "$first_ok" ]; then
-        fail "scan $i failed after scan $first_ok had recovered"
+    # The worker that failed must have discarded its connection, not
+    # returned it to the pool (a killed attachment fails the rollback and
+    # would otherwise be leased again by the next scan).
+    line=$(grep "^$p pool after failed scan " "$sec" || true)
+    [[ "$line" =~ active=0\ discarded=([0-9]+)$ ]] || fail "$p: unexpected pool stats: '$line'"
+    disc=${BASH_REMATCH[1]}
+    [ "$disc" -gt "$disc0" ] || fail "$p: the failed scan discarded no connection: '$line'"
+
+    # Telemetry: if a worker that did join recorded a cursor of the failed
+    # scan, firebird_last_query() must carry the join error; if none did,
+    # it must still be scan 1's record, untouched.
+    local t1 t2 c1 c2 n1 n2 e2
+    t1=$(grep "^$p telemetry after scan1: " "$sec" || true)
+    t2=$(grep "^$p telemetry after failed scan: " "$sec" || true)
+    [[ "$t1" =~ captured_at=(.*)\ log_rows=([0-9]+)\ join_error=false$ ]] || fail "$p: unexpected telemetry: '$t1'"
+    c1=${BASH_REMATCH[1]}; n1=${BASH_REMATCH[2]}
+    [[ "$t2" =~ captured_at=(.*)\ log_rows=([0-9]+)\ join_error=(true|false)$ ]] || fail "$p: unexpected telemetry: '$t2'"
+    c2=${BASH_REMATCH[1]}; n2=${BASH_REMATCH[2]}; e2=${BASH_REMATCH[3]}
+    if [ "$n2" -gt "$n1" ]; then
+        [ "$e2" = true ] || fail "$p: the failed scan logged $((n2 - n1)) cursor(s) but firebird_last_query() has no join error"
+        telemetry="the failed scan logged $((n2 - n1)) cursor(s), last_query has the join error"
+    else
+        [ "$e2" = false ] && [ "$c2" = "$c1" ] || fail "$p: nothing logged, but firebird_last_query() changed: '$t1' -> '$t2'"
+        telemetry="nothing recorded, previous record untouched"
     fi
-done
-[ -n "$first_ok" ] || fail "no scan recovered within $RETRIES retries"
 
-line=$(grep '^pool after ' "$out.lf" || true)
-[[ "$line" =~ active=0\ discarded=([0-9]+) ]] || fail "unexpected pool stats: '$line'"
-[ "${BASH_REMATCH[1]}" -ge 1 ] || fail "no connection was discarded: '$line'"
+    for i in $(seq 3 $((RETRIES + 2))); do
+        if has "$p scan$i rows=300"; then
+            if [ -z "$first_ok" ]; then
+                first_ok=$i
+                has "$p scan$i mode=shared" || fail "$p: scan $i after recovery was not 'shared'"
+            fi
+        elif [ -n "$first_ok" ]; then
+            fail "$p: scan $i failed after scan $first_ok had recovered"
+        fi
+    done
+    [ -n "$first_ok" ] || fail "$p: no scan recovered within $RETRIES retries"
 
-echo "check_snapshot_join_failure: ok ($join_errors failed scan(s), recovered at scan $first_ok)"
+    line=$(grep "^$p pool after active=" "$sec" || true)
+    [[ "$line" =~ ^$p\ pool\ after\ active=0\ discarded=([0-9]+)\ idle= ]] || fail "$p: unexpected final pool stats: '$line'"
+    summary+=" $p: killed $killed of $idle, $join_errors failed scan(s), $((disc - disc0)) discarded by the first, recovered at scan $first_ok, telemetry: $telemetry;"
+}
+
+check_phase one 1
+check_phase all all
+summary=${summary# }
+echo "check_snapshot_join_failure: ok (${summary%;})"

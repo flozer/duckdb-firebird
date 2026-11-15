@@ -97,6 +97,16 @@ struct FirebirdGlobalState : public GlobalTableFunctionState {
     std::unique_ptr<FirebirdConnection> snapshot_conn;
     int64_t snapshot_number = 0;
 
+    // Telemetry for a worker that cannot join. The failing worker stores
+    // its error here, and the cursor-record path takes the same lock, so
+    // the error lands on this scan's newest firebird_last_query() /
+    // firebird_query_log() record whichever happens first, and never on
+    // the record of an earlier query when no cursor of this scan was
+    // recorded.
+    std::mutex telemetry_lock;
+    bool cursor_recorded = false;
+    std::string join_error;
+
     idx_t MaxThreads() const override { return max_threads; }
 
     bool NextPartition(PartitionSpec &out) {
@@ -848,7 +858,7 @@ static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
 }
 
 static unique_ptr<LocalTableFunctionState> FirebirdScanInitLocal(
-    ExecutionContext & /*ctx*/,
+    ExecutionContext &ctx,
     TableFunctionInitInput &input,
     GlobalTableFunctionState *global_state) {
     auto &bind = input.bind_data->Cast<FirebirdBindData>();
@@ -878,16 +888,26 @@ static unique_ptr<LocalTableFunctionState> FirebirdScanInitLocal(
                                                       &error)) {
             // The connection may be unusable: a pooled attachment killed
             // on the server fails the rollback and keeps its old handle.
-            // Never put it back in the pool.
+            // Never put it back in the pool. (This also drops a connection
+            // whose fallback to read committed worked; that only costs a
+            // new attachment later.)
             if (local->pool) {
                 local->pool->Discard(std::move(local->conn));
             }
-            throw IOException(
+            const std::string msg =
                 "Firebird partitioned scan of table '" + bind.table_name +
                 "' stopped: a worker could not join the scan's shared "
                 "snapshot (number " + std::to_string(gstate.snapshot_number) +
                 "), and reading its partitions outside it would mix two "
-                "states of the table. Original error: " + error);
+                "states of the table. Original error: " + error;
+            {
+                std::lock_guard<std::mutex> g(gstate.telemetry_lock);
+                gstate.join_error = msg;
+                if (gstate.cursor_recorded) {
+                    GetObservabilityState(ctx.client)->SetError(msg);
+                }
+            }
+            throw IOException(msg);
         }
     }
     return std::move(local);
@@ -1073,7 +1093,16 @@ static bool OpenNextPartitionCursor(ClientContext &ctx,
                 log_size = setting_val.GetValue<int64_t>();
             }
         }
-        GetObservabilityState(ctx)->RecordQuery(rec, log_size);
+        {
+            // See FirebirdGlobalState::telemetry_lock.
+            std::lock_guard<std::mutex> g(gstate.telemetry_lock);
+            auto obs = GetObservabilityState(ctx);
+            obs->RecordQuery(rec, log_size);
+            gstate.cursor_recorded = true;
+            if (!gstate.join_error.empty()) {
+                obs->SetError(gstate.join_error);
+            }
+        }
 
         // G1 observability — firebird_unpushed_mode check point.
         //

@@ -100,7 +100,9 @@ connections commit changes, as a serial scan does.
   in earlier versions. Partitions can then see different committed states.
 - Once the shared snapshot is established, every partition worker must
   join it. If one cannot, the scan fails with an error naming the table and
-  the server's reason; no partition is read outside the snapshot.
+  the server's reason; no partition is read outside the snapshot. The error
+  is also set in `firebird_last_query().error_message` when another worker
+  of the scan has already opened a cursor.
 - Serial scans are unchanged: one connection, one read-committed
   transaction.
 - `firebird_last_query().snapshot_mode` reports which case applied:
@@ -877,7 +879,7 @@ Output columns (11):
 | `idle_connections` | BIGINT | Connections currently parked in the idle queue |
 | `total_created` | BIGINT | Lifetime physical connections created |
 | `total_reused` | BIGINT | Lifetime connections served from the idle queue |
-| `total_discarded` | BIGINT | Lifetime connections destroyed (pool disabled, idle cap/expiry hit, or a connection whose transaction could not be reset after a partitioned scan) |
+| `total_discarded` | BIGINT | Lifetime connections destroyed (pool disabled, idle cap/expiry hit, a worker connection that could not join a partitioned scan's snapshot, or one whose transaction could not be reset after a partitioned scan) |
 | `active_connections` | BIGINT | Connections currently leased out and not yet returned via Release or discarded |
 | `last_error` | VARCHAR | Sanitized message of the most recent failed connection creation (`NULL` when none); the password is redacted before storage |
 | `bytes_read_estimate` | BIGINT | G5 — lifetime estimate of Firebird payload bytes fetched by scans that ran **inside this catalog** (ATTACH path). Same semantics as the other lifetime counters: process-relative, never reset. Direct `firebird_scan()` calls are **not** included — they belong to no catalog. Estimate definition: see [`firebird_last_query()`](#firebird_last_query) |

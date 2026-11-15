@@ -17,7 +17,7 @@
   (independent read-committed transactions).
 - Once the shared snapshot is established, a partition worker that cannot
   join it fails the scan with an error; no partition is read outside the
-  snapshot.
+  snapshot, and the worker's pooled connection is discarded.
 
 ### Added
 
@@ -27,11 +27,12 @@
 - `scripts/check_shared_snapshot.sh`: consistency check under a concurrent
   writer, run as its own step on every Firebird 3/4/5 leg of the Linux
   matrix.
-- `scripts/check_snapshot_join_failure.sh`: kills the pooled attachments of
-  an ATTACH and checks that the next partitioned scan fails with the
-  "could not join" error, that the dead connections are discarded rather
-  than pooled, and that a later scan succeeds (Firebird 4+; its own step in
-  the Linux matrix, skipped on Firebird 3).
+- `scripts/check_snapshot_join_failure.sh`: kills one, then all, of the
+  pooled attachments of an ATTACH and checks that the next partitioned scan
+  fails with the "could not join" error, that the dead connections are
+  discarded rather than pooled, what `firebird_last_query()` shows, and that
+  a later scan succeeds (Firebird 4+; its own step in the Linux matrix,
+  skipped on Firebird 3).
 
 ### Fixed
 

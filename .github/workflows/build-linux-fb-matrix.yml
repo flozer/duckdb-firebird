@@ -385,12 +385,12 @@ jobs:
           ISC_USER: SYSDBA
           ISC_PASSWORD: masterkey
         run: |
-          # Kills the pooled attachments of an ATTACH from isql via `.shell`
-          # (DELETE FROM MON$ATTACHMENTS), then checks that the next
-          # partitioned scan fails with the "could not join the scan's
-          # shared snapshot" error, that the dead connections are discarded
-          # rather than pooled, and that a later scan succeeds. FB4+; skips
-          # itself on FB3.
+          # Kills one, then all, of the pooled attachments of an ATTACH from
+          # isql via `.shell` (DELETE FROM MON$ATTACHMENTS), then checks
+          # that the next partitioned scan fails with the "could not join
+          # the scan's shared snapshot" error, that the dead connections are
+          # discarded rather than pooled, what firebird_last_query() shows,
+          # and that a later scan succeeds. FB4+; skips itself on FB3.
           bash scripts/check_snapshot_join_failure.sh
 
       - name: Stop Firebird container
