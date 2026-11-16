@@ -1060,8 +1060,8 @@ Output columns (18):
 | `oat_gap` | BIGINT | `next_transaction - oldest_active` |
 | `attachments` | INTEGER | Number of connections visible to the current user |
 | `warnings` | LIST(VARCHAR) | Active warning codes (empty when everything is healthy) |
-| `client_version` | VARCHAR | Version of the loaded Firebird client library, e.g. `'5.0.3.1683'` |
-| `inline_blob_size` | INTEGER | Largest blob, in bytes, that Firebird sends inline with its row on this attachment (`0` = inlining disabled); `NULL` when the client or the server is older than 5.0.3, and for local (XNET) and embedded attachments, where the server does not inline blobs. See [`firebird_max_inline_blob_size`](#set-firebird_max_inline_blob_size--bytes) |
+| `client_version` | VARCHAR | Version of the loaded Firebird client library, e.g. `'5.0.3.1683'`; `NULL` when the library doesn't report one |
+| `inline_blob_size` | INTEGER | Inline-blob limit of this attachment in bytes (Firebird counts each segment with a 2-byte length): blobs within it are sent with their row (`0` = inlining disabled); `NULL` when the client or the server is older than 5.0.3, and for local (XNET) and embedded attachments, where the server does not inline blobs. See [`firebird_max_inline_blob_size`](#set-firebird_max_inline_blob_size--bytes) |
 | `network_protocol` | VARCHAR | Transport of this attachment: `'TCPv4'`, `'TCPv6'`, `'XNET'` (Windows local), `'WNET'` (Firebird 3/4 named pipes); `NULL` when embedded |
 
 Warning codes:

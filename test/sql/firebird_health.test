@@ -103,12 +103,29 @@ FROM firebird_health('fb');
 # TCP through an older client.
 query II
 SELECT
-  CASE WHEN e.server_ok AND e.tcp AND e.client_ok THEN h.inline_blob_size >= 0
+  CASE WHEN e.server_ok AND e.tcp AND e.client_ok THEN h.inline_blob_size > 0
        ELSE h.inline_blob_size IS NULL END,
   list_contains(h.warnings, 'inline_blobs_unavailable') = (e.server_ok AND e.tcp AND NOT e.client_ok)
 FROM firebird_health('fb') h, inline_expect e;
 ----
 true	true
+
+# The largest limit, set explicitly, is reported exactly.
+statement ok
+SET firebird_max_inline_blob_size = 65535;
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb_max (TYPE firebird);
+
+query I
+SELECT CASE WHEN e.server_ok AND e.tcp AND e.client_ok THEN h.inline_blob_size = 65535
+            ELSE h.inline_blob_size IS NULL END
+FROM firebird_health('fb_max') h, inline_expect e;
+----
+true
+
+statement ok
+DETACH fb_max;
 
 # A new ATTACH picks up the session setting: 0 disables inlining.
 statement ok
@@ -145,9 +162,9 @@ firebird_max_inline_blob_size must be -1 (client default) or 0..65535
 statement ok
 SET firebird_max_inline_blob_size = -1;
 
-# A small limit: blobs up to 16 bytes come inline (FILE_STORAGE: 5 and 6
-# bytes), larger ones the usual way (TBLOB_MULTISEG: 4020 bytes, multi-
-# segment). Both must read the same bytes as through the default ATTACH.
+# A small limit (Firebird counts each segment with its 2-byte length):
+# FILE_STORAGE's 5- and 6-byte blobs come inline, TBLOB_MULTISEG's 4020
+# bytes in 51 segments the usual way. Both must read the same bytes as through the default ATTACH.
 statement ok
 SET firebird_max_inline_blob_size = 16;
 

@@ -1744,8 +1744,8 @@ Colunas de saida (18):
 | `oat_gap` | BIGINT | `next_transaction - oldest_active` |
 | `attachments` | INTEGER | Numero de conexoes visiveis ao usuario atual |
 | `warnings` | LIST(VARCHAR) | Lista de avisos ativos (vazia quando tudo esta ok) |
-| `client_version` | VARCHAR | Versao da biblioteca cliente Firebird carregada, ex.: `'5.0.3.1683'` |
-| `inline_blob_size` | INTEGER | Maior blob, em bytes, que o Firebird envia inline junto com a linha neste attach (`0` = inline desligado); `NULL` quando o cliente ou o servidor e anterior ao 5.0.3, e em attaches locais (XNET) e embedded, onde o servidor nao envia blobs inline. Veja `SET firebird_max_inline_blob_size` |
+| `client_version` | VARCHAR | Versao da biblioteca cliente Firebird carregada, ex.: `'5.0.3.1683'`; `NULL` quando a biblioteca nao informa |
+| `inline_blob_size` | INTEGER | Limite de blob inline deste attach em bytes (o Firebird conta cada segmento com 2 bytes de tamanho): blobs dentro dele vem junto com a linha (`0` = inline desligado); `NULL` quando o cliente ou o servidor e anterior ao 5.0.3, e em attaches locais (XNET) e embedded, onde o servidor nao envia blobs inline. Veja `SET firebird_max_inline_blob_size` |
 | `network_protocol` | VARCHAR | Transporte deste attach: `'TCPv4'`, `'TCPv6'`, `'XNET'` (local no Windows), `'WNET'` (named pipes do Firebird 3/4); `NULL` quando embedded |
 
 Avisos possiveis:

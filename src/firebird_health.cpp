@@ -138,7 +138,7 @@ static HealthInfo BuildHealth(FirebirdConnection &conn) {
     const bool server_inline = VersionAtLeast503(h.engine_version);
     const bool tcp = h.network_protocol.rfind("TCP", 0) == 0;
     // Only asked where blobs can be inlined: elsewhere the answer is unused.
-    // -1 = the client can't inline; -2 = the request failed.
+    // -1 = the client can't inline; -2 = not asked, or the request failed.
     const int64_t client_inline = (server_inline && tcp) ? conn.MaxInlineBlobSize() : -2;
     if (client_inline >= 0) {
         h.inline_blob_size = client_inline;
@@ -168,7 +168,7 @@ static HealthInfo BuildHealth(FirebirdConnection &conn) {
     // The server could inline blobs over this TCP attachment but the loaded
     // client library can't: actionable (load a 5.0.3+ fbclient), unlike an
     // old server or a local attachment.
-    if (server_inline && tcp && client_inline == -1) {
+    if (client_inline == -1) {  // only asked for a 5.0.3+ server over TCP
         h.warnings.push_back("inline_blobs_unavailable");
     }
 

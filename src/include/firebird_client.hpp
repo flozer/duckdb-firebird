@@ -86,7 +86,8 @@ void ValidateDummyPacketInterval(int64_t seconds);
 void ValidateMaxInlineBlobSize(int64_t bytes);
 // Version of the loaded Firebird client library, normalized from
 // isc_get_client_version()'s "WI-V6.3.3.1683 Firebird 5.0" form to
-// "5.0.3.1683". Falls back to the raw string when it can't be parsed.
+// "5.0.3.1683". Falls back to the raw string when it can't be parsed, and
+// returns "" when the library doesn't export isc_get_client_version.
 std::string FirebirdClientVersion();
 
 // Throws a BinderException if `charset` would deliver bytes DuckDB's
