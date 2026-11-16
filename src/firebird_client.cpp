@@ -778,6 +778,10 @@ int64_t FirebirdConnection::SnapshotNumber() {
     return static_cast<int64_t>(value);
 }
 
+void FirebirdConnection::Execute(const std::string &sql) {
+    OpenCursor(sql);  // prepared and executed; freed at the end of this call
+}
+
 int64_t FirebirdConnection::PageSize() {
     char items[] = {isc_info_page_size, isc_info_end};
     char buf[32] = {};

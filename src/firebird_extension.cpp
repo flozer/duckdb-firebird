@@ -203,6 +203,27 @@ static void LoadInternal(ExtensionLoader &loader) {
     //   SET firebird_query_log_size = 16;
     // Per-ClientContext storage (FirebirdObservabilityState) ensures one
     // session never reads another's ring buffer.
+    // Transaction snapshot (ATTACH path, opt-in): every scan of an ATTACH
+    // in one DuckDB transaction reads one Firebird snapshot (Firebird 4+).
+    // An ATTACH option transaction_snapshot overrides it per catalog.
+    config.AddExtensionOption(
+        "firebird_transaction_snapshot",
+        "Every scan of a Firebird ATTACH in one DuckDB transaction reads one "
+        "Firebird snapshot (Firebird 4+; off by default).",
+        LogicalType::BOOLEAN,
+        Value::BOOLEAN(false));
+    config.AddExtensionOption(
+        "firebird_transaction_snapshot_idle_timeout",
+        "Seconds from the end of a statement to the next scan of the ATTACH "
+        "in the same DuckDB transaction after which the server releases the "
+        "transaction's Firebird snapshot (that scan then fails). 0 = no limit.",
+        LogicalType::BIGINT,
+        Value::BIGINT(60),
+        [](ClientContext &, SetScope, Value &parameter) {
+            if (!parameter.IsNull()) {
+                ValidateTransactionSnapshotIdleTimeout(parameter.GetValue<int64_t>());
+            }
+        });
     config.AddExtensionOption(
         "firebird_query_log_size",
         "Maximum entries kept by firebird_query_log() per session. "

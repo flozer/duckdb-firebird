@@ -322,6 +322,9 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_shared_snapshot.test
           # partition_by = 'pk' | 'dbkey' (DB_KEY ranges on FB4/FB5, fallback on FB3).
           ./build/release/test/unittest test/sql/firebird_partition_by.test
+          # Transaction snapshot on the ATTACH path (opt-in): 'transaction'
+          # on FB4+, per-scan behavior on FB3; same partitions fixture.
+          ./build/release/test/unittest test/sql/firebird_transaction_snapshot.test
           # G-queue coverage (v1.2.0): unpushed-mode guard + none_pushdown
           # (NONE fixture), numeric_widen (numerics fixture), session
           # stability + bytes estimate (main fixture).
@@ -347,8 +350,11 @@ jobs:
           # script proves the guarantee directly: a second connection
           # commits transfers between partitions for the whole scan, and
           # every partitioned scan must return the one committed state
-          # (FB4+, snapshot_mode = 'shared'). On FB3 it checks the
-          # fallback ('independent') and only reports the torn reads.
+          # (FB4+, snapshot_mode = 'shared'). It also checks the opt-in
+          # transaction snapshot on the ATTACH path (two scans of one
+          # statement, two statements of one transaction, serial scans, the
+          # idle limit). On FB3 it checks the fallback ('independent') and
+          # only reports the torn reads.
           bash scripts/check_shared_snapshot.sh
 
       - name: FB4+ live type smoke (INT128 / DECIMAL(38) / TIMESTAMP_TZ)
@@ -423,6 +429,9 @@ jobs:
           # and scans work again from the call after the failed one, and that
           # PART_RANGE is partitioned again (#105). All FB versions. On FB4+
           # also a connection killed by the server's idle timeout (idle1).
+          # The txsnap phase kills the transaction snapshot's coordinator and
+          # the parked connections it could pick, and txreuse (FB4+) has
+          # another session reuse a lost snapshot number (#104).
           if [ "${{ matrix.fb_major }}" != "3" ]; then
             export FIREBIRD_IDLE_DB="user=SYSDBA;password=masterkey;database=localhost/3050:idle1;charset=UTF8"
           fi

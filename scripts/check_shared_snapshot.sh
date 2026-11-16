@@ -184,8 +184,141 @@ for i in $(seq 1 "$SCANS"); do
         "ATTACH '$FIREBIRD_SNAPSHOT_DB' AS fbs (TYPE firebird); SELECT SUM(VAL), COUNT(*) FROM fbs.main.ACC;" pk
 done
 
+# Transaction snapshot (#104): with SET firebird_transaction_snapshot = true,
+# every scan of an ATTACH in one DuckDB transaction reads one snapshot
+# (Firebird 4+). Firebird 3 falls back to per-scan behavior: reported only.
+echo "== ATTACH, transaction snapshot (SET firebird_transaction_snapshot = true)"
+tx_failures=0
+tx_session() {  # tx_session <sql>: one CLI session with the option on, output on stdout
+    printf '%s\nSET firebird_transaction_snapshot = true;\nATTACH '"'"'%s'"'"' AS fbs (TYPE firebird);\n%s\n' \
+        "$DUCKDB_PRELUDE" "$FIREBIRD_SNAPSHOT_DB" "$1" | "$DUCKDB" -list -noheader 2>&1 | tr -d '\r' || true
+}
+tx_expect() {  # tx_expect <label> <expected> <actual> <output> <Firebird 3 pattern>
+    if [ "$3" = "$2" ]; then
+        echo "  $1: $3 -> ok"
+    elif [ "$expected_mode" != shared ] && echo "$3" | grep -qxE "$5"; then
+        # Firebird 3: the statement must work and report the per-scan
+        # mode; only the values may drift.
+        echo "  $1: $3, expected $2 -> torn (expected without a shared snapshot)"
+    else
+        echo "  $1: $3, expected $2 -> FAIL"
+        echo "$4" | sed 's/^/    | /'
+        tx_failures=$((tx_failures + 1))
+    fi
+}
+# Firebird 3 has no snapshot numbers: the scans report what they report
+# without the option (partitioned: independent, serial: serial).
+tx_mode=transaction tx_serial_mode=transaction
+[ "$expected_mode" = shared ] || { tx_mode=independent; tx_serial_mode=serial; }
+for i in $(seq 1 "$SCANS"); do
+    out=$(tx_session "SELECT 'sum=' || ((SELECT SUM(VAL) FROM fbs.main.ACC WHERE ID <= 1000000) + (SELECT SUM(VAL) FROM fbs.main.ACC WHERE ID > 1000000));
+SELECT 'mode=' || snapshot_mode FROM firebird_last_query();")
+    tx_expect "one statement, two scans $i" "sum=$EXPECTED_SUM mode=$tx_mode" \
+        "$(echo "$out" | grep -E '^(sum|mode)=' | tr '\n' ' ' | sed 's/ $//')" "$out" \
+        'sum=[0-9]+ mode=independent'
+    out=$(tx_session "BEGIN;
+CREATE TEMP TABLE lo AS SELECT SUM(VAL) s FROM fbs.main.ACC WHERE ID <= 1000000;
+CREATE TEMP TABLE hi AS SELECT SUM(VAL) s FROM fbs.main.ACC WHERE ID > 1000000;
+SELECT 'sum=' || (lo.s + hi.s) FROM lo, hi;
+COMMIT;")
+    tx_expect "two statements, one transaction $i" "sum=$EXPECTED_SUM" \
+        "$(echo "$out" | grep -E '^sum=' | head -1)" "$out" 'sum=[0-9]+'
+    # Serial scans join too: the one-row WRITER_STATE read twice in one
+    # transaction, with a full scan of ACC in between while the writer
+    # commits, must return the same counter.
+    out=$(tx_session "BEGIN;
+CREATE TEMP TABLE c1 AS SELECT TRANSFERS t FROM fbs.main.WRITER_STATE;
+SELECT 'serial mode=' || snapshot_mode || ' partitions=' || partitions FROM firebird_last_query();
+SELECT 'in between=' || COUNT(*) FROM fbs.main.ACC;
+CREATE TEMP TABLE c2 AS SELECT TRANSFERS t FROM fbs.main.WRITER_STATE;
+SELECT 'same=' || (c1.t = c2.t) FROM c1, c2;
+COMMIT;")
+    tx_expect "serial scan read twice $i" "serial mode=$tx_serial_mode partitions=1 same=true" \
+        "$(echo "$out" | grep -E '^(serial mode|same)=' | tr '\n' ' ' | sed 's/ $//')" "$out" \
+        'serial mode=serial partitions=1 same=(true|false)'
+done
+
+if [ "$expected_mode" = shared ]; then
+    # The idle limit: the server closes the coordinator after
+    # firebird_transaction_snapshot_idle_timeout seconds between two
+    # statements of the transaction; the next scan fails and names the
+    # setting. A statement that runs longer than the limit is not idle time.
+    wait_sh="$work/wait.sh"
+    printf '#!/usr/bin/env bash\nsleep 8\n' > "$wait_sh"; chmod +x "$wait_sh"
+    wait_cmd=$wait_sh
+    case "${OSTYPE:-}" in
+        msys* | cygwin*)
+            printf '@bash "%s"\r\n' "$(cygpath -m "$wait_sh")" > "$work/wait.bat"
+            wait_cmd=$(cygpath -m "$work/wait.bat") ;;
+    esac
+    out=$(tx_session "SET firebird_transaction_snapshot_idle_timeout = 2;
+BEGIN;
+SELECT 'idle scan1=' || TRANSFERS FROM fbs.main.WRITER_STATE;
+SELECT 'idle scan2=' || TRANSFERS FROM fbs.main.WRITER_STATE;
+.timer on
+SELECT 'idle long statement=' || COUNT(*) FROM fbs.main.ACC a JOIN fbs.main.ACC b USING (ID) JOIN fbs.main.ACC c USING (ID);
+.timer off
+SELECT 'idle scan3=' || TRANSFERS FROM fbs.main.WRITER_STATE;
+.shell $wait_cmd
+SELECT 'idle scan4=' || TRANSFERS FROM fbs.main.WRITER_STATE;
+ROLLBACK;
+SELECT 'idle after rollback=' || COUNT(*) FROM fbs.main.WRITER_STATE;
+SELECT 'idle pool active=' || active_connections FROM firebird_pool_stats('fbs');")
+    t1=$(echo "$out" | sed -n 's/^idle scan1=//p')
+    # The long statement must outlast the limit as the server applies it
+    # (limit + 1 s), or it proves nothing.
+    long_s=$(echo "$out" | sed -n 's/^Run Time (s): real \([0-9.]*\).*/\1/p' | head -1)
+    long_ok=$(awk -v t="${long_s:-0}" 'BEGIN { print (t > 3) ? 1 : 0 }')
+    if [ -n "$t1" ] && echo "$out" | grep -qx "idle scan2=$t1" && [ "$long_ok" = 1 ] &&
+       echo "$out" | grep -qx 'idle long statement=2000001' && echo "$out" | grep -qx "idle scan3=$t1" &&
+       ! echo "$out" | grep -q '^idle scan4=' &&
+       echo "$out" | grep -q 'firebird_transaction_snapshot_idle_timeout (2 s)' &&
+       echo "$out" | grep -qx 'idle after rollback=1' && echo "$out" | grep -qx 'idle pool active=0'; then
+        echo "  idle limit (2 s): statements back to back and a ${long_s} s statement keep the snapshot; the scan after 8 s idle failed and named the setting; after ROLLBACK scans work -> ok"
+    else
+        echo "  idle limit (2 s; long statement ${long_s:-?} s, must exceed 3 s) -> FAIL"
+        echo "$out" | sed 's/^/    | /'
+        tx_failures=$((tx_failures + 1))
+    fi
+    # The server really gets the limit: between two statements the
+    # coordinator's MON$IDLE_TIMEOUT is limit + 1 (30 s here, so slow
+    # connects can't expire it), and it is reset at COMMIT.
+    out=$(tx_session "SET firebird_transaction_snapshot_idle_timeout = 30;
+BEGIN;
+SELECT 'armed scan=' || COUNT(*) FROM fbs.main.WRITER_STATE;
+SELECT 'armed=' || COUNT(*) FROM firebird_scan('$FIREBIRD_SNAPSHOT_DB', 'MON\$ATTACHMENTS') WHERE \"MON\$IDLE_TIMEOUT\" = 31;
+COMMIT;
+SELECT 'armed after commit=' || COUNT(*) FROM firebird_scan('$FIREBIRD_SNAPSHOT_DB', 'MON\$ATTACHMENTS') WHERE \"MON\$IDLE_TIMEOUT\" = 31;")
+    if echo "$out" | grep -qx 'armed scan=1' && echo "$out" | grep -qx 'armed=1' &&
+       echo "$out" | grep -qx 'armed after commit=0'; then
+        echo "  idle limit 30 s: armed on the server as 31 between statements, reset at COMMIT -> ok"
+    else
+        echo "  idle limit 30 s armed on the server -> FAIL"
+        echo "$out" | sed 's/^/    | /'
+        tx_failures=$((tx_failures + 1))
+    fi
+    # The largest limit (2147483646 s) is armed as 2^31 - 1 on the server and
+    # reset at COMMIT.
+    out=$(tx_session "SET firebird_transaction_snapshot_idle_timeout = 2147483646;
+BEGIN;
+SELECT 'max scan=' || COUNT(*) FROM fbs.main.WRITER_STATE;
+SELECT 'max armed=' || COUNT(*) FROM firebird_scan('$FIREBIRD_SNAPSHOT_DB', 'MON\$ATTACHMENTS') WHERE \"MON\$IDLE_TIMEOUT\" = 2147483647;
+COMMIT;
+SELECT 'max after commit=' || COUNT(*) FROM firebird_scan('$FIREBIRD_SNAPSHOT_DB', 'MON\$ATTACHMENTS') WHERE \"MON\$IDLE_TIMEOUT\" = 2147483647;")
+    if echo "$out" | grep -qx 'max scan=1' && echo "$out" | grep -qx 'max armed=1' &&
+       echo "$out" | grep -qx 'max after commit=0'; then
+        echo "  idle limit 2147483646 s: armed on the server as 2147483647, reset at COMMIT -> ok"
+    else
+        echo "  idle limit 2147483646 s -> FAIL"
+        echo "$out" | sed 's/^/    | /'
+        tx_failures=$((tx_failures + 1))
+    fi
+fi
+failures=$((failures + tx_failures))
+
 checks="$total scans"
 [ "$dbkey_method" = dbkey ] && checks="$checks + the DB_KEY range check"
+checks="$checks + the transaction snapshot checks"
 echo "== $checks: $failures failed, $torn torn reads (mode: $expected_mode)"
 if [ "$expected_mode" = independent ]; then
     echo "   (Firebird 3 fallback: torn reads are the pre-existing behavior and only reported)"

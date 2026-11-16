@@ -352,7 +352,7 @@ std::string RedactBindValue(const Value &v) {
 //   not_pushed_reasons  VARCHAR[]
 //   bytes_read_estimate BIGINT    - G5 payload-bytes estimate (rows x
 //                                   XSQLDA width + BLOB segments)
-//   snapshot_mode       VARCHAR   - 'serial' | 'shared' | 'independent'
+//   snapshot_mode       VARCHAR   - 'serial' | 'shared' | 'independent' | 'transaction'
 //   partition_method    VARCHAR   - 'none' | 'pk' | 'dbkey'
 
 // Forward declarations - shared by firebird_last_query() and

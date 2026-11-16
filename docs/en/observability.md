@@ -54,7 +54,7 @@ connection.
 | `offset_pushed` | BIGINT | The `ROWS m TO n` offset actually pushed (`row_offset`), or `NULL` when none. |
 | `not_pushed_reasons` | VARCHAR[] | One coarse reason per `residual_filters` entry, same order/length. One of `NONE_CHARSET`, `UNSUPPORTED_OP`, `ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING`. |
 | `bytes_read_estimate` | BIGINT | **ESTIMATE** (G5) of Firebird payload bytes pulled by this query: `rows_read × XSQLDA row width + BLOB segment bytes read`. Definition and exclusions below. |
-| `snapshot_mode` | VARCHAR | How the scan's partitions relate transactionally: `serial` (one partition), `shared` (all partitions read one Firebird snapshot; Firebird 4+), `independent` (each partition used its own read-committed transaction: Firebird 3, or the shared snapshot could not be established). See below. |
+| `snapshot_mode` | VARCHAR | How the scan's partitions relate transactionally: `serial` (one partition), `shared` (all partitions read one Firebird snapshot; Firebird 4+), `independent` (each partition used its own read-committed transaction: Firebird 3, or the shared snapshot could not be established), `transaction` (the scan read the snapshot of its DuckDB transaction: ATTACH with the opt-in transaction snapshot, Firebird 4+). See below. |
 | `partition_method` | VARCHAR | How the table was split: `none` (one partition), `pk` (primary-key ranges) or `dbkey` (`RDB$DB_KEY` ranges, `partition_by = 'dbkey'`). |
 
 `limit_pushed` / `offset_pushed` / `not_pushed_reasons` are the Phase 4 #3
@@ -73,6 +73,15 @@ SELECT parallel_scan, partitions, snapshot_mode FROM firebird_last_query();
 -- true  4  shared        (Firebird 4/5)
 -- true  4  independent   (Firebird 3: per-partition read committed)
 ```
+
+With `SET firebird_transaction_snapshot = true` (or the ATTACH option
+`transaction_snapshot`), every scan of an ATTACH in one DuckDB transaction,
+serial ones included, reads one snapshot and reports `transaction`. See
+the function manual, "One snapshot per DuckDB transaction". The known
+Firebird issues listed there under "Partitioned scans read one snapshot"
+([#9227](https://github.com/FirebirdSQL/firebird/issues/9227),
+[#9301](https://github.com/FirebirdSQL/firebird/issues/9301)) apply to
+`shared` and `transaction` alike.
 
 The reasons are factual and coarse, not a planner trace:
 
@@ -437,6 +446,8 @@ SELECT COUNT(*) FROM firebird_query_log()
 |---|---|---|---|
 | `firebird_query_log_size` | BIGINT | 0 | Ring-buffer size. `0` disables and clears the log. |
 | `firebird_unpushed_mode` | VARCHAR | `silent` | Reaction when a scan keeps filters un-pushed: `silent` (telemetry only), `warn` (one warning), or `error` (fail the scan). See the guard section above. |
+| `firebird_transaction_snapshot` | BOOLEAN | false | Every scan of a Firebird ATTACH in one DuckDB transaction reads one snapshot (Firebird 4+); `snapshot_mode = 'transaction'`. The ATTACH option `transaction_snapshot` overrides it. |
+| `firebird_transaction_snapshot_idle_timeout` | BIGINT | 60 | Seconds from the end of a statement to the next scan of the ATTACH in the same DuckDB transaction after which the server releases the transaction's snapshot; that scan fails. `0` = no limit. |
 | `firebird_dummy_packet_interval` | BIGINT | 0 | Keepalive in seconds sent as `isc_dpb_dummy_packet_interval` on every connection (`0` = off). Companion to the fetch-failure context above. |
 | `firebird_max_inline_blob_size` | BIGINT | -1 | Inline-blob limit in bytes sent as `isc_dpb_max_inline_blob_size` (`-1` = client default, `0` = off, max 65535; Firebird 5.0.3+ client and server, TCP attachments). Effective value: `firebird_health(alias).inline_blob_size`. |
 

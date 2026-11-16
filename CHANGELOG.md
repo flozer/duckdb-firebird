@@ -46,6 +46,26 @@
   `network_protocol` columns (18 columns), and the
   `inline_blobs_unavailable` warning for a 5.0.3+ server reached over TCP
   through an older client library.
+- Transaction snapshot on the ATTACH path (opt-in, off by default):
+  `SET firebird_transaction_snapshot = true`, or the ATTACH option
+  `transaction_snapshot`, makes every scan of the ATTACH in one DuckDB
+  transaction, serial scans included, read one Firebird snapshot
+  (Firebird 4+): one per statement in autocommit, one per
+  `BEGIN … COMMIT`. A coordinator from the ATTACH pool holds it until
+  commit or rollback; scans report `snapshot_mode = 'transaction'`.
+  Firebird 3 keeps the per-scan behavior. `SET
+  firebird_transaction_snapshot_idle_timeout = SECONDS` (default 60,
+  `0` = none) has the server release the snapshot (`SET SESSION IDLE
+  TIMEOUT`) when no scan of the ATTACH follows the end of a statement in
+  time; the next scan then fails with a message naming the setting.
+  `scripts/check_shared_snapshot.sh` checks it under the concurrent writer,
+  `scripts/check_dead_pooled_connection.sh` kills its coordinator and the
+  parked connections and has another session reuse a lost snapshot number,
+  and `test/sql/firebird_transaction_snapshot.test` covers the settings and
+  modes.
+- Docs: a note on the open Firebird issues #9227 and #9301, which can still
+  let a partitioned scan (and the transaction snapshot) mix two committed
+  states on Firebird 4/5.
 
 ### Fixed
 

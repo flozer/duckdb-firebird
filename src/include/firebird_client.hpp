@@ -440,6 +440,10 @@ public:
     // or 0 if the server did not answer. Needs no monitoring privileges.
     int64_t PageSize();
 
+    // Runs a statement that returns no rows (e.g. SET SESSION IDLE TIMEOUT)
+    // in the current transaction. Throws on error.
+    void Execute(const std::string &sql);
+
     // Throws an IOException carrying isc_interprete'd messages, if status is
     // an error vector.
     static void Check(const ISC_STATUS *status, const std::string &context);

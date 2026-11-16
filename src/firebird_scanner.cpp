@@ -1,4 +1,5 @@
 #include "firebird_scanner.hpp"
+#include "firebird_storage.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -108,6 +109,10 @@ struct FirebirdGlobalState : public GlobalTableFunctionState {
     std::string join_error;
     // StartSharedSnapshot already ran (it may have failed): never try twice.
     bool snapshot_attempted = false;
+
+    // Transaction snapshot (ATTACH path, opt-in): snapshot_number belongs to
+    // the DuckDB transaction, not to this scan.
+    FirebirdTransactionSnapshot *tx_snapshot = nullptr;
 
     // How the table was split: "none" (one partition), "pk" (PK ranges)
     // or "dbkey" (RDB$DB_KEY ranges). Reported as partition_method.
@@ -940,14 +945,36 @@ static bool BuildDbKeyPartitions(const FirebirdBindData &bind,
 }
 
 static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
-    ClientContext & /*context*/, TableFunctionInitInput &input) {
+    ClientContext &context, TableFunctionInitInput &input) {
     auto &bind = input.bind_data->Cast<FirebirdBindData>();
     auto gstate = make_uniq<FirebirdGlobalState>();
+
+    // Transaction snapshot (ATTACH option transaction_snapshot, or
+    // SET firebird_transaction_snapshot): every scan of this ATTACH in the
+    // DuckDB transaction, serial ones included, joins one snapshot. On
+    // Firebird 3 Pin() returns 0 and the scan behaves as without it.
+    if (bind.attach_catalog) {
+        if (auto *ts = GetFirebirdTransactionSnapshot(context, *bind.attach_catalog)) {
+            int64_t idle_timeout_s = 60;
+            Value v;
+            if (context.TryGetCurrentSetting("firebird_transaction_snapshot_idle_timeout", v) &&
+                !v.IsNull()) {
+                idle_timeout_s = v.GetValue<int64_t>();
+            }
+            ValidateTransactionSnapshotIdleTimeout(idle_timeout_s);
+            const int64_t n = ts->Pin(context, idle_timeout_s);
+            if (n > 0) {
+                gstate->snapshot_number = n;
+                gstate->tx_snapshot = ts;
+            }
+        }
+    }
 
     // partition_by='dbkey' (explicit partitions >= 2, base tables): pin the
     // shared snapshot first so the DB_KEY geometry is read in it.
     bool dbkey_done = false;
-    if (bind.partition_by_dbkey && bind.partitions_override > 1 && !bind.is_view) {
+    if (bind.partition_by_dbkey && bind.partitions_override > 1 && !bind.is_view &&
+        !gstate->tx_snapshot) {
         StartSharedSnapshot(bind, *gstate);
         dbkey_done = BuildDbKeyPartitions(bind, *gstate, bind.partitions_override);
         if (dbkey_done) {
@@ -1025,7 +1052,9 @@ static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
         gstate->max_threads = 1;
     }
 
-    if (gstate->partitions.size() > 1) {
+    if (gstate->tx_snapshot) {
+        // The transaction's snapshot is already pinned; no per-scan one.
+    } else if (gstate->partitions.size() > 1) {
         StartSharedSnapshot(bind, *gstate);
     } else if (gstate->snapshot_conn) {
         // A dbkey attempt pinned a snapshot but the scan ended up serial.
@@ -1078,12 +1107,29 @@ static unique_ptr<LocalTableFunctionState> FirebirdScanInitLocal(
             if (local->pool) {
                 local->pool->Discard(std::move(local->conn));
             }
-            const std::string msg =
-                "Firebird partitioned scan of table '" + bind.table_name +
-                "' stopped: a worker could not join the scan's shared "
-                "snapshot (number " + std::to_string(gstate.snapshot_number) +
-                "), and reading its partitions outside it would mix two "
-                "states of the table. Original error: " + error;
+            // In a transaction snapshot, a lost coordinator is the likely
+            // cause (its number no longer exists): say so when it is.
+            std::string lost;
+            if (gstate.tx_snapshot) {
+                try {
+                    gstate.tx_snapshot->CheckHeld();
+                } catch (IOException &ex) {
+                    lost = ErrorData(ex).RawMessage();
+                }
+            }
+            const std::string msg = !lost.empty() ? lost
+                : gstate.tx_snapshot
+                ? "Firebird scan of table '" + bind.table_name +
+                  "' stopped: a worker could not join the snapshot of this "
+                  "DuckDB transaction (number " +
+                  std::to_string(gstate.snapshot_number) +
+                  "), and reading outside it would mix two states of the "
+                  "database. Original error: " + error
+                : "Firebird partitioned scan of table '" + bind.table_name +
+                  "' stopped: a worker could not join the scan's shared "
+                  "snapshot (number " + std::to_string(gstate.snapshot_number) +
+                  "), and reading its partitions outside it would mix two "
+                  "states of the table. Original error: " + error;
             {
                 std::lock_guard<std::mutex> g(gstate.telemetry_lock);
                 gstate.join_error = msg;
@@ -1092,6 +1138,28 @@ static unique_ptr<LocalTableFunctionState> FirebirdScanInitLocal(
                 }
             }
             throw IOException(msg);
+        }
+        if (gstate.tx_snapshot) {
+            // The worker may join long after the scan started (its pipeline
+            // queued behind another): only now can the coordinator vouch
+            // for the number it joined.
+            std::string lost;
+            try {
+                gstate.tx_snapshot->CheckHeld();
+            } catch (IOException &ex) {
+                lost = ErrorData(ex).RawMessage();
+            }
+            if (!lost.empty()) {
+                if (local->pool) {
+                    local->pool->Discard(std::move(local->conn));
+                }
+                std::lock_guard<std::mutex> g(gstate.telemetry_lock);
+                gstate.join_error = lost;
+                if (gstate.cursor_recorded) {
+                    GetObservabilityState(ctx.client)->SetError(lost);
+                }
+                throw IOException(lost);
+            }
         }
     }
     return std::move(local);
@@ -1247,7 +1315,9 @@ static bool OpenNextPartitionCursor(ClientContext &ctx,
         rec.offset_pushed = offset_to_push;
         rec.partitions    = static_cast<int32_t>(gstate.partitions.size());
         rec.parallel_scan = rec.partitions > 1;
-        if (!rec.parallel_scan) {
+        if (gstate.tx_snapshot && local.conn && local.conn->InSnapshotTransaction()) {
+            rec.snapshot_mode = "transaction";
+        } else if (!rec.parallel_scan) {
             rec.snapshot_mode = "serial";
         } else if (gstate.snapshot_number > 0 && local.conn &&
                    local.conn->InSnapshotTransaction()) {
