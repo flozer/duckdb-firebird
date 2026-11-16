@@ -96,11 +96,13 @@ Parametros nomeados:
 - `charset`: charset enviado ao `libfbclient`; padrao recomendado `UTF8`.
 - `role`: role Firebird.
 - `dialect`: dialect Firebird.
-- `partitions`: paralelismo por faixa de PK. `0` = auto, `1` = serial. As
-  faixas vem de um probe `MIN/MAX` da PK; a primeira particao nao tem limite
-  inferior e a ultima nao tem limite superior, entao linhas fora da faixa
-  sondada (commitadas depois do probe, ou depois que um `ATTACH` guardou a
-  faixa em cache) continuam sendo lidas.
+- `partitions`: paralelismo. `0` = auto, `1` = serial. Com o padrao
+  `partition_by = 'pk'`, as faixas vem de um probe `MIN/MAX` da PK; a
+  primeira particao nao tem limite inferior e a ultima nao tem limite
+  superior, entao linhas fora da faixa sondada (commitadas depois do probe,
+  ou depois que um `ATTACH` guardou a faixa em cache) continuam sendo lidas.
+- `partition_by`: `'pk'` (padrao) ou `'dbkey'`; veja "Como a tabela e
+  dividida (`partition_by`)".
 - `row_limit`: limita linhas usando `ROWS` no Firebird.
 - `row_offset`: offset global; exige `row_limit`.
 - `none_encoding`: estrategia para colunas `CHARACTER SET NONE`.
@@ -160,9 +162,64 @@ Melhores praticas aplicadas:
 - Residual filters: quando ha duvida de equivalencia semantica, DuckDB
   revalida localmente.
 - Paginacao Firebird: `row_limit` e `row_offset` viram `ROWS`.
-- Paralelismo opt-in por PK: usado apenas quando a tabela tem chave apropriada.
+- Paralelismo opt-in: por faixas de PK quando a tabela tem chave apropriada,
+  ou por faixas de `RDB$DB_KEY` com `partition_by = 'dbkey'` (Firebird 4/5).
 - Protecao para `CHARACTER SET NONE`: texto bruto nao-UTF8 nao recebe pushdown
   textual quando isso pode alterar resultado.
+
+#### Como a tabela e dividida (`partition_by`)
+
+`partition_by` escolhe como o `firebird_scan` divide uma tabela quando
+`partitions > 1`:
+
+- `'pk'` (padrao): faixas de uma PK inteira de coluna unica, calculadas a
+  partir de `MIN`/`MAX`. Igual as versoes anteriores.
+- `'dbkey'`: faixas de `RDB$DB_KEY` sobre o espaco fisico de registros da
+  tabela, calculado a partir de `RDB$PAGES` e do tamanho de pagina. Os
+  limites sao lidos dentro do snapshot compartilhado do scan, entao nao ha
+  probe de `MIN`/`MAX`. A divisao nao depende de como a PK esta
+  distribuida, e **tabelas sem PK utilizavel tambem podem ser divididas**.
+  O espaco conta paginas de ponteiro inteiras (uma cobre cerca de 12,8 MiB
+  de paginas de dados com paginas de 8 KiB), entao as particoes so ficam
+  equilibradas a menos de uma pagina de ponteiro: a maior parte de uma
+  tabela menor que algumas paginas de ponteiro cai nas primeiras
+  particoes. Sem um filtro empurrado que possa usar indice, cada particao
+  e um full scan limitado
+  (`RDB$DB_KEY >= MAKE_DBKEY(...) AND RDB$DB_KEY < MAKE_DBKEY(...)`, plano
+  `Full Scan (lower bound, upper bound)`). Quando um filtro empurrado pode
+  usar indice, o Firebird le por esse indice em cada particao e aplica os
+  limites de DB_KEY so como filtro, entao cada particao repete a leitura
+  inteira do indice: prefira `'pk'` nessas consultas.
+
+`'dbkey'` so vale com `partitions` explicito de 2 ou mais, em tabelas base
+persistentes, no Firebird 4.x ou 5.x (`MAKE_DBKEY` e scans limitados por
+DB_KEY sao do Firebird 4.0+), e so quando o snapshot compartilhado do scan
+foi iniciado. Em qualquer outro caso (Firebird 3, views, `partitions`
+ausente ou `1`, sem snapshot compartilhado) o scan se comporta como sem
+`partition_by`. Com `partitions` explicito de 2 ou mais, o probe de
+`MIN`/`MAX` das faixas de PK roda entao no inicio do scan, a cada execucao.
+`firebird_last_query().partition_method` informa o que foi usado: `pk`,
+`dbkey` ou `none` (uma particao).
+
+```sql
+-- Tabela sem PK, dividida em quatro (Firebird 4/5):
+SELECT COUNT(*)
+FROM firebird_scan('<conn>', 'AUDIT_LOG', partitions=4, partition_by='dbkey');
+SELECT partition_method, snapshot_mode, partitions FROM firebird_last_query();
+-- dbkey  shared  4
+```
+
+Dividir um scan nem sempre o deixa mais rapido. Nas nossas medicoes (VM de
+4 nucleos, TCP local, cliente Firebird 5.0.3) quatro particoes aceleraram um
+scan de 19 colunas em 1,4 a 1,6x, mas deixaram scans estreitos ou com
+projecao de colunas cerca de 2 vezes mais lentos que o serial. Faixas de
+DB_KEY foram mais rapidas que faixas de PK, com uma diferenca proxima do
+custo do probe de `MIN`/`MAX` que elas dispensam (1,5 a 2 s em 5 a 10 M
+linhas). Nos nossos
+testes a maior parte da lentidao veio da biblioteca cliente do Firebird, que
+serializa alocacoes por linha entre conexoes
+([FirebirdSQL/firebird#9297](https://github.com/FirebirdSQL/firebird/issues/9297)).
+Meca antes de depender de `partitions > 1`.
 
 #### Determinismo de paginacao (`RDB$DB_KEY`)
 
@@ -176,8 +233,11 @@ agora corrigido.)
 `RDB$DB_KEY` e um **estabilizador fisico de paginacao valido apenas durante
 a duracao de um scan/transacao**. Ele NAO e um contrato de ordenacao de
 negocio, NAO e estavel entre transacoes ou apos atualizacao de linhas, e
-NUNCA e usado para particionamento por faixa, logica incremental/watermark,
-ou recomendado como chave em nenhum outro lugar desta extensao.
+NUNCA e usado para logica incremental/watermark ou recomendado como chave
+em nenhum outro lugar desta extensao. O unico outro uso e
+`partition_by = 'dbkey'`, em que as faixas de DB_KEY sao planejadas e lidas
+dentro de um unico snapshot compartilhado, o unico escopo em que sao
+estaveis.
 
 Quando existe uma chave primaria numerica de coluna unica utilizavel, ela e
 usada no `ORDER BY` em vez de `RDB$DB_KEY` — preferencial, por ser uma
@@ -1040,10 +1100,10 @@ Catalogo de codigos de alerta:
 | `partition_advisory` | LOW | Particoes recomendadas (derivadas da faixa de PK) sao consultivas |
 | `server_parallelism_caveat` | LOW | Caveat de paralelismo server-side (Firebird 5) quando `partitions > 1` |
 | `pk_range_small_serial` | LOW | Faixa MIN/MAX da PK e pequena — scan serial recomendado |
-| `no_primary_key` | HIGH | Sem chave primaria — apenas full scan, nao particionavel por faixa |
-| `composite_pk_serial` | LOW | PK composta — apenas scan serial |
+| `no_primary_key` | HIGH | Sem chave primaria — full scan, sem faixas de PK (`partition_by='dbkey'` pode dividi-la no Firebird 4/5) |
+| `composite_pk_serial` | LOW | PK composta — serial por padrao (`partition_by='dbkey'` pode dividi-la no Firebird 4/5) |
 | `numeric_pk_no_range_serial` | LOW | PK numerica de coluna unica sem faixa MIN/MAX utilizavel — scan serial |
-| `non_numeric_pk_serial` | LOW | PK nao-numerica de coluna unica — apenas scan serial |
+| `non_numeric_pk_serial` | LOW | PK nao-numerica de coluna unica — serial por padrao (`partition_by='dbkey'` pode dividi-la no Firebird 4/5) |
 | `no_indexed_filter_columns` | MEDIUM | Nenhuma coluna de filtro indexada barata encontrada |
 | `none_charset_text_columns` | MEDIUM | Uma ou mais colunas texto usam CHARACTER SET NONE |
 | `filter_before_scan` | MEDIUM | Tabela base de risco HIGH com colunas filtraveis — a mensagem as nomeia |
@@ -1180,6 +1240,9 @@ Saida compartilhada com `firebird_query_log()`:
   particao usou sua propria transacao read committed: Firebird 3, ou o
   snapshot compartilhado nao pode ser estabelecido). Veja "Scans
   particionados leem um unico snapshot".
+- `partition_method`: como a tabela foi dividida: `none` (uma particao),
+  `pk` (faixas de PK) ou `dbkey` (faixas de `RDB$DB_KEY`,
+  `partition_by = 'dbkey'`).
 - `captured_at`: timestamp de captura.
 - `error_message`: erro sanitizado, vazio quando a query terminou limpa.
 - `limit_pushed`: limite `ROWS` realmente empurrado ao Firebird
@@ -1194,9 +1257,10 @@ Saida compartilhada com `firebird_query_log()`:
 As tres ultimas (`limit_pushed` / `offset_pushed` / `not_pushed_reasons`)
 sao as colunas de explicabilidade de pushdown (Fase 4 #3). Deixam explicito
 o que de paginacao chegou ao Firebird e por que um filtro ficou local, sem
-funcao nova. `bytes_read_estimate` (G5) e `snapshot_mode` entram como
-colunas aditivas no fim - o schema agora tem 20 colunas, compartilhado por
-`firebird_last_query()` e `firebird_query_log()`. As razoes sao factuais e
+funcao nova. `bytes_read_estimate` (G5), `snapshot_mode` e
+`partition_method` entram como colunas aditivas no fim - o schema agora
+tem 21 colunas, compartilhado por `firebird_last_query()` e
+`firebird_query_log()`. As razoes sao factuais e
 coarse, nao um trace de planner:
 
 - `NONE_CHARSET`: a coluna e texto `CHARACTER SET NONE` e o pushdown e
@@ -1439,7 +1503,7 @@ FROM firebird_explain_pushdown(
 
 Mostra um historico curto das queries Firebird tentadas na conexao DuckDB
 atual. O log e desligado por padrao. Cada linha carrega o mesmo schema de
-telemetria de 20 colunas do `firebird_last_query()` - incluindo
+telemetria de 21 colunas do `firebird_last_query()` - incluindo
 `bytes_read_estimate`, entao o log rotacionado preserva as estimativas de
 transferencia por query da sessao.
 

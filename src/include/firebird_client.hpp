@@ -414,6 +414,10 @@ public:
     void RestoreDefaultTransaction();
     bool InSnapshotTransaction() const { return in_snapshot_; }
 
+    // Database page size in bytes (isc_database_info / isc_info_page_size),
+    // or 0 if the server did not answer. Needs no monitoring privileges.
+    int64_t PageSize();
+
     // Throws an IOException carrying isc_interprete'd messages, if status is
     // an error vector.
     static void Check(const ISC_STATUS *status, const std::string &context);

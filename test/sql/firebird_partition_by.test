@@ -1,0 +1,174 @@
+# name: test/sql/firebird_partition_by.test
+# description: partition_by = 'pk' (default) | 'dbkey'. With 'dbkey' and an
+#              explicit partitions >= 2, a base table on Firebird 4/5 is
+#              split into RDB$DB_KEY ranges (MAKE_DBKEY) over its physical
+#              record space: no MIN/MAX probe, independent of the PK's
+#              distribution, and usable on tables without a PK.
+#              Elsewhere (Firebird 3, views, partitions < 2) the scan
+#              behaves as without partition_by.
+#              The method used is reported as partition_method in
+#              firebird_last_query() / firebird_query_log(). Results are
+#              identical in every case.
+# group: [firebird]
+#
+# Requires the PART_RANGE / PART_NO_LEVER fixture (FIREBIRD_PARTITIONS_DB)
+# and the main fixture's V_ACTIVE_EMP view (FIREBIRD_TEST_DB). Runs on all
+# Firebird 3/4/5 matrix legs; expectations follow the server version.
+
+require firebird
+
+require-env FIREBIRD_PARTITIONS_DB
+
+require-env FIREBIRD_TEST_DB
+
+require-env ISC_PASSWORD
+
+statement ok
+SET firebird_query_log_size = 10;
+
+statement ok
+ATTACH '${FIREBIRD_PARTITIONS_DB}' AS fbp (TYPE firebird);
+
+# DB_KEY ranges are used on Firebird 4 and 5 (MAKE_DBKEY and bounded
+# DB_KEY scans are 4.0+; later versions are not accepted yet).
+statement ok
+CREATE OR REPLACE TABLE expected AS
+SELECT CAST(split_part(engine_version, '.', 1) AS INTEGER) IN (4, 5) AS dbkey_ok
+FROM firebird_health('fbp');
+
+statement ok
+DETACH fbp;
+
+# ---------------------------------------------------------------------------
+#  Default stays PK ranges (no behavior change).
+# ---------------------------------------------------------------------------
+
+query II
+SELECT COUNT(*), SUM(ID)
+FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_RANGE', partitions=4);
+----
+300	1794000000
+
+query T
+SELECT partition_method FROM firebird_last_query();
+----
+pk
+
+query II
+SELECT COUNT(*), SUM(ID)
+FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_RANGE', partitions=4, partition_by='pk');
+----
+300	1794000000
+
+query T
+SELECT partition_method FROM firebird_last_query();
+----
+pk
+
+# ---------------------------------------------------------------------------
+#  partition_by='dbkey' on a table with a PK: same rows; DB_KEY ranges on
+#  Firebird 4/5, PK ranges (the previous behavior) on Firebird 3.
+# ---------------------------------------------------------------------------
+
+query II
+SELECT COUNT(*), SUM(ID)
+FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_RANGE', partitions=4, partition_by='dbkey');
+----
+300	1794000000
+
+query TT
+SELECT l.partition_method = CASE WHEN e.dbkey_ok THEN 'dbkey' ELSE 'pk' END,
+       l.parallel_scan
+FROM firebird_last_query() l, expected e;
+----
+true	true
+
+# Every partition cursor of a DB_KEY scan carries MAKE_DBKEY bounds; the
+# outer ones are open-ended (one bound each), the inner ones closed.
+query I
+SELECT CASE WHEN e.dbkey_ok THEN c.with_dbkey = 4 AND c.closed = 2 AND c.open_ended = 2
+            ELSE c.with_dbkey = 0 END
+FROM (
+  SELECT count(*) FILTER (WHERE remote_sql LIKE '%MAKE_DBKEY%') AS with_dbkey,
+         count(*) FILTER (WHERE remote_sql LIKE '%RDB$DB_KEY >=%'
+                            AND remote_sql LIKE '%RDB$DB_KEY <%') AS closed,
+         count(*) FILTER (WHERE remote_sql LIKE '%MAKE_DBKEY%'
+                            AND NOT (remote_sql LIKE '%RDB$DB_KEY >=%'
+                                     AND remote_sql LIKE '%RDB$DB_KEY <%')) AS open_ended
+  FROM (SELECT remote_sql FROM firebird_query_log() LIMIT 4)
+) c, expected e;
+----
+true
+
+# The value is case-insensitive, and a pushed filter is ANDed with the
+# DB_KEY bounds. (A correctness check only: with an index-usable filter like
+# this one, every DB_KEY partition repeats the index scan, and the manual
+# recommends 'pk'.)
+query II
+SELECT COUNT(*), SUM(ID)
+FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_RANGE', partitions=4, partition_by='DBKEY')
+WHERE ID >= 6000000;
+----
+150	1347000000
+
+query TT
+SELECT l.partition_method = CASE WHEN e.dbkey_ok THEN 'dbkey' ELSE 'pk' END,
+       list_contains(l.pushed_filters, '"ID" >= ?')
+FROM firebird_last_query() l, expected e;
+----
+true	true
+
+# ---------------------------------------------------------------------------
+#  A table without a PK: serial before, split by DB_KEY on Firebird 4/5.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT COUNT(*)
+FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_NO_LEVER', partitions=2, partition_by='dbkey');
+----
+2
+
+query TT
+SELECT l.partition_method = CASE WHEN e.dbkey_ok THEN 'dbkey' ELSE 'none' END,
+       l.parallel_scan = e.dbkey_ok
+FROM firebird_last_query() l, expected e;
+----
+true	true
+
+# ---------------------------------------------------------------------------
+#  partitions < 2 keeps the scan serial; a view is never split by DB_KEY.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT COUNT(*)
+FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_RANGE', partitions=1, partition_by='dbkey');
+----
+300
+
+query TT
+SELECT partition_method, snapshot_mode FROM firebird_last_query();
+----
+none	serial
+
+query I
+SELECT COUNT(*) > 0
+FROM firebird_scan('${FIREBIRD_TEST_DB}', 'V_ACTIVE_EMP', partitions=2, partition_by='dbkey');
+----
+true
+
+query T
+SELECT partition_method <> 'dbkey' FROM firebird_last_query();
+----
+true
+
+# ---------------------------------------------------------------------------
+#  Invalid value.
+# ---------------------------------------------------------------------------
+
+statement error
+SELECT COUNT(*) FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_RANGE', partition_by='rows');
+----
+partition_by must be 'pk' (default) or 'dbkey'
+
+statement ok
+SET firebird_query_log_size = 0;

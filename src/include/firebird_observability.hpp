@@ -48,6 +48,9 @@ struct FirebirdQueryTelemetry {
     //                   transaction (Firebird 3, or the shared snapshot
     //                   could not be established).
     std::string snapshot_mode = "serial";
+    // How the table was split: "none" (one partition), "pk" (PK ranges)
+    // or "dbkey" (RDB$DB_KEY ranges, partition_by = 'dbkey').
+    std::string partition_method = "none";
     // Pushdown explainability (Phase 4 #3). limit_pushed / offset_pushed
     // mirror the ROWS clause actually emitted to Firebird; invalid
     // (optional_idx default) means no paging was pushed and the column

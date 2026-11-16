@@ -6,7 +6,7 @@ values, pushdown metadata, and per-scan metrics. All state is scoped
 to the current DuckDB `ClientContext` — one session never reads
 another session's queries.
 
-Both functions share the same 20-column schema. The difference is the
+Both functions share the same 21-column schema. The difference is the
 window: `firebird_last_query()` returns at most one row (the most
 recent attempt on this connection); `firebird_query_log()` returns a
 ring buffer, opt-in via setting.
@@ -55,13 +55,14 @@ connection.
 | `not_pushed_reasons` | VARCHAR[] | One coarse reason per `residual_filters` entry, same order/length. One of `NONE_CHARSET`, `UNSUPPORTED_OP`, `ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING`. |
 | `bytes_read_estimate` | BIGINT | **ESTIMATE** (G5) of Firebird payload bytes pulled by this query: `rows_read × XSQLDA row width + BLOB segment bytes read`. Definition and exclusions below. |
 | `snapshot_mode` | VARCHAR | How the scan's partitions relate transactionally: `serial` (one partition), `shared` (all partitions read one Firebird snapshot; Firebird 4+), `independent` (each partition used its own read-committed transaction: Firebird 3, or the shared snapshot could not be established). See below. |
+| `partition_method` | VARCHAR | How the table was split: `none` (one partition), `pk` (primary-key ranges) or `dbkey` (`RDB$DB_KEY` ranges, `partition_by = 'dbkey'`). |
 
 `limit_pushed` / `offset_pushed` / `not_pushed_reasons` are the Phase 4 #3
 pushdown-explainability columns. They make it explicit what paging reached
 Firebird and why a filter stayed local, without adding a new function.
-`bytes_read_estimate` (G5) and `snapshot_mode` are additive tail columns —
-the schema is now 20 columns, shared by `firebird_last_query()` and
-`firebird_query_log()`.
+`bytes_read_estimate` (G5), `snapshot_mode` and `partition_method` are
+additive tail columns — the schema is now 21 columns, shared by
+`firebird_last_query()` and `firebird_query_log()`.
 
 `snapshot_mode` tells whether the partitions of a parallel scan saw one
 consistent state of the table:

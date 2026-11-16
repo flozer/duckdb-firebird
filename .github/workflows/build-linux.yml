@@ -138,6 +138,7 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_function_docs.test
           ./build/release/test/unittest test/sql/firebird_partitions_scan.test
           ./build/release/test/unittest test/sql/firebird_shared_snapshot.test
+          ./build/release/test/unittest test/sql/firebird_partition_by.test
           ./build/release/test/unittest test/sql/firebird_session_stability.test
           ./build/release/test/unittest test/sql/firebird_bytes_estimate.test
 

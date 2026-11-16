@@ -483,19 +483,23 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
                 "parallelism.");
         }
     } else {
-        // No view, but also no usable parallel lever: composite /
-        // non-numeric / missing PK. Single-threaded full scan only.
+        // No view and no usable PK-range lever: composite / non-numeric /
+        // missing PK. Serial by default; the alerts point to
+        // partition_by='dbkey' (Firebird 4/5).
         p.full_scan_risk = "HIGH";
         p.recommended_partitions = 1;
         if (!p.has_primary_key) {
             AddAlert(p, "no_primary_key", "HIGH",
                 "No primary key detected: a scan is a full table scan and "
-                "cannot be range-partitioned. Add a selective WHERE on an "
-                "indexed column, or materialize the table.");
+                "cannot be split by PK ranges. Add a selective WHERE on an "
+                "indexed column, or materialize the table. On Firebird 4/5, "
+                "firebird_scan(..., partitions=N, partition_by='dbkey') can "
+                "split it by RDB$DB_KEY ranges.");
         } else if (p.primary_key_columns.size() > 1) {
             AddAlert(p, "composite_pk_serial", "LOW",
-                "Primary key is composite: the parallel-scan lever needs a "
-                "single-column numeric PK. Scans run serially.");
+                "Primary key is composite: PK-range partitioning needs a "
+                "single-column numeric PK, so scans run serially by default. "
+                "On Firebird 4/5, partition_by='dbkey' can split it.");
         } else {
             // Single-column PK that ProbePrimaryKey still rejected. Either the
             // column is non-numeric (CHAR/VARCHAR/UUID surrogate, common in
@@ -525,9 +529,10 @@ static TableProfile BuildProfile(FirebirdConnection &conn,
                     "lever, scans run serially.");
             } else {
                 AddAlert(p, "non_numeric_pk_serial", "LOW",
-                    "Primary key is single-column but non-numeric: the "
-                    "parallel-scan lever needs a numeric PK. Scans run "
-                    "serially.");
+                    "Primary key is single-column but non-numeric: PK-range "
+                    "partitioning needs a numeric PK, so scans run serially "
+                    "by default. On Firebird 4/5, partition_by='dbkey' can "
+                    "split it.");
             }
         }
     }

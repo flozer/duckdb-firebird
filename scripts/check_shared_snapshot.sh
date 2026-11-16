@@ -24,8 +24,8 @@
 #   * 3  : the fallback path. Every scan reports 'independent' and must
 #          complete; its sums are only reported (they are expected to
 #          drift, which also shows the writer really interleaves).
-# Both the firebird_scan(..., partitions=4) path and the ATTACH path are
-# checked.
+# The firebird_scan(..., partitions=4) path (PK ranges and, with
+# partition_by='dbkey', DB_KEY ranges) and the ATTACH path are checked.
 #
 # Defaults match the Linux FB matrix (server in the `fb` container, port
 # 3050). Override for local runs:
@@ -86,6 +86,8 @@ fi
 major=$(isql_value "SELECT RDB\$GET_CONTEXT('SYSTEM', 'ENGINE_VERSION') FROM RDB\$DATABASE;" | cut -d. -f1)
 echo "== Firebird engine major version: $major"
 if [ "$major" -ge 4 ]; then expected_mode=shared; else expected_mode=independent; fi
+# partition_by='dbkey' uses DB_KEY ranges on FB4/FB5 and PK ranges otherwise.
+case $major in 4|5) dbkey_method=dbkey ;; *) dbkey_method=pk ;; esac
 
 echo "== starting writer"
 isql_db <"$here/shared_snapshot_writer.sql" >"$work/writer.log" 2>&1 &
@@ -102,21 +104,25 @@ failures=0
 torn=0
 total=0
 
-# run_scan <label> <sql>: runs one partitioned scan, checks mode and sum.
+# run_scan <label> <scan SQL> <expected partition_method>: runs one
+# partitioned scan, checks its mode, method and sum.
 run_scan() {
-    local label=$1 scan_sql=$2 before after out sum count mode parallel
+    local label=$1 scan_sql=$2 expected_method=$3 before after out sum count mode parallel method
     before=$(isql_value 'SELECT TRANSFERS FROM WRITER_STATE;')
-    out=$(printf '%s\n%s\nSELECT snapshot_mode, parallel_scan FROM firebird_last_query();\n' \
+    out=$(printf '%s\n%s\nSELECT snapshot_mode, parallel_scan, partition_method FROM firebird_last_query();\n' \
             "$DUCKDB_PRELUDE" "$scan_sql" | "$DUCKDB" -csv -noheader 2>&1 | tr -d '\r') || true
     after=$(isql_value 'SELECT TRANSFERS FROM WRITER_STATE;')
     sum=$(echo "$out" | sed -n 1p | cut -d, -f1)
     count=$(echo "$out" | sed -n 1p | cut -d, -f2)
     mode=$(echo "$out" | sed -n 2p | cut -d, -f1)
     parallel=$(echo "$out" | sed -n 2p | cut -d, -f2)
+    method=$(echo "$out" | sed -n 2p | cut -d, -f3)
     total=$((total + 1))
     local verdict=ok
     if [ "$mode" != "$expected_mode" ] || [ "$parallel" != "true" ]; then
         verdict="FAIL (snapshot_mode=$mode parallel_scan=$parallel, expected $expected_mode/true)"
+    elif [ "$method" != "$expected_method" ]; then
+        verdict="FAIL (partition_method=$method, expected $expected_method)"
     elif [ "$count" != "$EXPECTED_COUNT" ]; then
         verdict="FAIL (count $count, expected $EXPECTED_COUNT)"
     elif [ "$sum" != "$EXPECTED_SUM" ]; then
@@ -129,23 +135,58 @@ run_scan() {
     elif [ "$after" -le "$before" ]; then
         verdict="FAIL (no transfer committed during the scan; writer stalled?)"
     fi
-    echo "  $label: sum=$sum count=$count mode=$mode transfers_during_scan=$((after - before)) -> $verdict"
+    echo "  $label: sum=$sum count=$count mode=$mode method=$method transfers_during_scan=$((after - before)) -> $verdict"
     case $verdict in FAIL*) failures=$((failures + 1)); echo "$out" | sed 's/^/    | /' ;; esac
 }
 
 echo "== firebird_scan(..., partitions=4)"
 for i in $(seq 1 "$SCANS"); do
     run_scan "scan $i" \
-        "SELECT SUM(VAL), COUNT(*) FROM firebird_scan('$FIREBIRD_SNAPSHOT_DB', 'ACC', partitions=4);"
+        "SELECT SUM(VAL), COUNT(*) FROM firebird_scan('$FIREBIRD_SNAPSHOT_DB', 'ACC', partitions=4);" pk
 done
+
+echo "== firebird_scan(..., partitions=4, partition_by='dbkey')  (PK ranges on FB3)"
+for i in $(seq 1 "$SCANS"); do
+    run_scan "scan $i" \
+        "SELECT SUM(VAL), COUNT(*) FROM firebird_scan('$FIREBIRD_SNAPSHOT_DB', 'ACC', partitions=4, partition_by='dbkey');" "$dbkey_method"
+done
+
+if [ "$dbkey_method" = dbkey ]; then
+    # Exact sums don't show that the table was really split: a wrong record
+    # space would put every row in one DB_KEY range. Count each partition's
+    # range with isql: all four must hold rows, and together all of them.
+    echo "== DB_KEY ranges of one partitions=4 scan"
+    preds=$(cat <<SQL | "$DUCKDB" -list -noheader 2>&1 | tr -d '\r'
+$DUCKDB_PRELUDE
+SET firebird_query_log_size = 8;
+SELECT COUNT(*) FROM firebird_scan('$FIREBIRD_SNAPSHOT_DB', 'ACC', partitions=4, partition_by='dbkey');
+SELECT regexp_extract(remote_sql, 'WHERE \((.*)\)\$', 1) FROM firebird_query_log();
+SQL
+)
+    nranges=0 nempty=0 nrows=0
+    while IFS= read -r pred; do
+        case $pred in *MAKE_DBKEY*) ;; *) continue ;; esac
+        n=$(isql_value "SELECT COUNT(*) FROM ACC WHERE $pred;")
+        echo "  $pred -> $n rows"
+        nranges=$((nranges + 1)); nrows=$((nrows + n))
+        [ "$n" -gt 0 ] || nempty=$((nempty + 1))
+    done <<<"$preds"
+    if [ "$nranges" -ne 4 ] || [ "$nempty" -ne 0 ] || [ "$nrows" -ne "$EXPECTED_COUNT" ]; then
+        echo "  FAIL ($nranges ranges, $nempty empty, $nrows rows; expected 4, 0, $EXPECTED_COUNT)"
+        echo "$preds" | sed 's/^/    | /'
+        failures=$((failures + 1))
+    fi
+fi
 
 echo "== ATTACH (automatic partitioning, pooled connections)"
 for i in $(seq 1 "$SCANS"); do
     run_scan "scan $i" \
-        "ATTACH '$FIREBIRD_SNAPSHOT_DB' AS fbs (TYPE firebird); SELECT SUM(VAL), COUNT(*) FROM fbs.main.ACC;"
+        "ATTACH '$FIREBIRD_SNAPSHOT_DB' AS fbs (TYPE firebird); SELECT SUM(VAL), COUNT(*) FROM fbs.main.ACC;" pk
 done
 
-echo "== $total scans: $failures failed, $torn torn reads (mode: $expected_mode)"
+checks="$total scans"
+[ "$dbkey_method" = dbkey ] && checks="$checks + the DB_KEY range check"
+echo "== $checks: $failures failed, $torn torn reads (mode: $expected_mode)"
 if [ "$expected_mode" = independent ]; then
     echo "   (Firebird 3 fallback: torn reads are the pre-existing behavior and only reported)"
 fi
