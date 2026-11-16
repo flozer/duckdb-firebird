@@ -154,7 +154,7 @@ HealthBind(ClientContext &context, TableFunctionBindInput &input,
     bind->catalog_name = input.inputs[0].ToString();
 
     // Fail a bad alias at bind time, not mid-scan.
-    ValidateFirebirdAttachAlias(context, bind->catalog_name);
+    ValidateFirebirdAttachAlias(context, bind->catalog_name, "firebird_health");
 
     names = {
         "engine_version", "ods_version", "sql_dialect", "default_charset",
@@ -205,7 +205,7 @@ static void HealthFunction(ClientContext &context, TableFunctionInput &input,
     }
     auto &bind = input.bind_data->Cast<HealthBindData>();
 
-    auto lease = AcquireFirebirdCatalogLease(context, bind.catalog_name);
+    auto lease = AcquireFirebirdCatalogLease(context, bind.catalog_name, "firebird_health");
     HealthInfo h = BuildHealth(*lease.conn);
 
     // MON$-sourced columns are typed NULLs when the monitoring query failed.

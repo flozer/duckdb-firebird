@@ -35,13 +35,16 @@ struct FirebirdMetadataLease {
 // Internal helper: validate that `catalog_name` resolves through DuckDB's
 // catalog manager AND that the resolved catalog is a Firebird ATTACH.
 // Throws BinderException with an actionable message when the catalog
-// does not exist OR when its GetCatalogType() is not "firebird".
+// does not exist OR when its GetCatalogType() is not "firebird". The
+// message starts with `function_name`, the SQL function being bound.
 void ValidateFirebirdAttachAlias(ClientContext &context,
-                                 const std::string &catalog_name);
+                                 const std::string &catalog_name,
+                                 const std::string &function_name);
 
 // Acquire a metadata-only lease against the FirebirdCatalog reachable
 // through `catalog_name`. Validates the alias first (calls
-// ValidateFirebirdAttachAlias internally), then leases a connection
+// ValidateFirebirdAttachAlias internally, passing `function_name` on for
+// its error messages), then leases a connection
 // from the catalog's pool. The returned FirebirdMetadataLease releases
 // the connection back when it goes out of scope - including on
 // exception - so the caller can run arbitrary RDB$ queries through
@@ -51,7 +54,8 @@ void ValidateFirebirdAttachAlias(ClientContext &context,
 // only the pool, the connection, and the catalog's NoneEncoding
 // preference are surfaced. Keeps credentials inside the catalog.
 FirebirdMetadataLease AcquireFirebirdCatalogLease(ClientContext &context,
-                                                   const std::string &catalog_name);
+                                                   const std::string &catalog_name,
+                                                   const std::string &function_name);
 
 // firebird_generate_dbt_sources(catalog_name VARCHAR)
 //

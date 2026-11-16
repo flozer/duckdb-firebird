@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The functions that take an ATTACH alias (`firebird_health()`,
+  `firebird_pool_stats()`, `firebird_profile_table()`,
+  `firebird_index_profile()`, `firebird_generators()` and the other catalog
+  metadata functions such as `firebird_indexes()`) reported an unknown or
+  non-Firebird alias under the name `firebird_generate_dbt_sources`. The
+  error now names the function that was called.
+
 ## [v1.4.0] - 2026-11-15
 
 ### Changed

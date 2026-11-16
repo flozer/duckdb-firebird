@@ -667,7 +667,7 @@ ProfileTableBind(ClientContext &context, TableFunctionBindInput &input,
     // Resolve the alias eagerly so a bad catalog fails at bind time, not
     // mid-scan. Reuses the dbt-sources validator (same "is this a Firebird
     // ATTACH" check), which already emits an actionable message.
-    ValidateFirebirdAttachAlias(context, bind->catalog_name);
+    ValidateFirebirdAttachAlias(context, bind->catalog_name, "firebird_profile_table");
 
     names = {
         "table_name",
@@ -758,7 +758,7 @@ static void ProfileTableFunction(ClientContext &context,
 
     // The lease releases the connection on scope exit, even if BuildProfile
     // throws mid-probe (e.g. relation not found).
-    auto lease = AcquireFirebirdCatalogLease(context, bind.catalog_name);
+    auto lease = AcquireFirebirdCatalogLease(context, bind.catalog_name, "firebird_profile_table");
     TableProfile p = BuildProfile(*lease.conn, bind.table_name,
                                   lease.none_encoding, bind.exact_row_count);
 

@@ -26,7 +26,8 @@ namespace duckdb {
 // direct, actionable message.
 
 void ValidateFirebirdAttachAlias(ClientContext &context,
-                                 const std::string &catalog_name) {
+                                 const std::string &catalog_name,
+                                 const std::string &function_name) {
 #ifdef FIREBIRD_DUCKDB_V2
     // v2.0: GetCatalogEntry keys by Identifier.
     auto catalog_ptr = Catalog::GetCatalogEntry(context, Identifier(catalog_name));
@@ -35,16 +36,16 @@ void ValidateFirebirdAttachAlias(ClientContext &context,
 #endif
     if (!catalog_ptr) {
         throw BinderException(
-            "firebird_generate_dbt_sources: no attached catalog named '%s'. "
+            "%s: no attached catalog named '%s'. "
             "ATTACH first: ATTACH '<path-or-uri>' AS %s (TYPE firebird);",
-            catalog_name, catalog_name);
+            function_name, catalog_name, catalog_name);
     }
     if (catalog_ptr->GetCatalogType() != "firebird") {
         throw BinderException(
-            "firebird_generate_dbt_sources: catalog '%s' is not a Firebird "
+            "%s: catalog '%s' is not a Firebird "
             "ATTACH (GetCatalogType() = '%s'). Use the alias of an ATTACH "
             "created with (TYPE firebird).",
-            catalog_name, catalog_ptr->GetCatalogType());
+            function_name, catalog_name, catalog_ptr->GetCatalogType());
     }
 }
 
@@ -259,7 +260,7 @@ DbtSourcesBind(ClientContext &context,
 
     // Resolve the alias eagerly so a bad name fails at bind time, not
     // mid-scan.
-    ValidateFirebirdAttachAlias(context, bind->catalog_name);
+    ValidateFirebirdAttachAlias(context, bind->catalog_name, "firebird_generate_dbt_sources");
 
     names = {"yaml"};
     return_types = {LogicalType::VARCHAR};
@@ -283,7 +284,7 @@ static void DbtSourcesFunction(ClientContext &context,
 
     // The lease releases the leased connection on scope exit, even if
     // BuildSourcesYaml throws while iterating RDB$ metadata.
-    auto lease = AcquireFirebirdCatalogLease(context, bind.catalog_name);
+    auto lease = AcquireFirebirdCatalogLease(context, bind.catalog_name, "firebird_generate_dbt_sources");
     std::string yaml = BuildSourcesYaml(*lease.conn, bind.catalog_name,
                                          lease.none_encoding);
 
