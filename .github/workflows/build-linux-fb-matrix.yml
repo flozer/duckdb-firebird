@@ -393,6 +393,19 @@ jobs:
           # and that a later scan succeeds. FB4+; skips itself on FB3.
           bash scripts/check_snapshot_join_failure.sh
 
+      - name: ATTACH - failed catalog load returns its pooled connection
+        env:
+          ISC_USER: SYSDBA
+          ISC_PASSWORD: masterkey
+        run: |
+          # Parks one pooled connection, kills its attachment from isql via
+          # `.shell` (DELETE FROM MON$ATTACHMENTS), then checks that the
+          # first table query fails the catalog load, that its connection
+          # is discarded rather than left counted as leased
+          # (firebird_pool_stats().active_connections back to 0), and that
+          # a retry succeeds. All FB versions.
+          bash scripts/check_catalog_load_failure.sh
+
       - name: Stop Firebird container
         if: always()
         run: docker rm -f fb || true

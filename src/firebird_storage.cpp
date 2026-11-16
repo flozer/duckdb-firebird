@@ -382,6 +382,22 @@ private:
         auto conn_owned = pool_ ? pool_->Acquire()
                                 : make_uniq<FirebirdConnection>(conn_info_);
         FirebirdConnection &conn = *conn_owned;
+        // If discovery throws, give the lease back to the pool as discarded:
+        // the connection may be the reason it failed (an attachment killed
+        // on the server, a broken network link), so it must not be parked.
+        // Without this the exception destroyed it without telling the pool,
+        // and active_connections stayed one too high for the life of the
+        // ATTACH. On success conn_owned is released below and the guard
+        // does nothing.
+        struct DiscardOnThrow {
+            FirebirdConnectionPool *pool;
+            std::unique_ptr<FirebirdConnection> &conn;
+            ~DiscardOnThrow() {
+                if (pool && conn) {
+                    pool->Discard(std::move(conn));
+                }
+            }
+        } discard_on_throw {pool_.get(), conn_owned};
 
         // Load PRIMARY KEY and UNIQUE constraints once for all tables.
         // A failure here leaves the map empty — constraints are simply not
