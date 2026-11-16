@@ -382,6 +382,14 @@ FirebirdConnectionLease FirebirdConnectionPool::AcquireWithInfo() {
 void FirebirdConnectionPool::Release(std::unique_ptr<FirebirdConnection> conn) {
     if (!conn) return;
 
+    // A connection whose attachment is gone (killed on the server, network
+    // failure, ...) must not be handed out again: the next lease would fail
+    // the same way, and so would every lease after it.
+    if (conn->IsBroken()) {
+        Discard(std::move(conn));
+        return;
+    }
+
     active_.fetch_sub(1, std::memory_order_relaxed);
 
     if (!config_.enabled) {
@@ -526,7 +534,7 @@ void FirebirdConnection::StartReadOnlyTransaction(ISC_STATUS *status) {
 void FirebirdConnection::StartReadOnlyTransaction() {
     ISC_STATUS status[20] = {};
     StartReadOnlyTransaction(status);
-    Check(status, "isc_start_transaction");
+    CheckStatus(status, "isc_start_transaction");
 }
 
 // Firebird 4+ TPB / transaction-info items. The vendored headers define
@@ -543,6 +551,49 @@ void FirebirdConnection::StartReadOnlyTransaction() {
 
 static bool StatusIsError(const ISC_STATUS *status) {
     return status[0] == 1 && status[1] != 0;
+}
+
+// True when the status vector carries an error after which the attachment
+// can't be used any more. Walks every isc_arg_gds entry, not only the first.
+static bool StatusMeansConnectionLost(const ISC_STATUS *status) {
+    static const ISC_STATUS lost[] = {
+        335544324L,  // isc_bad_db_handle:      invalid database handle
+        335544528L,  // isc_shutdown:           database shutdown
+        335544721L,  // isc_network_error:      unable to complete network request
+        335544726L,  // isc_net_read_err:       error reading data from the connection
+        335544727L,  // isc_net_write_err:      error writing data to the connection
+        335544741L,  // isc_lost_db_connection: connection lost to database
+        335544856L,  // isc_att_shutdown:       connection shutdown
+    };
+    if (!StatusIsError(status)) {
+        return false;
+    }
+    // ISC status vectors used here are 20 entries long; stop there at most.
+    const size_t n = 20;
+    size_t i = 0;
+    while (i + 1 < n && status[i] != isc_arg_end) {
+        const ISC_STATUS type = status[i];
+        if (type == isc_arg_gds) {
+            for (ISC_STATUS code : lost) {
+                if (status[i + 1] == code) return true;
+            }
+        }
+        // cstring: type, length, pointer; every other kind: type, value.
+        i += (type == isc_arg_cstring) ? 3 : 2;
+    }
+    return false;
+}
+
+bool FirebirdConnection::NoteStatus(const ISC_STATUS *status) {
+    if (StatusMeansConnectionLost(status)) {
+        broken_.store(true, std::memory_order_relaxed);
+    }
+    return StatusIsError(status);
+}
+
+void FirebirdConnection::CheckStatus(const ISC_STATUS *status, const std::string &context) {
+    NoteStatus(status);
+    Check(status, context);
 }
 
 bool FirebirdConnection::TryStartSnapshotTransaction(int64_t at_snapshot_number,
@@ -567,7 +618,7 @@ bool FirebirdConnection::TryStartSnapshotTransaction(int64_t at_snapshot_number,
     ISC_STATUS status[20] = {};
     if (tr_) {
         isc_rollback_transaction(status, &tr_);
-        if (StatusIsError(status)) {
+        if (NoteStatus(status)) {
             if (error) *error = "isc_rollback_transaction: " + StatusText(status);
             // tr_ keeps the old handle, which may be dead (for example,
             // the attachment was killed on the server).
@@ -577,7 +628,7 @@ bool FirebirdConnection::TryStartSnapshotTransaction(int64_t at_snapshot_number,
     in_snapshot_ = false;
     isc_start_transaction(status, &tr_, 1, &db_,
                           static_cast<unsigned short>(tpb.size()), tpb.data());
-    if (StatusIsError(status)) {
+    if (NoteStatus(status)) {
         if (error) *error = "isc_start_transaction: " + StatusText(status);
         tr_ = 0;
         // Back to read committed, without throwing. If that fails too, the
@@ -585,7 +636,7 @@ bool FirebirdConnection::TryStartSnapshotTransaction(int64_t at_snapshot_number,
         // starts one or throws, so it is never pooled in that state.
         ISC_STATUS restore_status[20] = {};
         StartReadOnlyTransaction(restore_status);
-        if (StatusIsError(restore_status)) {
+        if (NoteStatus(restore_status)) {
             tr_ = 0;
         }
         return false;
@@ -603,7 +654,7 @@ int64_t FirebirdConnection::SnapshotNumber() {
     ISC_STATUS status[20] = {};
     isc_transaction_info(status, &tr_, static_cast<short>(sizeof(items)), items,
                          static_cast<short>(sizeof(buf)), buf);
-    if (StatusIsError(status)) {
+    if (NoteStatus(status)) {
         return 0;
     }
     // Reply: item byte, 2-byte little-endian length, little-endian value.
@@ -652,7 +703,7 @@ void FirebirdConnection::RestoreDefaultTransaction() {
     ISC_STATUS status[20] = {};
     if (tr_) {
         isc_rollback_transaction(status, &tr_);
-        Check(status, "isc_rollback_transaction");
+        CheckStatus(status, "isc_rollback_transaction");
     }
     in_snapshot_ = false;
     StartReadOnlyTransaction();
@@ -691,7 +742,7 @@ void FirebirdStatement::BindInputParameters(const std::vector<Value> &params,
 
     in_sqlda_ = AllocXSQLDA(static_cast<int>(params.size()));
     isc_dsql_describe_bind(status, &stmt_, 1, in_sqlda_);
-    FirebirdConnection::Check(status, "isc_dsql_describe_bind:\n" + sql_for_error);
+    conn_.CheckStatus(status, "isc_dsql_describe_bind:\n" + sql_for_error);
 
     if (in_sqlda_->sqld > in_sqlda_->sqln) {
         int n = in_sqlda_->sqld;
@@ -699,7 +750,7 @@ void FirebirdStatement::BindInputParameters(const std::vector<Value> &params,
         in_sqlda_ = AllocXSQLDA(n);
         std::memset(status, 0, sizeof(status));
         isc_dsql_describe_bind(status, &stmt_, 1, in_sqlda_);
-        FirebirdConnection::Check(status, "isc_dsql_describe_bind (re):\n" + sql_for_error);
+        conn_.CheckStatus(status, "isc_dsql_describe_bind (re):\n" + sql_for_error);
     }
 
     if (static_cast<size_t>(in_sqlda_->sqld) != params.size()) {
@@ -861,7 +912,7 @@ void FirebirdStatement::Prepare(const std::string &sql) {
     ISC_STATUS status[20] = {};
 
     isc_dsql_allocate_statement(status, &conn_.db(), &stmt_);
-    FirebirdConnection::Check(status, "isc_dsql_allocate_statement");
+    conn_.CheckStatus(status, "isc_dsql_allocate_statement");
 
     out_sqlda_ = AllocXSQLDA(16);
     std::memset(status, 0, sizeof(status));
@@ -869,7 +920,7 @@ void FirebirdStatement::Prepare(const std::string &sql) {
                      const_cast<char *>(sql.c_str()),
                      static_cast<unsigned short>(conn_.info().dialect),
                      out_sqlda_);
-    FirebirdConnection::Check(status, "isc_dsql_prepare:\n" + sql);
+    conn_.CheckStatus(status, "isc_dsql_prepare:\n" + sql);
 
     if (out_sqlda_->sqld > out_sqlda_->sqln) {
         int n = out_sqlda_->sqld;
@@ -877,7 +928,7 @@ void FirebirdStatement::Prepare(const std::string &sql) {
         out_sqlda_ = AllocXSQLDA(n);
         std::memset(status, 0, sizeof(status));
         isc_dsql_describe(status, &stmt_, 1, out_sqlda_);
-        FirebirdConnection::Check(status, "isc_dsql_describe");
+        conn_.CheckStatus(status, "isc_dsql_describe");
     }
 
     AllocateBuffers();
@@ -889,7 +940,7 @@ FirebirdStatement::FirebirdStatement(FirebirdConnection &conn, const std::string
 
     ISC_STATUS status[20] = {};
     isc_dsql_execute(status, &conn_.tr(), &stmt_, 1, nullptr);
-    FirebirdConnection::Check(status, "isc_dsql_execute:\n" + sql);
+    conn_.CheckStatus(status, "isc_dsql_execute:\n" + sql);
 }
 
 FirebirdStatement::FirebirdStatement(FirebirdConnection &conn,
@@ -902,7 +953,7 @@ FirebirdStatement::FirebirdStatement(FirebirdConnection &conn,
         // No placeholders → same code path as the no-parameter constructor.
         ISC_STATUS status[20] = {};
         isc_dsql_execute(status, &conn_.tr(), &stmt_, 1, nullptr);
-        FirebirdConnection::Check(status, "isc_dsql_execute:\n" + sql);
+        conn_.CheckStatus(status, "isc_dsql_execute:\n" + sql);
         return;
     }
 
@@ -910,7 +961,7 @@ FirebirdStatement::FirebirdStatement(FirebirdConnection &conn,
 
     ISC_STATUS status[20] = {};
     isc_dsql_execute(status, &conn_.tr(), &stmt_, 1, in_sqlda_);
-    FirebirdConnection::Check(status, "isc_dsql_execute (with params):\n" + sql);
+    conn_.CheckStatus(status, "isc_dsql_execute (with params):\n" + sql);
 }
 
 FirebirdStatement::FirebirdStatement(FirebirdConnection &conn,
@@ -925,6 +976,7 @@ FirebirdStatement::~FirebirdStatement() {
     if (stmt_) {
         ISC_STATUS s[20] = {};
         isc_dsql_free_statement(s, &stmt_, DSQL_drop);
+        conn_.NoteStatus(s);  // a kill after the last fetch can show up here
     }
     if (out_sqlda_) std::free(out_sqlda_);
     if (in_sqlda_)  std::free(in_sqlda_);
@@ -1026,7 +1078,7 @@ bool FirebirdStatement::Fetch() {
     long rc = isc_dsql_fetch(status, &stmt_, 1, out_sqlda_);
     if (rc == 100L) return false;  // no more rows
     if (rc != 0) {
-        FirebirdConnection::Check(status, "isc_dsql_fetch");
+        conn_.CheckStatus(status, "isc_dsql_fetch");
     }
     // G5 — one row crossed the wire; add this cursor's fixed payload
     // width. BLOB content is added separately, where ReadBlob() runs.
@@ -1128,7 +1180,7 @@ std::string FirebirdStatement::ReadBlob(idx_t col) const {
     isc_blob_handle blob = 0;
     ISC_STATUS status[20] = {};
     isc_open_blob2(status, &conn_.db(), &conn_.tr(), &blob, &blob_id, 0, nullptr);
-    FirebirdConnection::Check(status, "isc_open_blob2");
+    conn_.CheckStatus(status, "isc_open_blob2");
 
     // isc_get_segment's return codes: isc_segstr_eof is the ONLY signal
     // that there is no more BLOB data -- this is the sole loop-exit
@@ -1150,13 +1202,18 @@ std::string FirebirdStatement::ReadBlob(idx_t col) const {
         ISC_STATUS rc = isc_get_segment(status, &blob, &seg_len, sizeof(segment), segment);
         if (rc == isc_segstr_eof) break;
         if (rc != 0 && rc != isc_segment) {
-            isc_close_blob(status, &blob);
-            FirebirdConnection::Check(status, "isc_get_segment");
+            // Close into a separate vector: isc_close_blob must not
+            // overwrite the segment error (it can succeed even on a lost
+            // connection, as the remote client defers the close).
+            ISC_STATUS close_status[20] = {};
+            isc_close_blob(close_status, &blob);
+            conn_.CheckStatus(status, "isc_get_segment");
         }
         out.append(segment, seg_len);
     }
     std::memset(status, 0, sizeof(status));
     isc_close_blob(status, &blob);
+    conn_.NoteStatus(status);
     // G5 — BLOB content does not travel in the XSQLDA row frame (only
     // its 8-byte id does); it arrives through these isc_get_segment
     // calls. Count the bytes actually received so scans of BLOB-bearing

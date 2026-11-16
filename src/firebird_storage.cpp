@@ -174,8 +174,13 @@ public:
 #endif
 
                                             data->column_names, data->column_types);
+                // ProbePrimaryKey swallows its errors and returns null. If
+                // the connection broke, null doesn't mean "no usable PK", so
+                // don't memoise it: the next scan probes again. Release()
+                // discards the broken connection.
+                const bool probe_ok = !conn->IsBroken();
                 if (pool_) pool_->Release(std::move(conn));
-                pk_loaded_ = true;
+                pk_loaded_ = probe_ok || pk_cache_ != nullptr;
             }
             if (pk_cache_) {
                 data->pk = make_uniq<PrimaryKeyInfo>(*pk_cache_);
@@ -655,6 +660,15 @@ private:
             }
         }
 
+        // The per-table fallback above skips tables whose load failed. If the
+        // connection itself broke on the way, that list is incomplete: don't
+        // cache it. Throwing lets discard_on_throw drop the connection, and
+        // the next query loads the catalog again.
+        if (conn.IsBroken()) {
+            tables_.clear();
+            throw IOException("Firebird catalog discovery: the connection was lost "
+                              "while the table list was loading");
+        }
         if (pool_) pool_->Release(std::move(conn_owned));
         loaded_ = true;
     }

@@ -25,6 +25,10 @@ struct FirebirdMetadataLease {
     FirebirdMetadataLease(const FirebirdMetadataLease &) = delete;
     FirebirdMetadataLease &operator=(const FirebirdMetadataLease &) = delete;
 
+    // Release() discards a connection that broke while it was leased (for
+    // example, killed on the server while the lease's query ran), so an
+    // exception here never parks a dead connection. A query that failed
+    // for another reason leaves the connection usable and it is parked.
     ~FirebirdMetadataLease() {
         if (pool && conn) {
             pool->Release(std::move(conn));
