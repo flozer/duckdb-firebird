@@ -438,6 +438,7 @@ SELECT COUNT(*) FROM firebird_query_log()
 | `firebird_query_log_size` | BIGINT | 0 | Ring-buffer size. `0` disables and clears the log. |
 | `firebird_unpushed_mode` | VARCHAR | `silent` | Reaction when a scan keeps filters un-pushed: `silent` (telemetry only), `warn` (one warning), or `error` (fail the scan). See the guard section above. |
 | `firebird_dummy_packet_interval` | BIGINT | 0 | Keepalive in seconds sent as `isc_dpb_dummy_packet_interval` on every connection (`0` = off). Companion to the fetch-failure context above. |
+| `firebird_max_inline_blob_size` | BIGINT | -1 | Inline-blob limit in bytes sent as `isc_dpb_max_inline_blob_size` (`-1` = client default, `0` = off, max 65535; Firebird 5.0.3+ client and server, TCP attachments). Effective value: `firebird_health(alias).inline_blob_size`. |
 
 ```sql
 SELECT current_setting('firebird_query_log_size');

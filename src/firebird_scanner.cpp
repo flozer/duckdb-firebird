@@ -615,6 +615,17 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
             bind->conn_info.dummy_packet_interval_secs = secs;
         }
     }
+    // Inline blobs: same lifecycle as the keepalive above.
+    {
+        Value inline_size;
+        if (context.TryGetCurrentSetting("firebird_max_inline_blob_size",
+                                         inline_size) &&
+            !inline_size.IsNull()) {
+            const int64_t bytes = inline_size.GetValue<int64_t>();
+            ValidateMaxInlineBlobSize(bytes);
+            bind->conn_info.max_inline_blob_size = bytes;
+        }
+    }
     // v0.5 contract: offset requires limit. Pure offset is a "skip then
     // drain" pattern that is both expensive (Firebird still streams the
     // skipped rows server-side, just throws them away on the wire) and

@@ -112,6 +112,9 @@ static void BindSymbols(FirebirdClientApi &api,
     BIND(isc_sqlcode);
     BIND(fb_interpret);
     BIND(isc_database_info);
+    // Optional: only firebird_health().client_version uses it.
+    api.isc_get_client_version = reinterpret_cast<decltype(api.isc_get_client_version)>(
+        PlatformSym(handle, "isc_get_client_version"));
 #undef BIND
 }
 

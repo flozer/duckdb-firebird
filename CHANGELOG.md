@@ -36,6 +36,16 @@
   the failed one, and that an auto-partitioned table is partitioned again;
   on Firebird 4/5 also for a connection killed by the server's idle timeout.
   Its own step on every Firebird 3/4/5 leg of the Linux matrix.
+- `SET firebird_max_inline_blob_size = BYTES`: tunes or disables Firebird
+  5.0.3+ inline blobs (`isc_dpb_max_inline_blob_size`, `-1` = client
+  default, `0` = off, max 65535), read at `firebird_scan()` bind and at
+  `ATTACH` like `firebird_dummy_packet_interval`. Inlining is already on by
+  default for TCP attachments when the client library and the server are
+  both 5.0.3+ (the server does not inline blobs over XNET or embedded).
+- `firebird_health()`: `client_version`, `inline_blob_size` and
+  `network_protocol` columns (18 columns), and the
+  `inline_blobs_unavailable` warning for a 5.0.3+ server reached over TCP
+  through an older client library.
 
 ### Fixed
 
