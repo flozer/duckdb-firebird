@@ -96,12 +96,14 @@ SELECT
   coalesce(network_protocol LIKE 'TCP%', false) AS tcp
 FROM firebird_health('fb');
 
-# Default (setting -1, nothing sent): the client default 65535 when both
-# sides support it over TCP, NULL otherwise. The warning fires only for a
-# 5.0.3+ server reached over TCP through an older client.
+# Default (setting -1, nothing sent): the client's built-in default (65535
+# in 5.0.3, a compile-time constant of the client) when both sides support
+# it over TCP, NULL otherwise. Exact values are asserted only for explicit
+# settings below. The warning fires only for a 5.0.3+ server reached over
+# TCP through an older client.
 query II
 SELECT
-  CASE WHEN e.server_ok AND e.tcp AND e.client_ok THEN h.inline_blob_size = 65535
+  CASE WHEN e.server_ok AND e.tcp AND e.client_ok THEN h.inline_blob_size >= 0
        ELSE h.inline_blob_size IS NULL END,
   list_contains(h.warnings, 'inline_blobs_unavailable') = (e.server_ok AND e.tcp AND NOT e.client_ok)
 FROM firebird_health('fb') h, inline_expect e;
@@ -143,14 +145,42 @@ firebird_max_inline_blob_size must be -1 (client default) or 0..65535
 statement ok
 SET firebird_max_inline_blob_size = -1;
 
-# Scans keep working with inlining tuned down (blob values unchanged).
+# A small limit: blobs up to 16 bytes come inline (FILE_STORAGE: 5 and 6
+# bytes), larger ones the usual way (TBLOB_MULTISEG: 4020 bytes, multi-
+# segment). Both must read the same bytes as through the default ATTACH.
 statement ok
 SET firebird_max_inline_blob_size = 16;
 
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb_small (TYPE firebird);
+
 query I
-SELECT COUNT(*) > 0 FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE');
+SELECT CASE WHEN e.server_ok AND e.tcp AND e.client_ok THEN h.inline_blob_size = 16
+            ELSE h.inline_blob_size IS NULL END
+FROM firebird_health('fb_small') h, inline_expect e;
 ----
 true
+
+query II
+SELECT
+  (SELECT string_agg(md5(NOTE) || md5(DATA), ',' ORDER BY ID) FROM fb_small.main.TBLOB_MULTISEG) =
+  (SELECT string_agg(md5(NOTE) || md5(DATA), ',' ORDER BY ID) FROM fb.main.TBLOB_MULTISEG),
+  (SELECT string_agg(coalesce(md5(PAYLOAD), 'null'), ',' ORDER BY FILE_ID) FROM fb_small.main.FILE_STORAGE) =
+  (SELECT string_agg(coalesce(md5(PAYLOAD), 'null'), ',' ORDER BY FILE_ID) FROM fb.main.FILE_STORAGE);
+----
+true	true
+
+# The same bytes as the known fixture values, not just the same as each
+# other.
+query I
+SELECT string_agg(coalesce(md5(PAYLOAD), 'null'), ',' ORDER BY FILE_ID) =
+       md5('binary'::BLOB) || ',null,' || md5('hello'::BLOB)
+FROM fb_small.main.FILE_STORAGE;
+----
+true
+
+statement ok
+DETACH fb_small;
 
 statement ok
 RESET firebird_max_inline_blob_size;

@@ -135,10 +135,12 @@ static HealthInfo BuildHealth(FirebirdConnection &conn) {
     //     where nothing is inlined, so the protocol and the server version
     //     decide too. An older client answers isc_info_error.
     h.client_version = FirebirdClientVersion();
-    const int64_t client_inline = conn.MaxInlineBlobSize();
     const bool server_inline = VersionAtLeast503(h.engine_version);
     const bool tcp = h.network_protocol.rfind("TCP", 0) == 0;
-    if (client_inline >= 0 && server_inline && tcp) {
+    // Only asked where blobs can be inlined: elsewhere the answer is unused.
+    // -1 = the client can't inline; -2 = the request failed.
+    const int64_t client_inline = (server_inline && tcp) ? conn.MaxInlineBlobSize() : -2;
+    if (client_inline >= 0) {
         h.inline_blob_size = client_inline;
     }
 
@@ -166,7 +168,7 @@ static HealthInfo BuildHealth(FirebirdConnection &conn) {
     // The server could inline blobs over this TCP attachment but the loaded
     // client library can't: actionable (load a 5.0.3+ fbclient), unlike an
     // old server or a local attachment.
-    if (server_inline && tcp && client_inline < 0) {
+    if (server_inline && tcp && client_inline == -1) {
         h.warnings.push_back("inline_blobs_unavailable");
     }
 
@@ -287,7 +289,8 @@ static void HealthFunction(ClientContext &context, TableFunctionInput &input,
     output.data[12].SetValue(0, bigint_or_null(h.next_tx - h.oat));
     output.data[13].SetValue(0, int_or_null(h.attachments));
     output.data[14].SetValue(0, VarcharList(h.warnings));
-    output.data[15].SetValue(0, Value(h.client_version));
+    output.data[15].SetValue(0, h.client_version.empty()
+        ? Value(LogicalType::VARCHAR) : Value(h.client_version));
     output.data[16].SetValue(0, h.inline_blob_size >= 0
         ? Value::INTEGER(static_cast<int32_t>(h.inline_blob_size))
         : Value(LogicalType::INTEGER));

@@ -299,6 +299,9 @@ void ValidateMaxInlineBlobSize(int64_t bytes) {
 }
 
 std::string FirebirdClientVersion() {
+    if (!isc_get_client_version) {  // the macro reads the bound pointer
+        return {};  // not exported by this client library
+    }
     char buf[256] = {};
     isc_get_client_version(buf);
     const std::string raw(buf);
@@ -336,17 +339,21 @@ int64_t FirebirdConnection::MaxInlineBlobSize() {
     isc_database_info(status, &db_, static_cast<short>(sizeof(items)), items,
                       static_cast<short>(sizeof(buf)), buf);
     if (NoteStatus(status)) {
+        return -2;
+    }
+    // Reply: item, 2-byte LE length, LE value. A client that can't inline
+    // (older than 5.0.3, or embedded) answers isc_info_error instead.
+    const auto item = static_cast<unsigned char>(buf[0]);
+    if (item == isc_info_error) {
         return -1;
     }
-    // Reply: item, 2-byte LE length, LE value. An older client answers
-    // isc_info_error for the item instead.
-    if (static_cast<unsigned char>(buf[0]) != fb_info_max_inline_blob_size) {
-        return -1;
+    if (item != fb_info_max_inline_blob_size) {
+        return -2;
     }
     const unsigned len = static_cast<unsigned char>(buf[1]) |
                          (static_cast<unsigned>(static_cast<unsigned char>(buf[2])) << 8);
     if (len == 0 || len > 4) {
-        return -1;
+        return -2;
     }
     int64_t value = 0;
     for (unsigned i = 0; i < len; ++i) {

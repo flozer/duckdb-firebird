@@ -393,8 +393,9 @@ public:
     // extension-side pool reuse.
     int64_t Id() const { return id_; }
 
-    // fb_info_max_inline_blob_size for this attachment, or -1 when it is
-    // not answered (client older than 5.0.3, or an embedded attachment).
+    // fb_info_max_inline_blob_size for this attachment; -1 when the client
+    // doesn't answer the item (older than 5.0.3, or an embedded
+    // attachment); -2 when the request failed or the reply is malformed.
     // NOTE: a 5.0.3+ client answers it locally, so against an older server
     // or over XNET it reports its configured size although nothing is
     // inlined; callers must also check the server version and the transport.
