@@ -341,7 +341,7 @@ IndexProfileBind(ClientContext &context, TableFunctionBindInput &input,
     bind->catalog_name = qn.catalog;
     bind->table_name = qn.table;
 
-    ValidateFirebirdAttachAlias(context, bind->catalog_name);
+    ValidateFirebirdAttachAlias(context, bind->catalog_name, "firebird_index_profile");
 
     names = {
         "index_name", "columns", "is_unique", "is_active",
@@ -399,7 +399,7 @@ IndexProfileInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 
     // The lease releases the connection on scope exit, even if
     // BuildIndexProfile throws mid-load (e.g. relation not found).
-    auto lease = AcquireFirebirdCatalogLease(context, bind.catalog_name);
+    auto lease = AcquireFirebirdCatalogLease(context, bind.catalog_name, "firebird_index_profile");
     IndexProfileResult result =
         BuildIndexProfile(*lease.conn, bind.table_name, lease.none_encoding);
 

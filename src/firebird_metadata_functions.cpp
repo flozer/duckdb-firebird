@@ -93,7 +93,7 @@ MetaBindDispatch(ClientContext &context, TableFunctionBindInput &input,
     auto bind = make_uniq<MetaBindData>();
     bind->catalog_name = input.inputs[0].ToString();
     bind->desc = &desc;
-    ValidateFirebirdAttachAlias(context, bind->catalog_name);
+    ValidateFirebirdAttachAlias(context, bind->catalog_name, desc.name);
 #ifdef FIREBIRD_DUCKDB_V2
     names = StringsToIdentifiers(desc.col_names);  // v2.0: Identifier names
 #else
@@ -107,7 +107,7 @@ static unique_ptr<GlobalTableFunctionState>
 MetaInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
     auto &bind = input.bind_data->Cast<MetaBindData>();
     auto g = make_uniq<MetaGlobalState>();
-    auto lease = AcquireFirebirdCatalogLease(context, bind.catalog_name);
+    auto lease = AcquireFirebirdCatalogLease(context, bind.catalog_name, bind.desc->name);
     auto cur = lease.conn->OpenCursor(bind.desc->sql);
     while (cur->Fetch()) {
         g->rows.push_back(bind.desc->map_row(*cur));
@@ -242,7 +242,7 @@ GenBind(ClientContext &context, TableFunctionBindInput &input,
         throw BinderException("firebird_generators(catalog_name VARCHAR): catalog_name is required.");
     auto bind = make_uniq<GenBindData>();
     bind->catalog_name = input.inputs[0].ToString();
-    ValidateFirebirdAttachAlias(context, bind->catalog_name);
+    ValidateFirebirdAttachAlias(context, bind->catalog_name, "firebird_generators");
     names        = {"generator_name", "initial_value", "current_value"};
     return_types = {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT};
     return std::move(bind);
@@ -252,7 +252,7 @@ static unique_ptr<GlobalTableFunctionState>
 GenInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
     auto &bind = input.bind_data->Cast<GenBindData>();
     auto g = make_uniq<GenGlobalState>();
-    auto lease = AcquireFirebirdCatalogLease(context, bind.catalog_name);
+    auto lease = AcquireFirebirdCatalogLease(context, bind.catalog_name, "firebird_generators");
     FirebirdConnection &conn = *lease.conn;
 
     // Phase 1: list generators + initial_value (BIGINT — use GetInt64).

@@ -705,7 +705,8 @@ public:
     // conn_info_ publicly. Implementation lives at file scope just
     // below this class.
     friend FirebirdMetadataLease AcquireFirebirdCatalogLease(
-        ClientContext &context, const string &catalog_name);
+        ClientContext &context, const string &catalog_name,
+        const string &function_name);
 
     // firebird_pool_stats('alias') reads this catalog's pool counters
     // without leasing a connection. Implementation just below the class.
@@ -1004,8 +1005,9 @@ FirebirdAttach(optional_ptr<StorageExtensionInfo> /*info*/,
 // ---------------------------------------------------------------------------
 
 FirebirdMetadataLease AcquireFirebirdCatalogLease(ClientContext &context,
-                                                   const string &catalog_name) {
-    ValidateFirebirdAttachAlias(context, catalog_name);
+                                                   const string &catalog_name,
+                                                   const string &function_name) {
+    ValidateFirebirdAttachAlias(context, catalog_name, function_name);
 #ifdef FIREBIRD_DUCKDB_V2
     // v2.0: GetCatalogEntry keys by Identifier.
     auto catalog_ptr = Catalog::GetCatalogEntry(context, Identifier(catalog_name));
@@ -1056,7 +1058,7 @@ struct FirebirdPoolStatsRow {
 
 FirebirdPoolStatsRow ReadFirebirdPoolStats(ClientContext &context,
                                            const string &catalog_name) {
-    ValidateFirebirdAttachAlias(context, catalog_name);
+    ValidateFirebirdAttachAlias(context, catalog_name, "firebird_pool_stats");
 #ifdef FIREBIRD_DUCKDB_V2
     // v2.0: GetCatalogEntry keys by Identifier.
     auto catalog_ptr = Catalog::GetCatalogEntry(context, Identifier(catalog_name));
@@ -1111,7 +1113,7 @@ unique_ptr<FunctionData> PoolStatsBind(ClientContext &context,
     auto bind = make_uniq<PoolStatsBindData>();
     bind->catalog_name = input.inputs[0].ToString();
     // Resolve eagerly so a bad alias fails at bind time, not at execute.
-    ValidateFirebirdAttachAlias(context, bind->catalog_name);
+    ValidateFirebirdAttachAlias(context, bind->catalog_name, "firebird_pool_stats");
 
     names = {
         "catalog_name",

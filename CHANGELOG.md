@@ -16,6 +16,12 @@
   connection was dropped without telling the pool, so each failed load left
   `firebird_pool_stats().active_connections` one too high for the rest of
   the ATTACH. The connection is now counted as discarded.
+- The functions that take an ATTACH alias (`firebird_health()`,
+  `firebird_pool_stats()`, `firebird_profile_table()`,
+  `firebird_index_profile()`, `firebird_generators()` and the other catalog
+  metadata functions such as `firebird_indexes()`) reported an unknown or
+  non-Firebird alias under the name `firebird_generate_dbt_sources`. The
+  error now names the function that was called.
 
 ## [v1.4.0] - 2026-11-15
 
