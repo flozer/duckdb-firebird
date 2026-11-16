@@ -564,6 +564,11 @@ static bool StatusMeansConnectionLost(const ISC_STATUS *status) {
         335544727L,  // isc_net_write_err:      error writing data to the connection
         335544741L,  // isc_lost_db_connection: connection lost to database
         335544856L,  // isc_att_shutdown:       connection shutdown
+        335544648L,  // isc_conn_lost:          connection lost to pipe server
+        335545130L,  // isc_att_shut_killed:    killed by database administrator
+        335545131L,  // isc_att_shut_idle:      idle timeout expired
+        335545132L,  // isc_att_shut_db_down:   database is shutdown
+        335545133L,  // isc_att_shut_engine:    engine is shutdown
     };
     if (!StatusIsError(status)) {
         return false;
@@ -680,7 +685,7 @@ int64_t FirebirdConnection::PageSize() {
     ISC_STATUS status[20] = {};
     isc_database_info(status, &db_, static_cast<short>(sizeof(items)), items,
                       static_cast<short>(sizeof(buf)), buf);
-    if (StatusIsError(status) || buf[0] != isc_info_page_size) {
+    if (NoteStatus(status) || buf[0] != isc_info_page_size) {
         return 0;
     }
     // Reply: item byte, 2-byte LE length, LE value.
@@ -972,6 +977,11 @@ FirebirdStatement::FirebirdStatement(FirebirdConnection &conn,
     // Deliberately no isc_dsql_execute call — describe-only.
 }
 
+// Lifetime rule: a statement must be destroyed before its connection, since
+// this destructor reports the free's status to conn_. Every OpenCursor and
+// PrepareOnly caller keeps the statement in a narrower scope than the
+// connection, and the scanner's local state resets its cursor before it
+// releases the connection.
 FirebirdStatement::~FirebirdStatement() {
     if (stmt_) {
         ISC_STATUS s[20] = {};
@@ -1207,6 +1217,7 @@ std::string FirebirdStatement::ReadBlob(idx_t col) const {
             // connection, as the remote client defers the close).
             ISC_STATUS close_status[20] = {};
             isc_close_blob(close_status, &blob);
+            conn_.NoteStatus(close_status);
             conn_.CheckStatus(status, "isc_get_segment");
         }
         out.append(segment, seg_len);

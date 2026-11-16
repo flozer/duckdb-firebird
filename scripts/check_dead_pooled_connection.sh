@@ -9,7 +9,8 @@
 # every later query on the ATTACH failed the same way, and the PK probe also
 # memoised "no usable PK" for the table, so it was never partitioned again.
 #
-# Three phases, each in its own DuckDB CLI session and ATTACH:
+# Three phases, each in its own DuckDB CLI session and ATTACH, plus an
+# optional fourth:
 #   lease: firebird_health() parks a pooled connection; its attachment is
 #          killed from isql via `.shell` (DELETE FROM MON$ATTACHMENTS); the
 #          next firebird_health() may fail, but the one after it must work;
@@ -21,7 +22,12 @@
 #          be partitioned again (partitions > 1);
 #   scan:  a first scan of PART_NO_LEVER (no PK: one partition, no shared
 #          snapshot) leaves its connection parked; it is killed, so the next
-#          scan fails on it; the scan after that must return both rows.
+#          scan fails on it; the scan after that must return both rows;
+#   idle:  only when FIREBIRD_IDLE_DB is set (Firebird 4+): a database whose
+#          databases.conf entry sets ConnectionIdleTimeout = 1 (minute).
+#          firebird_health() parks a connection, the server's idle timeout
+#          kills it (connection shutdown / Idle timeout expired), and the
+#          call after the failed one must work.
 # At the end of each phase firebird_pool_stats() must show nothing leased and
 # at least one connection discarded.
 #
@@ -38,6 +44,9 @@
 #                           (firebird://SYSDBA:masterkey@localhost:3050<FB_DB_PATH>?charset=UTF8)
 #   DUCKDB                  DuckDB CLI with the extension linked in (./build/release/duckdb)
 #   DUCKDB_PRELUDE          SQL run at the start of the session, e.g. a LOAD (empty)
+#   FIREBIRD_IDLE_DB        connection string of the idle-timeout database (unset: skip
+#                           the idle phase)
+#   IDLE_WAIT               seconds to wait for the idle kill (75)
 set -euo pipefail
 
 FB_ISQL=${FB_ISQL:-"docker exec -i fb isql"}
@@ -50,6 +59,8 @@ FB_USER=${ISC_USER:-SYSDBA}
 FB_PASS=${ISC_PASSWORD:-masterkey}
 
 SCANS=4
+FIREBIRD_IDLE_DB=${FIREBIRD_IDLE_DB:-}
+IDLE_WAIT=${IDLE_WAIT:-75}
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -91,6 +102,23 @@ kill_helper() {
 
 kill_cmd=$(kill_helper)
 
+# sleep_helper: prints a `.shell` command that waits IDLE_WAIT seconds.
+sleep_helper() {
+    local sh="$work/wait.sh"
+    {
+        echo '#!/usr/bin/env bash'
+        echo "sleep $IDLE_WAIT"
+    } > "$sh"
+    chmod +x "$sh"
+    case "${OSTYPE:-}" in
+        msys* | cygwin*)
+            printf '@bash "%s"\r\n' "$(cygpath -m "$sh")" > "$work/wait.bat"
+            cygpath -m "$work/wait.bat"
+            ;;
+        *) echo "$sh" ;;
+    esac
+}
+
 # run_phase <name>: runs one phase in its own CLI session and ATTACH, reading
 # its SQL from stdin; the output goes to $work/<name>.out (CRs stripped).
 run_phase() {
@@ -123,6 +151,19 @@ SQL
     done
     echo "SELECT 'pool after active=' || active_connections || ' discarded=' || total_discarded FROM firebird_pool_stats('fbd');"
 } | run_phase probe
+
+if [ -n "$FIREBIRD_IDLE_DB" ]; then
+    # Own ATTACH on the idle-timeout database (run_phase attaches fbd).
+    run_phase idle <<SQL
+ATTACH '${FIREBIRD_IDLE_DB}' AS fbi (TYPE firebird);
+SELECT 'idle health0 rows=' || count(*) FROM firebird_health('fbi');
+SELECT 'pool before active=' || active_connections || ' discarded=' || total_discarded FROM firebird_pool_stats('fbi');
+.shell $(sleep_helper)
+SELECT 'idle health1 rows=' || count(*) FROM firebird_health('fbi');
+SELECT 'idle health2 rows=' || count(*) FROM firebird_health('fbi');
+SELECT 'pool after active=' || active_connections || ' discarded=' || total_discarded FROM firebird_pool_stats('fbi');
+SQL
+fi
 
 run_phase scan <<SQL
 SELECT 'scan scan1 rows=' || count(*) FROM fbd.main.PART_NO_LEVER;
@@ -181,4 +222,18 @@ s1=$(value scan 'pool after active=0 discarded=([0-9]+)')
 [ -n "$s1" ] || fail "scan: a connection is still counted as leased at the end"
 [ "$s1" -gt "$s0" ] || fail "scan: no connection was discarded ($s0 -> $s1)"
 
-echo "check_dead_pooled_connection: ok (lease: the call after the failed one works, discarded $((d1 - d0)); probe: scans ok from scan $ok_from, partitions=$last, discarded $((p1 - p0)); scan: the scan after the failed one works, discarded $((s1 - s0)); nothing left leased)"
+idle_note="idle: skipped (FIREBIRD_IDLE_DB unset)"
+if [ -n "$FIREBIRD_IDLE_DB" ]; then
+    i0=$(value idle 'pool before active=0 discarded=([0-9]+)')
+    [ -n "$i0" ] || fail "idle: a connection was already leased before the wait"
+    grep -q 'Idle timeout expired' "$work/idle.out" ||
+        fail "idle: the server's idle timeout did not kill the parked connection (no 'Idle timeout expired')"
+    grep -qx 'idle health2 rows=1' "$work/idle.out" ||
+        fail "idle: firebird_health() still failed on the call after the failed one (the dead connection was parked again)"
+    i1=$(value idle 'pool after active=0 discarded=([0-9]+)')
+    [ -n "$i1" ] || fail "idle: a connection is still counted as leased at the end"
+    [ "$i1" -gt "$i0" ] || fail "idle: no connection was discarded ($i0 -> $i1)"
+    idle_note="idle: the call after the idle kill works, discarded $((i1 - i0))"
+fi
+
+echo "check_dead_pooled_connection: ok (lease: the call after the failed one works, discarded $((d1 - d0)); probe: scans ok from scan $ok_from, partitions=$last, discarded $((p1 - p0)); scan: the scan after the failed one works, discarded $((s1 - s0)); $idle_note; nothing left leased)"

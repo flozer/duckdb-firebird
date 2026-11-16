@@ -34,12 +34,14 @@
 - `scripts/check_dead_pooled_connection.sh`: kills a pooled attachment and
   checks that `firebird_health()` and scans work again from the call after
   the failed one, and that an auto-partitioned table is partitioned again;
-  its own step on every Firebird 3/4/5 leg of the Linux matrix.
+  on Firebird 4/5 also for a connection killed by the server's idle timeout.
+  Its own step on every Firebird 3/4/5 leg of the Linux matrix.
 
 ### Fixed
 
 - ATTACH: a pooled connection whose attachment was gone (killed on the
-  server, network failure) went back to the pool after a failed query, so
+  server or by its idle timeout, network failure) went back to the pool
+  after a failed query, so
   every later query on the ATTACH failed the same way until it was
   re-attached. This happened after a failed `firebird_health()` or other
   catalog function, a failed scan, and a failed PK probe, which also
