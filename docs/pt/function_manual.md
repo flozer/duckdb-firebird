@@ -1598,8 +1598,9 @@ Colunas de saida (11):
 - `total_reused`: conexoes servidas da fila idle ao longo da vida.
 - `total_discarded`: conexoes destruidas (pool desligado, limite/expiracao
   da fila idle atingidos, uma conexao de worker que nao conseguiu entrar no
-  snapshot de um scan particionado, ou uma conexao cuja transacao nao pode
-  ser restaurada depois de um scan particionado).
+  snapshot de um scan particionado, uma conexao cuja transacao nao pode
+  ser restaurada depois de um scan particionado, uma conexao cuja carga do
+  catalogo falhou, ou uma conexao cujo attachment foi perdido).
 - `active_connections`: conexoes emprestadas agora e ainda nao devolvidas
   via Release nem descartadas.
 - `last_error`: mensagem sanitizada da criacao de conexao com falha mais

@@ -422,12 +422,28 @@ public:
     // an error vector.
     static void Check(const ISC_STATUS *status, const std::string &context);
 
+    // Like Check, but first marks this connection broken when the error
+    // says the attachment is gone (connection shutdown, network error,
+    // database shutdown, ...). The calls on an open attachment check their
+    // status through this or NoteStatus, so a broken connection is known as
+    // soon as one of them has failed that way. (The destructor's own
+    // rollback and detach don't: the connection is going away anyway.)
+    void CheckStatus(const ISC_STATUS *status, const std::string &context);
+
+    // True when status is an error; marks the connection broken as above.
+    bool NoteStatus(const ISC_STATUS *status);
+
+    // The attachment can't be used any more. FirebirdConnectionPool::Release
+    // discards such a connection instead of parking it.
+    bool IsBroken() const { return broken_.load(std::memory_order_relaxed); }
+
 private:
     FirebirdConnectionInfo info_;
     isc_db_handle db_ = 0;
     isc_tr_handle tr_ = 0;
     int64_t id_ = 0;
     bool in_snapshot_ = false;
+    std::atomic<bool> broken_{false};
 
     void Attach();
     void StartReadOnlyTransaction();

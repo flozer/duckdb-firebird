@@ -31,9 +31,26 @@
 - `scripts/check_shared_snapshot.sh` also runs `partition_by = 'dbkey'`
   scans, checks `partition_method` on every scan, and on Firebird 4/5
   checks that every DB_KEY range of a scan holds rows.
+- `scripts/check_dead_pooled_connection.sh`: kills a pooled attachment and
+  checks that `firebird_health()` and scans work again from the call after
+  the failed one, and that an auto-partitioned table is partitioned again;
+  on Firebird 4/5 also for a connection killed by the server's idle timeout.
+  Its own step on every Firebird 3/4/5 leg of the Linux matrix.
 
 ### Fixed
 
+- ATTACH: a pooled connection whose attachment was gone (killed on the
+  server or by its idle timeout, network failure) went back to the pool
+  after a failed query, so
+  every later query on the ATTACH failed the same way until it was
+  re-attached. This happened after a failed `firebird_health()` or other
+  catalog function, a failed scan, and a failed PK probe, which also
+  remembered "no usable primary key" for the table, so it was never
+  partitioned again. A connection now marks itself broken when a call fails
+  with a lost-connection error, and the pool discards it instead of parking
+  it; the PK probe doesn't remember a result it got on a broken connection,
+  and a table list loaded on one isn't cached. The first query that gets
+  such a connection still fails (#105).
 - ATTACH: when loading the table list failed (for example because the
   pooled connection's attachment had been killed on the server), the
   connection was dropped without telling the pool, so each failed load left
