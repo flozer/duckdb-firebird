@@ -63,6 +63,8 @@
   parked connections and has another session reuse a lost snapshot number,
   and `test/sql/firebird_transaction_snapshot.test` covers the settings and
   modes.
+- CI: a DuckDB v2.0.0 × Firebird 5 leg in the Linux Firebird matrix, so the
+  FB4+-only tests and scripts also run on the DuckDB v2.0 build.
 - Docs: a note on the open Firebird issues #9227 and #9301, which can still
   let a partitioned scan (and the transaction snapshot) mix two committed
   states on Firebird 4/5.

@@ -14,6 +14,11 @@ name: Build + Test Linux x64 (FB 3/4/5 matrix)
 # against a self-join/aggregate view (see issue #40) — nothing to do with
 # extension code, purely this workflow using one fixed client library for
 # every server version.
+#
+# The three legs build DuckDB v1.5.6. A fourth leg builds DuckDB v2.0.0
+# against Firebird 5, so the FIREBIRD_DUCKDB_V2 path also runs the FB4+-only
+# tests and scripts (build-linux.yml runs both DuckDB lines, but against a
+# Firebird 3 server only).
 
 on:
   push:
@@ -32,12 +37,9 @@ on:
 permissions:
   contents: read
 
-env:
-  DUCKDB_VERSION: v1.5.6
-
 jobs:
   build-test:
-    name: linux-x64 / fb${{ matrix.fb_major }}
+    name: linux-x64 / fb${{ matrix.fb_major }}${{ matrix.name_suffix }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -46,10 +48,19 @@ jobs:
         include:
           - fb_major: 3
             fb_image: firebirdsql/firebird:3-noble
+            duckdb: v1.5.6
           - fb_major: 4
             fb_image: firebirdsql/firebird:4-noble
+            duckdb: v1.5.6
           - fb_major: 5
             fb_image: firebirdsql/firebird:5-noble
+            duckdb: v1.5.6
+          - fb_major: 5
+            fb_image: firebirdsql/firebird:5-noble
+            duckdb: v2.0.0
+            name_suffix: " (DuckDB v2.0.0)"
+    env:
+      DUCKDB_VERSION: ${{ matrix.duckdb }}
 
     steps:
       - name: Checkout
@@ -276,6 +287,13 @@ jobs:
               -L"$LOCAL_DIR" -l:"$(basename "$LOCAL_LIB")"
           ./mkblob_fixture localhost/3050:/var/lib/firebird/data/test.fdb SYSDBA masterkey 1
 
+      - name: Pin extension-ci-tools to the v2.0 branch
+        if: matrix.duckdb == 'v2.0.0'
+        run: |
+          # Same recipe as build-linux.yml's v2.0 leg.
+          git -C extension-ci-tools fetch origin v2.0-cyanoptera
+          git -C extension-ci-tools checkout FETCH_HEAD
+
       - name: Pin DuckDB version
         run: |
           DUCKDB_GIT_VERSION=${DUCKDB_VERSION} make set_duckdb_version
@@ -284,6 +302,27 @@ jobs:
         env:
           GEN: ninja
         run: make release
+
+      - name: CLI with the extension loaded (DuckDB v2.0)
+        if: matrix.duckdb == 'v2.0.0'
+        run: |
+          # unittest has the extension linked in on both DuckDB lines, but
+          # the v2.0 CLI does not, so the scripts and the smoke step below
+          # LOAD the built extension (DUCKDB_PRELUDE, which every script
+          # reads) through a wrapper that allows unsigned extensions.
+          cli="$GITHUB_WORKSPACE/duckdb-cli.sh"
+          printf '%s\n' '#!/usr/bin/env bash' \
+            "exec $GITHUB_WORKSPACE/build/release/duckdb -no-agent -unsigned \"\$@\"" > "$cli"
+          chmod +x "$cli"
+          echo "DUCKDB=$cli" >> $GITHUB_ENV
+          echo "DUCKDB_PRELUDE=LOAD '$GITHUB_WORKSPACE/build/release/extension/firebird/firebird.duckdb_extension';" >> $GITHUB_ENV
+          cat "$cli"
+          # The loaded extension must provide firebird_scan.
+          n=$(printf '%s\n' "LOAD '$GITHUB_WORKSPACE/build/release/extension/firebird/firebird.duckdb_extension';" \
+                "SELECT count(*) FROM duckdb_functions() WHERE function_name = 'firebird_scan';" \
+              | "$cli" -list -noheader | tr -d '\r' | tail -n 1)
+          echo "firebird_scan functions after LOAD: $n"
+          [ "$n" -ge 1 ]
 
       - name: Run SQL test suite
         env:
@@ -367,7 +406,9 @@ jobs:
           # (FB4/FB5 legs); firebird_decfloat.test now runs in the main
           # suite step, no longer here.
         run: |
-          ./build/release/duckdb -unsigned <<'EOF'
+          # DUCKDB / DUCKDB_PRELUDE: set on the DuckDB v2.0 leg only.
+          "${DUCKDB:-./build/release/duckdb}" -unsigned <<EOF
+          ${DUCKDB_PRELUDE:-}
           SELECT
               typeof(BIG_NUM)  AS t_big_num,
               typeof(BIG_DEC)  AS t_big_dec,
@@ -442,7 +483,9 @@ jobs:
         run: docker rm -f fb || true
 
       - name: Upload extension artifact (linux_amd64) - fb${{ matrix.fb_major }}
-        if: matrix.fb_major == '5'
+        # One leg only: two uploads under the same name would conflict.
+        # build-linux.yml uploads the v2.0.0 build.
+        if: matrix.fb_major == '5' && matrix.duckdb == 'v1.5.6'
         uses: actions/upload-artifact@v7
         with:
           name: firebird.duckdb_extension-linux-x64

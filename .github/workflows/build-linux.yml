@@ -141,9 +141,8 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_partition_by.test
           # Against this job's Debian Firebird 3 server only the FB3
           # fallback of the transaction snapshot runs here, on both DuckDB
-          # versions. The FB4/FB5 path runs in build-linux-fb-matrix.yml,
-          # which builds DuckDB v1.5.6 only: DuckDB v2.0.0 x FB4/FB5 is
-          # not covered by CI (it is run locally before each change).
+          # versions. The FB4/FB5 path runs in build-linux-fb-matrix.yml:
+          # on FB4 and FB5 with DuckDB v1.5.6, and on FB5 with v2.0.0.
           ./build/release/test/unittest test/sql/firebird_transaction_snapshot.test
           ./build/release/test/unittest test/sql/firebird_session_stability.test
           ./build/release/test/unittest test/sql/firebird_bytes_estimate.test
