@@ -65,6 +65,11 @@
   modes.
 - CI: a DuckDB v2.0.0 × Firebird 5 leg in the Linux Firebird matrix, so the
   FB4+-only tests and scripts also run on the DuckDB v2.0 build.
+- CI: the DuckDB v1.5.6 × Firebird 5 leg of the Linux matrix also reaches
+  its Firebird 5 server through a Firebird 4 `libfbclient`: it checks that
+  `firebird_health()` reports `inline_blob_size` NULL and the
+  `inline_blobs_unavailable` warning for that pairing, and reruns
+  `firebird_health.test` (#108).
 - Docs: a note on the open Firebird issues #9227 and #9301, which can still
   let a partitioned scan (and the transaction snapshot) mix two committed
   states on Firebird 4/5.
