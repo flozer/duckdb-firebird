@@ -11,7 +11,7 @@
   </p>
   <p>
     <a href="LICENSE"><img alt="license MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
-    <a href="https://github.com/flozer/duckdb-firebird/releases/tag/v1.4.0"><img alt="release v1.4.0" src="https://img.shields.io/badge/release-v1.4.0-blue.svg"></a>
+    <a href="https://github.com/flozer/duckdb-firebird/releases/tag/v1.4.1"><img alt="release v1.4.1" src="https://img.shields.io/badge/release-v1.4.1-blue.svg"></a>
     <a href="https://github.com/flozer/duckdb-firebird/actions/workflows/build-linux-fb-matrix.yml"><img alt="linux matrix" src="https://github.com/flozer/duckdb-firebird/actions/workflows/build-linux-fb-matrix.yml/badge.svg"></a>
     <a href="https://github.com/duckdb/community-extensions/pull/1980"><img alt="community extension merged" src="https://img.shields.io/badge/DuckDB%20community-merged-brightgreen.svg"></a>
     <a href="https://duckdb.org/community_extensions/download_metrics"><img alt="total DuckDB Community downloads for firebird" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fflozer%2Fduckdb-firebird%2Fmain%2F.github%2Fbadges%2Fdownloads.json"></a>
@@ -258,13 +258,19 @@ explicitly authorized publication step. The copy in
 mirrors the latest prepared descriptor. Descriptors pin an immutable
 commit SHA in `repo.ref` (catalog convention).
 
-`main` is at **v1.4.0** (see
-[docs/en/release_notes_v1.4.0.md](docs/en/release_notes_v1.4.0.md) and
-[CHANGELOG.md](CHANGELOG.md)). This release makes partitioned scans read a
-single Firebird snapshot (Firebird 4+), reads new data types correctly from
-servers with `DataTypeCompatibility` set, stops partitioned scans from
-dropping rows outside the cached key range, and fixes Windows client-library
-loading from a path. Supported DuckDB versions
+`main` is at **v1.4.1** (see
+[docs/en/release_notes_v1.4.1.md](docs/en/release_notes_v1.4.1.md) and
+[CHANGELOG.md](CHANGELOG.md)). This release adds `partition_by = 'dbkey'`
+(RDB$DB_KEY ranges, so tables without a usable primary key can be
+partitioned), tuning and reporting of Firebird 5.0.3+ inline blobs, and an
+opt-in transaction snapshot that makes every scan of an ATTACH in one DuckDB
+transaction read a single Firebird snapshot (Firebird 4+); it also stops a
+dead pooled connection from being re-parked and names the called function in
+ATTACH-alias errors. v1.4.0 made partitioned scans read a single Firebird
+snapshot (Firebird 4+), read new data types correctly from servers with
+`DataTypeCompatibility` set, stopped partitioned scans from dropping rows
+outside the cached key range, and fixed Windows client-library loading from a
+path. Supported DuckDB versions
 are **v1.5.6+ and v2.0+**, with release assets built per DuckDB line
 (`-duckdb2` suffix for the v2.0-built binaries). v1.3.1 completed DuckDB
 v2.0 `NOT IN` pushdown and its residual-filter observability. v1.3.0 introduced the
