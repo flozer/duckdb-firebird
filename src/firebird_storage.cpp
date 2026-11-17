@@ -1066,7 +1066,8 @@ private:
                    "': the snapshot of this DuckDB transaction was released because "
                    "the server refused its idle limit "
                    "(firebird_transaction_snapshot_idle_timeout): " + refused_ +
-                   ". Run the query again (inside BEGIN ... COMMIT, after a ROLLBACK).";
+                   ". To run without the limit, SET firebird_transaction_snapshot_idle_timeout = 0, "
+                   "then run the query again (inside BEGIN ... COMMIT, after a ROLLBACK).";
         }
         const std::string why =
             idle_timeout_s_ > 0

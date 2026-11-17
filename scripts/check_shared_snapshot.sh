@@ -244,7 +244,7 @@ SELECT 'mode=' || snapshot_mode FROM firebird_last_query();"
     # at least once over the runs (checked below), or the consistent results
     # above prove nothing about the option.
     tx_run "$two_statements" off
-    control=$(echo "$tx_out" | grep -E '^sum=' | head -1)
+    control=$(echo "$tx_out" | grep -E '^sum=' | head -1 || true)
     echo "  control, option off, two statements $i: $control (transfers meanwhile=$tx_moved)"
     case $control in
         "sum=$EXPECTED_SUM") ;;
@@ -287,7 +287,7 @@ if [ "$expected_mode" = shared ]; then
             printf '@bash "%s"\r\n' "$(cygpath -m "$wait_sh")" > "$work/wait.bat"
             wait_cmd=$(cygpath -m "$work/wait.bat") ;;
     esac
-    out=$(tx_session "SET firebird_transaction_snapshot_idle_timeout = 2;
+    tx_run "SET firebird_transaction_snapshot_idle_timeout = 2;
 BEGIN;
 SELECT 'idle scan1=' || TRANSFERS FROM fbs.main.WRITER_STATE;
 SELECT 'idle scan2=' || TRANSFERS FROM fbs.main.WRITER_STATE;
@@ -299,18 +299,21 @@ SELECT 'idle scan3=' || TRANSFERS FROM fbs.main.WRITER_STATE;
 SELECT 'idle scan4=' || TRANSFERS FROM fbs.main.WRITER_STATE;
 ROLLBACK;
 SELECT 'idle after rollback=' || COUNT(*) FROM fbs.main.WRITER_STATE;
-SELECT 'idle pool active=' || active_connections FROM firebird_pool_stats('fbs');")
+SELECT 'idle pool active=' || active_connections FROM firebird_pool_stats('fbs');"
+    out=$tx_out
     t1=$(echo "$out" | sed -n 's/^idle scan1=//p')
     # The long statement must outlast the limit as the server applies it
     # (limit + 1 s), or it proves nothing.
     long_s=$(echo "$out" | sed -n 's/^Run Time (s): real \([0-9.]*\).*/\1/p' | head -1)
     long_ok=$(awk -v t="${long_s:-0}" 'BEGIN { print (t > 3) ? 1 : 0 }')
-    if [ -n "$t1" ] && echo "$out" | grep -qx "idle scan2=$t1" && [ "$long_ok" = 1 ] &&
+    # The scans read the same counter only if the snapshot held while the
+    # writer committed: it must have committed something meanwhile.
+    if [ -n "$t1" ] && [ "$tx_moved" -gt 0 ] && echo "$out" | grep -qx "idle scan2=$t1" && [ "$long_ok" = 1 ] &&
        echo "$out" | grep -qx 'idle long statement=2000001' && echo "$out" | grep -qx "idle scan3=$t1" &&
        ! echo "$out" | grep -q '^idle scan4=' &&
        echo "$out" | grep -q 'firebird_transaction_snapshot_idle_timeout (2 s)' &&
        echo "$out" | grep -qx 'idle after rollback=1' && echo "$out" | grep -qx 'idle pool active=0'; then
-        echo "  idle limit (2 s): statements back to back and a ${long_s} s statement keep the snapshot; the scan after 8 s idle failed and named the setting; after ROLLBACK scans work -> ok"
+        echo "  idle limit (2 s): statements back to back and a ${long_s} s statement keep the snapshot while the writer committed $tx_moved transfers; the scan after 8 s idle failed and named the setting; after ROLLBACK scans work -> ok"
     else
         echo "  idle limit (2 s; long statement ${long_s:-?} s, must exceed 3 s) -> FAIL"
         echo "$out" | sed 's/^/    | /'

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Check that a dead pooled connection is never handed out again (all Firebird
-# versions).
+# versions), and that the transaction snapshot survives dead pooled
+# connections and a lost coordinator safely (phases txsnap, txreuse).
 #
 # When a pooled connection's attachment is killed on the server, the next
 # lease of it fails. That lease must discard it: before the fix, the

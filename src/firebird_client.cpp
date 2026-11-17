@@ -860,6 +860,7 @@ void FirebirdStatement::BindInputParameters(const std::vector<Value> &params,
     if (in_sqlda_->sqld > in_sqlda_->sqln) {
         int n = in_sqlda_->sqld;
         std::free(in_sqlda_);
+        in_sqlda_ = nullptr;  // Release() must not free it again if the next line throws
         in_sqlda_ = AllocXSQLDA(n);
         std::memset(status, 0, sizeof(status));
         isc_dsql_describe_bind(status, &stmt_, 1, in_sqlda_);
@@ -1038,6 +1039,7 @@ void FirebirdStatement::Prepare(const std::string &sql) {
     if (out_sqlda_->sqld > out_sqlda_->sqln) {
         int n = out_sqlda_->sqld;
         std::free(out_sqlda_);
+        out_sqlda_ = nullptr;  // Release() must not free it again if the next line throws
         out_sqlda_ = AllocXSQLDA(n);
         std::memset(status, 0, sizeof(status));
         isc_dsql_describe(status, &stmt_, 1, out_sqlda_);
