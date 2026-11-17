@@ -3,6 +3,7 @@
 #include "duckdb.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/storage/storage_extension.hpp"
+#include "firebird_transaction_snapshot.hpp"
 
 namespace duckdb {
 

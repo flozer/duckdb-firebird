@@ -1,0 +1,247 @@
+# name: test/sql/firebird_transaction_snapshot.test
+# description: Transaction snapshot on the ATTACH path (opt-in). With
+#              SET firebird_transaction_snapshot = true, or the ATTACH
+#              option transaction_snapshot, every scan of the ATTACH in one
+#              DuckDB transaction, serial ones included, joins one Firebird
+#              snapshot (Firebird 4+) and reports snapshot_mode =
+#              'transaction'. Firebird 3 keeps the per-scan behavior
+#              ('serial' / 'independent'). A direct firebird_scan() call has
+#              no transaction to hold a snapshot and is unaffected.
+#              The consistency guarantee and the idle limit need a
+#              concurrent writer and a wait: see
+#              scripts/check_shared_snapshot.sh.
+# group: [firebird]
+#
+# Requires the PART_RANGE / PART_NO_LEVER fixture from
+# scripts/fixture_partitions.sql (FIREBIRD_PARTITIONS_DB). Runs on all
+# Firebird 3/4/5 matrix legs; the expected mode is derived from the
+# server's engine_version.
+
+require firebird
+
+require-env FIREBIRD_PARTITIONS_DB
+
+require-env ISC_PASSWORD
+
+# Off by default; idle limit 60 s.
+query TT
+SELECT current_setting('firebird_transaction_snapshot'),
+       current_setting('firebird_transaction_snapshot_idle_timeout');
+----
+false	60
+
+statement ok
+SET firebird_query_log_size = 20;
+
+statement ok
+ATTACH '${FIREBIRD_PARTITIONS_DB}' AS fbp (TYPE firebird);
+
+# 'transaction' on Firebird 4+; on Firebird 3 what the scan reports
+# without the option.
+statement ok
+CREATE OR REPLACE TABLE expected AS
+SELECT CAST(split_part(engine_version, '.', 1) AS INTEGER) >= 4 AS fb4
+FROM firebird_health('fbp');
+
+# ---------------------------------------------------------------------------
+#  Off: a serial scan reads in its connection's read-committed transaction
+# ---------------------------------------------------------------------------
+
+query I
+SELECT COUNT(*) FROM fbp.main.PART_NO_LEVER;
+----
+2
+
+query T
+SELECT snapshot_mode FROM firebird_last_query();
+----
+serial
+
+# ---------------------------------------------------------------------------
+#  On (session setting): serial and partitioned scans join the snapshot
+# ---------------------------------------------------------------------------
+
+statement ok
+SET firebird_transaction_snapshot = true;
+
+query I
+SELECT COUNT(*) FROM fbp.main.PART_NO_LEVER;
+----
+2
+
+query I
+SELECT l.snapshot_mode = CASE WHEN e.fb4 THEN 'transaction' ELSE 'serial' END
+FROM firebird_last_query() l, expected e;
+----
+true
+
+query II
+SELECT COUNT(*), SUM(ID) FROM firebird_scan('${FIREBIRD_PARTITIONS_DB}', 'PART_RANGE', partitions=4);
+----
+300	1794000000
+
+# A direct firebird_scan() call is not part of an ATTACH's transaction.
+query I
+SELECT l.snapshot_mode = CASE WHEN e.fb4 THEN 'shared' ELSE 'independent' END
+FROM firebird_last_query() l, expected e;
+----
+true
+
+# Every scan of one explicit transaction reports the same mode, and the
+# coordinator goes back to the pool at COMMIT.
+statement ok
+BEGIN;
+
+query I
+SELECT COUNT(*) FROM fbp.main.PART_NO_LEVER;
+----
+2
+
+query I
+SELECT COUNT(*) FROM fbp.main.PART_RANGE WHERE ID >= 6000000;
+----
+150
+
+statement ok
+COMMIT;
+
+# (On Firebird 3 the PART_RANGE scan may be partitioned: 'independent'.)
+query I
+SELECT bool_and(CASE WHEN e.fb4 THEN snapshot_mode = 'transaction'
+                     ELSE snapshot_mode <> 'transaction' END)
+FROM (SELECT * FROM firebird_query_log() LIMIT 2), expected e;
+----
+true
+
+query I
+SELECT active_connections FROM firebird_pool_stats('fbp');
+----
+0
+
+# Same after a rollback.
+statement ok
+BEGIN;
+
+query I
+SELECT COUNT(*) FROM fbp.main.PART_NO_LEVER;
+----
+2
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT active_connections FROM firebird_pool_stats('fbp');
+----
+0
+
+# ---------------------------------------------------------------------------
+#  ATTACH option transaction_snapshot overrides the session setting
+# ---------------------------------------------------------------------------
+
+statement error
+ATTACH '${FIREBIRD_PARTITIONS_DB}' AS fbbad (TYPE firebird, transaction_snapshot 'abc');
+----
+ATTACH option transaction_snapshot must be true or false, got 'abc'
+
+statement ok
+ATTACH '${FIREBIRD_PARTITIONS_DB}' AS fboff (TYPE firebird, transaction_snapshot false);
+
+query I
+SELECT COUNT(*) FROM fboff.main.PART_NO_LEVER;
+----
+2
+
+query T
+SELECT snapshot_mode FROM firebird_last_query();
+----
+serial
+
+statement ok
+SET firebird_transaction_snapshot = false;
+
+statement ok
+ATTACH '${FIREBIRD_PARTITIONS_DB}' AS fbon (TYPE firebird, transaction_snapshot true);
+
+query I
+SELECT COUNT(*) FROM fbon.main.PART_NO_LEVER;
+----
+2
+
+query I
+SELECT l.snapshot_mode = CASE WHEN e.fb4 THEN 'transaction' ELSE 'serial' END
+FROM firebird_last_query() l, expected e;
+----
+true
+
+# The session setting is off: fbp is back to per-scan behavior.
+query I
+SELECT COUNT(*) FROM fbp.main.PART_NO_LEVER;
+----
+2
+
+query T
+SELECT snapshot_mode FROM firebird_last_query();
+----
+serial
+
+# ---------------------------------------------------------------------------
+#  Idle limit validation
+# ---------------------------------------------------------------------------
+
+# 0 (no limit) to 2147483646 s (the server takes up to 2^31 - 1, and one
+# second is added for its whole-second timer), checked at SET.
+statement error
+SET firebird_transaction_snapshot_idle_timeout = -1;
+----
+firebird_transaction_snapshot_idle_timeout must be 0 (no limit) to 2147483646 seconds, got -1
+
+statement error
+SET firebird_transaction_snapshot_idle_timeout = 2147483647;
+----
+firebird_transaction_snapshot_idle_timeout must be 0 (no limit) to 2147483646 seconds, got 2147483647
+
+statement error
+SET firebird_transaction_snapshot_idle_timeout = NULL;
+----
+firebird_transaction_snapshot_idle_timeout must be 0 (no limit) to 2147483646 seconds, got NULL
+
+statement ok
+SET firebird_transaction_snapshot_idle_timeout = 2147483646;
+
+statement ok
+BEGIN;
+
+query I
+SELECT COUNT(*) FROM fbon.main.PART_NO_LEVER;
+----
+2
+
+query I
+SELECT COUNT(*) FROM fbon.main.PART_NO_LEVER;
+----
+2
+
+statement ok
+COMMIT;
+
+# 0 = no limit.
+statement ok
+SET firebird_transaction_snapshot_idle_timeout = 0;
+
+query I
+SELECT COUNT(*) FROM fbon.main.PART_NO_LEVER;
+----
+2
+
+statement ok
+RESET firebird_transaction_snapshot_idle_timeout;
+
+statement ok
+DETACH fbon;
+
+statement ok
+DETACH fboff;
+
+statement ok
+DETACH fbp;

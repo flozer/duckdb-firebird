@@ -229,6 +229,10 @@ public:
 
 private:
     FirebirdConnection &conn_;
+    // Frees the statement and its descriptors (destructor, and a
+    // constructor that throws after Prepare()).
+    void Release();
+
     isc_stmt_handle stmt_ = 0;
     XSQLDA *out_sqlda_ = nullptr;
     XSQLDA *in_sqlda_  = nullptr;
@@ -425,8 +429,9 @@ public:
     // be unusable. Must not be called with an open cursor.
     bool TryStartSnapshotTransaction(int64_t at_snapshot_number = 0,
                                      std::string *error = nullptr);
-    // fb_info_tra_snapshot_number of the current transaction; 0 when the
-    // server does not report one (Firebird 3, or not a snapshot).
+    // fb_info_tra_snapshot_number of the current transaction (> 0); -1 when
+    // the server doesn't know the item (Firebird 3); -2 when the request
+    // failed, the reply is malformed or there is no transaction.
     int64_t SnapshotNumber();
     // Return to the default read-committed transaction if a snapshot
     // transaction is active, or start one if the connection has none
@@ -439,6 +444,10 @@ public:
     // Database page size in bytes (isc_database_info / isc_info_page_size),
     // or 0 if the server did not answer. Needs no monitoring privileges.
     int64_t PageSize();
+
+    // Runs a statement that returns no rows (e.g. SET SESSION IDLE TIMEOUT)
+    // in the current transaction. Throws on error.
+    void Execute(const std::string &sql);
 
     // Throws an IOException carrying isc_interprete'd messages, if status is
     // an error vector.

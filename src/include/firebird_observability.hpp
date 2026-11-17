@@ -46,7 +46,9 @@ struct FirebirdQueryTelemetry {
     //                   (isc_tpb_at_snapshot_number, Firebird 4+);
     //   "independent" - each partition used its own read-committed
     //                   transaction (Firebird 3, or the shared snapshot
-    //                   could not be established).
+    //                   could not be established);
+    //   "transaction" - the scan read the snapshot of its DuckDB transaction
+    //                   (ATTACH with firebird_transaction_snapshot, FB4+).
     std::string snapshot_mode = "serial";
     // How the table was split: "none" (one partition), "pk" (PK ranges)
     // or "dbkey" (RDB$DB_KEY ranges, partition_by = 'dbkey').

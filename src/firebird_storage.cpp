@@ -9,9 +9,10 @@
 //
 // Plus a `StorageExtension` that wires them together. The whole thing is
 // read-only — every CreateXxx / DropEntry / Alter throws NotImplemented,
-// the TransactionManager is a no-op (we run the Firebird-side
-// transactions per-statement inside the scanner), and the catalog
-// surfaces a single hard-coded "main" schema.
+// the Firebird-side transactions run per scan inside the scanner (the
+// DuckDB-side transaction only holds the optional transaction snapshot,
+// see FirebirdTransaction), and the catalog surfaces a single
+// hard-coded "main" schema.
 //
 // Discovery is lazy: tables are listed on the first ScanSchemas /
 // LookupEntry call (RDB$RELATIONS), and individual table column lists
@@ -30,16 +31,19 @@
 #include "firebird_view_analysis.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <mutex>
 #include <unordered_map>
 
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/main/client_context_state.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/dependency_list.hpp"
 #include "duckdb/catalog/entry_lookup_info.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/attached_database.hpp"
@@ -152,6 +156,7 @@ public:
         data->none_pushdown = none_pushdown_;
         data->numeric_widen_int64 = numeric_widen_int64_;
         data->pool = pool_;
+        data->attach_catalog = &ParentCatalog();
         data->pk_descriptor = pk_descriptor_; // cached at ATTACH, zero I/O
 
         // View column types/descriptors are already correct here — they
@@ -731,6 +736,17 @@ public:
 
     string GetCatalogType() override { return "firebird"; }
 
+    // ATTACH ... (TYPE firebird, transaction_snapshot true|false): -1 when
+    // not given, so the session setting firebird_transaction_snapshot
+    // decides.
+    int transaction_snapshot_option = -1;
+    // Set once a healthy connection of this ATTACH reported no snapshot
+    // number (Firebird 3): later transactions don't try again.
+    std::shared_ptr<std::atomic<bool>> no_snapshot_numbers =
+        std::make_shared<std::atomic<bool>>(false);
+
+    const std::shared_ptr<FirebirdConnectionPool> &Pool() const { return pool_; }
+
     void Initialize(bool /*load_builtin*/) override {
         // One hard-coded "main" schema. Real schema discovery on Firebird
         // would require RDB$OWNER_NAME segmentation, which the legacy
@@ -839,17 +855,271 @@ private:
 // ---------------------------------------------------------------------------
 //  FirebirdTransactionManager
 //
-// Firebird-side transactions are owned by the connection inside the scan
-// itself (read-only, no-auto-undo). The DuckDB-level transaction manager
-// here only needs to expose a Transaction object — it never carries write
-// state, and commit/rollback are no-ops.
+// Firebird-side transactions are owned by the connections of the scans
+// (read-only, read committed). The DuckDB-level transaction carries no
+// write state; commit and rollback only end it. With transaction
+// snapshots on (opt-in), it also holds the coordinating connection whose
+// SNAPSHOT transaction every scan of the DuckDB transaction joins.
 // ---------------------------------------------------------------------------
 
-class FirebirdTransaction final : public Transaction {
+class FirebirdTransaction;
+
+// Per-ClientContext list of the transactions that hold a coordinator with
+// an idle limit. At the end of every query the ones still open (an
+// explicit BEGIN ... COMMIT) arm the server-side idle timer; the next
+// scan of the transaction disarms it. So only the time between statements
+// counts as idle, never the time a statement spends running.
+class FirebirdTransactionSnapshotState : public ClientContextState {
 public:
-    FirebirdTransaction(TransactionManager &manager, ClientContext &context)
-        : Transaction(manager, context) {}
+    static constexpr const char *KEY = "firebird.transaction_snapshot";
+
+    void Register(FirebirdTransaction *tx) {
+        std::lock_guard<std::mutex> g(lock_);
+        open_.push_back(tx);
+    }
+    void Unregister(FirebirdTransaction *tx) {
+        std::lock_guard<std::mutex> g(lock_);
+        open_.erase(std::remove(open_.begin(), open_.end(), tx), open_.end());
+    }
+    void QueryEnd(ClientContext &context) override;
+
+private:
+    std::mutex lock_;
+    std::vector<FirebirdTransaction *> open_;
 };
+
+class FirebirdTransaction final : public Transaction, public FirebirdTransactionSnapshot {
+public:
+    FirebirdTransaction(TransactionManager &manager, ClientContext &context,
+                        FirebirdCatalog &catalog)
+        : Transaction(manager, context), pool_(catalog.Pool()), catalog_name_(catalog.GetName()),
+          no_snapshot_numbers_(catalog.no_snapshot_numbers) {}
+
+    ~FirebirdTransaction() override {
+        if (state_) {
+            state_->Unregister(this);
+        }
+        if (conn_) {
+            GiveBack(std::move(conn_));
+        }
+    }
+
+    // Transaction snapshot (opt-in, see GetFirebirdTransactionSnapshot).
+    // The coordinating connection comes from the ATTACH's pool and holds a
+    // read-only SNAPSHOT transaction until this DuckDB transaction ends;
+    // every scan joins its snapshot number.
+    int64_t Pin(ClientContext &context, int64_t idle_timeout_s) override {
+        bool registered = false;
+        {
+            std::lock_guard<std::mutex> g(lock_);
+            if (released_) {
+                throw IOException(ReleasedMessage());
+            }
+            if (attempted_) {
+                if (start_failed_) {
+                    throw IOException(StartFailedMessage(""));
+                }
+                Disarm();  // the workers check the coordinator after joining
+                return number_;
+            }
+            attempted_ = true;
+            if (no_snapshot_numbers_->load()) {
+                return 0;  // Firebird 3: scans behave as without this option
+            }
+            try {
+                StartCoordinator();
+            } catch (...) {
+                start_failed_ = true;  // never fall back to no snapshot later
+                throw;
+            }
+            if (conn_) {
+                idle_timeout_s_ = idle_timeout_s;
+            }
+            registered = conn_ && idle_timeout_s_ > 0;
+        }
+        if (registered) {
+            state_ = context.registered_state->GetOrCreate<FirebirdTransactionSnapshotState>(
+                FirebirdTransactionSnapshotState::KEY);
+            state_->Register(this);
+        }
+        return number_;
+    }
+
+    void CheckHeld() override {
+        std::lock_guard<std::mutex> g(lock_);
+        if (released_) {
+            throw IOException(ReleasedMessage());
+        }
+        Verify();
+    }
+
+    // End of a query with this transaction still open: from now on the
+    // server closes the coordinator, releasing the snapshot and its hold
+    // on garbage collection, after idle_timeout_s_ seconds without a call.
+    void Arm() {
+        std::lock_guard<std::mutex> g(lock_);
+        if (!conn_ || released_ || armed_) {
+            return;
+        }
+        try {
+            // The server's timer counts whole seconds (it expires at the
+            // current second plus the timeout), so n + 1 gives at least n.
+            conn_->Execute("SET SESSION IDLE TIMEOUT " + std::to_string(idle_timeout_s_ + 1) + " SECOND");
+            armed_ = true;
+        } catch (std::exception &ex) {
+            // Never keep a snapshot without the limit it was asked for: the
+            // next scan fails, naming the reason. The coordinator goes now,
+            // so the pool doesn't count it until the transaction ends.
+            if (!conn_->IsBroken()) {
+                refused_ = ErrorData(ex).RawMessage();
+            }
+            released_ = true;
+            pool_->Discard(std::move(conn_));
+        }
+    }
+
+private:
+    // Leases a coordinator and starts the snapshot on it. A pooled
+    // connection the server already closed is discarded and the next one
+    // tried; a healthy connection without a snapshot number (Firebird 3)
+    // goes back to the pool and leaves number_ at 0. Anything else throws,
+    // so the transaction never reads without its snapshot by accident.
+    void StartCoordinator() {
+        std::string error;
+        // Parked connections may be dead; try until a new one was tried.
+        while (true) {
+            auto lease = pool_->AcquireWithInfo();
+            auto conn = std::move(lease.conn);
+            try {
+                error.clear();
+                if (conn->TryStartSnapshotTransaction(0, &error)) {
+                    const int64_t n = conn->SnapshotNumber();
+                    if (n > 0) {
+                        number_ = n;
+                        conn_ = std::move(conn);
+                        return;
+                    }
+                    if (n == -1) {
+                        // The server doesn't know snapshot numbers
+                        // (Firebird 3): remembered for this ATTACH.
+                        no_snapshot_numbers_->store(true);
+                        GiveBack(std::move(conn));
+                        return;
+                    }
+                    // Any other failure: never taken as Firebird 3.
+                    error = "the snapshot number could not be read";
+                }
+            } catch (...) {
+                pool_->Discard(std::move(conn));
+                throw;
+            }
+            const bool broken = conn->IsBroken();
+            pool_->Discard(std::move(conn));
+            if (!broken || !lease.reused) {
+                break;
+            }
+        }
+        throw IOException(StartFailedMessage(error));
+    }
+
+    std::string StartFailedMessage(const std::string &error) const {
+        return "Firebird ATTACH '" + catalog_name_ +
+               "': could not start the snapshot of this DuckDB transaction "
+               "(firebird_transaction_snapshot). Run the query again (inside "
+               "BEGIN ... COMMIT, after a ROLLBACK)." +
+               (error.empty() ? std::string() : " Last error: " + error);
+    }
+
+    // Checks that the coordinator still holds the snapshot (one round
+    // trip). Snapshot numbers restart when the database is reopened, so a
+    // lost coordinator's number could be joined in someone else's snapshot.
+    void Verify() {
+        if (!conn_) {
+            return;
+        }
+        if (conn_->SnapshotNumber() != number_) {
+            released_ = true;
+            pool_->Discard(std::move(conn_));
+            throw IOException(ReleasedMessage());
+        }
+    }
+
+    // The first scan of a new statement: stop the idle timer. This call
+    // also tells whether the server closed the coordinator meanwhile.
+    void Disarm() {
+        if (!armed_ || !conn_) {
+            return;
+        }
+        try {
+            conn_->Execute("SET SESSION IDLE TIMEOUT 0");
+            armed_ = false;
+        } catch (...) {
+            released_ = true;
+            pool_->Discard(std::move(conn_));
+            throw IOException(ReleasedMessage());
+        }
+    }
+
+    std::string ReleasedMessage() const {
+        if (!refused_.empty()) {
+            return "Firebird ATTACH '" + catalog_name_ +
+                   "': the snapshot of this DuckDB transaction was released because "
+                   "the server refused its idle limit "
+                   "(firebird_transaction_snapshot_idle_timeout): " + refused_ +
+                   ". To run without the limit, SET firebird_transaction_snapshot_idle_timeout = 0, "
+                   "then run the query again (inside BEGIN ... COMMIT, after a ROLLBACK).";
+        }
+        const std::string why =
+            idle_timeout_s_ > 0
+                ? "was closed by the server, because no scan of this ATTACH ran in "
+                  "the transaction for firebird_transaction_snapshot_idle_timeout (" +
+                      std::to_string(idle_timeout_s_) + " s), or because the connection was lost"
+                : "was lost";
+        return "Firebird ATTACH '" + catalog_name_ +
+               "': the snapshot of this DuckDB transaction is gone. Its "
+               "coordinating connection " + why +
+               ". Run the query again (inside BEGIN ... COMMIT, after a ROLLBACK).";
+    }
+
+    // Resets the coordinator for its next user and returns it to the pool;
+    // a connection that fails that, or is broken, is discarded.
+    void GiveBack(std::unique_ptr<FirebirdConnection> conn) {
+        try {
+            if (!conn->IsBroken()) {
+                if (armed_) {
+                    conn->Execute("SET SESSION IDLE TIMEOUT 0");
+                }
+                conn->RestoreDefaultTransaction();
+            }
+            pool_->Release(std::move(conn));
+        } catch (...) {
+            if (conn) {
+                pool_->Discard(std::move(conn));
+            }
+        }
+    }
+
+    std::shared_ptr<FirebirdConnectionPool> pool_;
+    std::string catalog_name_;
+    std::shared_ptr<std::atomic<bool>> no_snapshot_numbers_;
+    shared_ptr<FirebirdTransactionSnapshotState> state_;
+    std::mutex lock_;
+    bool attempted_ = false;
+    bool start_failed_ = false;
+    bool released_ = false;
+    std::string refused_;  // why the server refused the idle limit, if it did
+    bool armed_ = false;
+    int64_t number_ = 0;
+    int64_t idle_timeout_s_ = 0;
+    std::unique_ptr<FirebirdConnection> conn_;
+};
+
+void FirebirdTransactionSnapshotState::QueryEnd(ClientContext &) {
+    std::lock_guard<std::mutex> g(lock_);
+    for (auto *tx : open_) {
+        tx->Arm();
+    }
+}
 
 class FirebirdTransactionManager final : public TransactionManager {
 public:
@@ -857,7 +1127,8 @@ public:
         : TransactionManager(db) {}
 
     Transaction &StartTransaction(ClientContext &context) override {
-        auto tx = make_uniq<FirebirdTransaction>(*this, context);
+        auto tx = make_uniq<FirebirdTransaction>(
+            *this, context, GetDB().GetCatalog().Cast<FirebirdCatalog>());
         auto &ref = *tx;
         std::lock_guard<std::mutex> g(lock_);
         transactions_.emplace(&ref, std::move(tx));
@@ -865,14 +1136,12 @@ public:
     }
 
     ErrorData CommitTransaction(ClientContext &, Transaction &transaction) override {
-        std::lock_guard<std::mutex> g(lock_);
-        transactions_.erase(&transaction);
+        End(transaction);
         return ErrorData();
     }
 
     void RollbackTransaction(Transaction &transaction) override {
-        std::lock_guard<std::mutex> g(lock_);
-        transactions_.erase(&transaction);
+        End(transaction);
     }
 
     void Checkpoint(ClientContext &, bool /*force*/) override {
@@ -880,9 +1149,51 @@ public:
     }
 
 private:
+    // Destroys the transaction outside the lock: giving its coordinator
+    // back to the pool takes round trips.
+    void End(Transaction &transaction) {
+        unique_ptr<FirebirdTransaction> tx;
+        {
+            std::lock_guard<std::mutex> g(lock_);
+            auto it = transactions_.find(&transaction);
+            if (it != transactions_.end()) {
+                tx = std::move(it->second);
+                transactions_.erase(it);
+            }
+        }
+    }
+
     std::mutex lock_;
     std::unordered_map<Transaction *, unique_ptr<FirebirdTransaction>> transactions_;
 };
+
+void ValidateTransactionSnapshotIdleTimeout(int64_t seconds) {
+    if (seconds < 0 || seconds > 2147483646) {
+        throw BinderException(
+            "firebird_transaction_snapshot_idle_timeout must be 0 (no limit) "
+            "to 2147483646 seconds, got %lld",
+            static_cast<long long>(seconds));
+    }
+}
+
+FirebirdTransactionSnapshot *GetFirebirdTransactionSnapshot(ClientContext &context,
+                                                            Catalog &catalog) {
+    auto &fb = catalog.Cast<FirebirdCatalog>();
+    bool enabled = false;
+    if (fb.transaction_snapshot_option >= 0) {
+        enabled = fb.transaction_snapshot_option == 1;
+    } else {
+        Value v;
+        if (context.TryGetCurrentSetting("firebird_transaction_snapshot", v) && !v.IsNull()) {
+            enabled = v.GetValue<bool>();
+        }
+    }
+    if (!enabled) {
+        return nullptr;
+    }
+    auto &tx = Transaction::Get(context, catalog);
+    return &tx.Cast<FirebirdTransaction>();
+}
 
 // ---------------------------------------------------------------------------
 //  StorageExtension wiring
@@ -1011,9 +1322,25 @@ FirebirdAttach(optional_ptr<StorageExtensionInfo> /*info*/,
         ReadPoolInt64Setting(context, "firebird_max_inline_blob_size", -1);
     ValidateMaxInlineBlobSize(conn.max_inline_blob_size);
     auto pool_config = BuildPoolConfig(context);
-    return make_uniq<FirebirdCatalog>(db, std::move(conn), none_encoding,
-                                      none_pushdown, numeric_widen_int64,
-                                      pool_config);
+    auto catalog = make_uniq<FirebirdCatalog>(db, std::move(conn), none_encoding,
+                                              none_pushdown, numeric_widen_int64,
+                                              pool_config);
+    for (auto &kv : attach_info.options) {
+        if (kv.first == "transaction_snapshot") {  // keys compared as in BuildConnectionInfo
+            Value b;
+            try {
+                b = kv.second.DefaultCastAs(LogicalType::BOOLEAN);
+            } catch (std::exception &) {
+            }
+            if (b.IsNull()) {
+                throw InvalidInputException(
+                    "ATTACH option transaction_snapshot must be true or false, got '%s'",
+                    kv.second.ToString());
+            }
+            catalog->transaction_snapshot_option = b.GetValue<bool>() ? 1 : 0;
+        }
+    }
+    return std::move(catalog);
 }
 
 // ---------------------------------------------------------------------------

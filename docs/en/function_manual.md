@@ -107,12 +107,36 @@ connections commit changes, as a serial scan does.
   is also set in `firebird_last_query().error_message` when another worker
   of the scan opens a cursor, before or after the failure.
 - Serial scans are unchanged: one connection, one read-committed
-  transaction.
+  transaction. The opt-in [transaction snapshot](#one-snapshot-per-duckdb-transaction-transaction_snapshot)
+  of the ATTACH path extends the snapshot to every scan of a DuckDB
+  transaction, serial ones included.
 - `firebird_last_query().snapshot_mode` reports which case applied:
-  `shared`, `independent` or `serial`.
+  `shared`, `independent` or `serial` (and `transaction` with the
+  transaction snapshot).
 - A partitioned scan opens one extra attachment (the coordinator) for its
   duration. It does not come from the ATTACH connection pool, so
   `firebird_pool_stats()` counters are unaffected.
+
+**Known server issues.** Two open Firebird bugs weaken this guarantee on
+Firebird 4, 5 and master:
+
+- [FirebirdSQL/firebird#9227](https://github.com/FirebirdSQL/firebird/issues/9227):
+  a transaction that joins a snapshot with `isc_tpb_at_snapshot_number` can
+  see a commit that the snapshot's owner doesn't see. A transaction that
+  commits while the partitions join, with no older read-write transaction
+  still open, can then be visible to some partitions and not to others,
+  and the scan mixes two committed states.
+- [FirebirdSQL/firebird#9301](https://github.com/FirebirdSQL/firebird/issues/9301):
+  a SNAPSHOT transaction that starts while another transaction commits can
+  miss that transaction's rows or see later commits (fix proposed in
+  [#9303](https://github.com/FirebirdSQL/firebird/pull/9303)).
+
+Both apply to the snapshot of a partitioned scan, `partition_by = 'dbkey'`
+included, and to the [transaction snapshot](#one-snapshot-per-duckdb-transaction-transaction_snapshot),
+where the joining window lasts for the whole DuckDB transaction. The
+extension is read-only, so data at rest is never at risk; only the
+consistency of what one scan or transaction reads is. This note will be
+updated when the fixes are released.
 
 #### Choosing how a table is split (`partition_by`)
 
@@ -275,6 +299,102 @@ option / named parameter only.
 Prefer `ATTACH` for analytics sessions that query multiple Firebird tables.
 It enables catalog discovery, normal SQL references, and connection-pool
 reuse.
+
+#### One snapshot per DuckDB transaction (`transaction_snapshot`)
+
+By default each scan reads its own state of the database: a partitioned
+scan reads one snapshot ([above](#partitioned-scans-read-one-snapshot)),
+and a serial scan reads in its connection's read-committed transaction.
+So two scans of one statement (a join, a self-join, two subqueries), or
+two statements of one `BEGIN … COMMIT`, can each see a different
+committed state while other connections write.
+
+With the transaction snapshot on, every scan of the ATTACH in one DuckDB
+transaction reads **one snapshot** (Firebird 4+): one per statement in
+autocommit mode, one per transaction inside `BEGIN … COMMIT`. It is off by
+default; turn it on for a session or for one ATTACH:
+
+```sql
+SET firebird_transaction_snapshot = true;            -- every Firebird ATTACH
+
+ATTACH 'firebird://srv/data/erp.fdb' AS erp
+  (TYPE firebird, transaction_snapshot true);        -- this ATTACH only
+```
+
+The ATTACH option wins over the setting in both directions
+(`transaction_snapshot false` keeps an ATTACH out).
+
+- At the first scan of the transaction, a connection from the ATTACH
+  pool starts a read-only SNAPSHOT transaction (the coordinator), and
+  every scan of the transaction joins it with `isc_tpb_at_snapshot_number`,
+  like the partitions of one scan. At `COMMIT` or `ROLLBACK` the
+  coordinator goes back to the pool, reset to read committed;
+  `firebird_pool_stats().active_connections` counts it until then. With
+  `firebird_pool_max_size = 1` or the pool disabled, the coordinator is
+  closed at every commit and the next transaction opens a new attachment
+  (about 12 ms per transaction on a local server).
+- A pooled connection the server already closed (a restart, a network
+  drop) is skipped when the coordinator is picked. If no coordinator can be
+  started, the scan fails rather than read without the snapshot. Every
+  connection that joins the snapshot then checks that the coordinator
+  still holds it (one round trip), and the scan fails if it was lost:
+  Firebird restarts snapshot numbers when a database is reopened, so a
+  lost number could belong to someone else's snapshot. A scan whose own
+  pooled connection was lost also fails. In every case, run the query
+  again (inside `BEGIN … COMMIT`, after a `ROLLBACK`).
+- **Serial scans change too**: they read the transaction's snapshot, not
+  read committed, so they don't see commits made after the transaction's
+  first Firebird scan.
+- `firebird_last_query().snapshot_mode` reports `transaction` for every
+  scan that read the transaction's snapshot.
+- If a scan cannot join the snapshot, it fails with an error that names
+  the table and the server's reason, as a partitioned scan does.
+- **Firebird 3** has no snapshot numbers: scans behave as without the
+  option and report `serial` or `independent`. The first transaction of an
+  ATTACH finds that out, and later ones don't try again until the next
+  `ATTACH`.
+- A direct `firebird_scan()` call is not part of an ATTACH's transaction
+  and is not affected. So `partition_by`, a `firebird_scan()` parameter,
+  never meets this option: ATTACH scans don't take it.
+- The known server issues listed
+  [above](#partitioned-scans-read-one-snapshot) apply here too, for the
+  whole transaction.
+
+**Idle limit.** An open DuckDB transaction holds its snapshot on the
+server and, like any long SNAPSHOT transaction, holds back garbage
+collection. `firebird_transaction_snapshot_idle_timeout` (seconds, default
+`60`, `0` = no limit) bounds the time from the end of a statement to the
+next scan of the ATTACH in the transaction: at the end of each statement
+the extension sets `SET SESSION IDLE TIMEOUT` on the coordinator, and the
+next scan clears it. If no scan comes in time, the server itself closes the
+coordinator and releases the snapshot, even if the client does nothing.
+The next scan of the transaction then fails:
+
+```text
+IO Error: Firebird ATTACH 'erp': the snapshot of this DuckDB transaction is
+gone. Its coordinating connection was closed by the server, because no scan
+of this ATTACH ran in the transaction for
+firebird_transaction_snapshot_idle_timeout (60 s), or because the
+connection was lost. Run the query again (inside BEGIN ... COMMIT, after a
+ROLLBACK).
+```
+
+- Once a statement has started a scan of the ATTACH, the rest of that
+  statement never counts, however long it runs. Statements that don't read
+  the ATTACH do count.
+- A statement ends when its result is fully read or closed. **A client
+  that keeps a result open** (an API or BI tool holding a cursor) keeps the
+  snapshot for as long as it does, like any running statement, with or
+  without `BEGIN`: the limit only starts once the result is done.
+- Read at the transaction's first Firebird scan; a later `SET` applies to
+  the next transaction.
+- Firebird counts the timeout in whole seconds, so the extension asks for
+  one second more: the snapshot survives at least the configured time. If
+  the server refuses the timer, the snapshot is released at once, and the
+  next scan of the transaction fails with the server's reason.
+- Values outside `0..2147483646` are rejected by `SET` (the server takes
+  up to 2³¹ − 1 seconds, and the extension adds one):
+  `firebird_transaction_snapshot_idle_timeout must be 0 (no limit) to 2147483646 seconds, got -1`.
 
 ### `firebird_attach_sql(connection_string [, schema])`
 
@@ -1157,6 +1277,21 @@ Controls the maximum number of idle connections kept by the pool.
 ### `SET firebird_pool_idle_timeout_ms = MS`
 
 Controls how long idle pooled connections may remain reusable.
+
+### `SET firebird_transaction_snapshot = true|false`
+
+Off by default. When on, every scan of a Firebird ATTACH in one DuckDB
+transaction reads one Firebird snapshot (Firebird 4+). The ATTACH option
+`transaction_snapshot` overrides it per catalog. See [One snapshot per
+DuckDB transaction](#one-snapshot-per-duckdb-transaction-transaction_snapshot).
+
+### `SET firebird_transaction_snapshot_idle_timeout = SECONDS`
+
+Default `60`, `0` = no limit. With the transaction snapshot on, the server
+releases a DuckDB transaction's snapshot when this many seconds pass from
+the end of a statement to the next scan of the ATTACH in the transaction;
+that scan then fails. See
+[One snapshot per DuckDB transaction](#one-snapshot-per-duckdb-transaction-transaction_snapshot).
 
 ### `SET firebird_dummy_packet_interval = SECONDS`
 

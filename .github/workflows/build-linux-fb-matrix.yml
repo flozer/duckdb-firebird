@@ -14,6 +14,11 @@ name: Build + Test Linux x64 (FB 3/4/5 matrix)
 # against a self-join/aggregate view (see issue #40) — nothing to do with
 # extension code, purely this workflow using one fixed client library for
 # every server version.
+#
+# The three legs build DuckDB v1.5.6. A fourth leg builds DuckDB v2.0.0
+# against Firebird 5, so the FIREBIRD_DUCKDB_V2 path also runs the FB4+-only
+# tests and scripts (build-linux.yml runs both DuckDB lines, but against a
+# Firebird 3 server only).
 
 on:
   push:
@@ -32,12 +37,9 @@ on:
 permissions:
   contents: read
 
-env:
-  DUCKDB_VERSION: v1.5.6
-
 jobs:
   build-test:
-    name: linux-x64 / fb${{ matrix.fb_major }}
+    name: linux-x64 / fb${{ matrix.fb_major }}${{ matrix.name_suffix }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -46,10 +48,19 @@ jobs:
         include:
           - fb_major: 3
             fb_image: firebirdsql/firebird:3-noble
+            duckdb: v1.5.6
           - fb_major: 4
             fb_image: firebirdsql/firebird:4-noble
+            duckdb: v1.5.6
           - fb_major: 5
             fb_image: firebirdsql/firebird:5-noble
+            duckdb: v1.5.6
+          - fb_major: 5
+            fb_image: firebirdsql/firebird:5-noble
+            duckdb: v2.0.0
+            name_suffix: " (DuckDB v2.0.0)"
+    env:
+      DUCKDB_VERSION: ${{ matrix.duckdb }}
 
     steps:
       - name: Checkout
@@ -121,7 +132,7 @@ jobs:
 
           # CHARACTER SET NONE fixture (issue #26) -- exercises the
           # none_encoding feature. Unlike fixture_biz4.sql above, this runs
-          # on all three matrix legs (CHARACTER SET NONE is not FB4+-only).
+          # on every matrix leg (CHARACTER SET NONE is not FB4+-only).
           docker cp scripts/fixture_none_charset.sql fb:/tmp/fixture_none_charset.sql
           printf "%s\n" "CREATE DATABASE '/var/lib/firebird/data/none.fdb' DEFAULT CHARACTER SET NONE;" \
             | docker exec -i fb bash -c "isql -u SYSDBA -p masterkey"
@@ -276,6 +287,13 @@ jobs:
               -L"$LOCAL_DIR" -l:"$(basename "$LOCAL_LIB")"
           ./mkblob_fixture localhost/3050:/var/lib/firebird/data/test.fdb SYSDBA masterkey 1
 
+      - name: Pin extension-ci-tools to the v2.0 branch
+        if: matrix.duckdb == 'v2.0.0'
+        run: |
+          # Same recipe as build-linux.yml's v2.0 leg.
+          git -C extension-ci-tools fetch origin v2.0-cyanoptera
+          git -C extension-ci-tools checkout FETCH_HEAD
+
       - name: Pin DuckDB version
         run: |
           DUCKDB_GIT_VERSION=${DUCKDB_VERSION} make set_duckdb_version
@@ -284,6 +302,32 @@ jobs:
         env:
           GEN: ninja
         run: make release
+
+      - name: CLI with the extension loaded (DuckDB v2.0)
+        if: matrix.duckdb == 'v2.0.0'
+        run: |
+          # On v2.0 the build links the extension into neither binary
+          # ("Extensions built but not linked: [firebird]"): unittest loads
+          # the built extension on `require firebird`, but the CLI needs an
+          # explicit LOAD. So the scripts and the smoke step below LOAD it
+          # (DUCKDB_PRELUDE, which every script reads) through a wrapper
+          # that allows unsigned extensions. -no-agent keeps the v2.0 CLI
+          # from switching to its agent output format when stdout is not a
+          # terminal and an agent variable (AI_AGENT, CLAUDECODE, ...) is set.
+          load="LOAD '$GITHUB_WORKSPACE/build/release/extension/firebird/firebird.duckdb_extension';"
+          cli="$GITHUB_WORKSPACE/duckdb-cli.sh"
+          printf '%s\n' '#!/usr/bin/env bash' \
+            "exec $GITHUB_WORKSPACE/build/release/duckdb -no-agent -unsigned \"\$@\"" > "$cli"
+          chmod +x "$cli"
+          echo "DUCKDB=$cli" >> $GITHUB_ENV
+          echo "DUCKDB_PRELUDE=$load" >> $GITHUB_ENV
+          cat "$cli"
+          # The loaded extension must provide firebird_scan.
+          n=$(printf '%s\n' "$load" \
+                "SELECT count(*) FROM duckdb_functions() WHERE function_name = 'firebird_scan';" \
+              | "$cli" -list -noheader | tr -d '\r' | tail -n 1)
+          echo "firebird_scan functions after LOAD: $n"
+          [ "$n" -ge 1 ]
 
       - name: Run SQL test suite
         env:
@@ -322,6 +366,9 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_shared_snapshot.test
           # partition_by = 'pk' | 'dbkey' (DB_KEY ranges on FB4/FB5, fallback on FB3).
           ./build/release/test/unittest test/sql/firebird_partition_by.test
+          # Transaction snapshot on the ATTACH path (opt-in): 'transaction'
+          # on FB4+, per-scan behavior on FB3; same partitions fixture.
+          ./build/release/test/unittest test/sql/firebird_transaction_snapshot.test
           # G-queue coverage (v1.2.0): unpushed-mode guard + none_pushdown
           # (NONE fixture), numeric_widen (numerics fixture), session
           # stability + bytes estimate (main fixture).
@@ -347,8 +394,11 @@ jobs:
           # script proves the guarantee directly: a second connection
           # commits transfers between partitions for the whole scan, and
           # every partitioned scan must return the one committed state
-          # (FB4+, snapshot_mode = 'shared'). On FB3 it checks the
-          # fallback ('independent') and only reports the torn reads.
+          # (FB4+, snapshot_mode = 'shared'). It also checks the opt-in
+          # transaction snapshot on the ATTACH path (two scans of one
+          # statement, two statements of one transaction, serial scans, the
+          # idle limit). On FB3 it checks the fallback ('independent') and
+          # only reports the torn reads.
           bash scripts/check_shared_snapshot.sh
 
       - name: FB4+ live type smoke (INT128 / DECIMAL(38) / TIMESTAMP_TZ)
@@ -361,7 +411,9 @@ jobs:
           # (FB4/FB5 legs); firebird_decfloat.test now runs in the main
           # suite step, no longer here.
         run: |
-          ./build/release/duckdb -unsigned <<'EOF'
+          # DUCKDB / DUCKDB_PRELUDE: set on the DuckDB v2.0 leg only.
+          "${DUCKDB:-./build/release/duckdb}" -unsigned <<EOF
+          ${DUCKDB_PRELUDE:-}
           SELECT
               typeof(BIG_NUM)  AS t_big_num,
               typeof(BIG_DEC)  AS t_big_dec,
@@ -423,6 +475,9 @@ jobs:
           # and scans work again from the call after the failed one, and that
           # PART_RANGE is partitioned again (#105). All FB versions. On FB4+
           # also a connection killed by the server's idle timeout (idle1).
+          # The txsnap phase kills the transaction snapshot's coordinator and
+          # the parked connections it could pick, and txreuse (FB4+) has
+          # another session reuse a lost snapshot number (#104).
           if [ "${{ matrix.fb_major }}" != "3" ]; then
             export FIREBIRD_IDLE_DB="user=SYSDBA;password=masterkey;database=localhost/3050:idle1;charset=UTF8"
           fi
@@ -433,7 +488,9 @@ jobs:
         run: docker rm -f fb || true
 
       - name: Upload extension artifact (linux_amd64) - fb${{ matrix.fb_major }}
-        if: matrix.fb_major == '5'
+        # One leg only: two uploads under the same name would conflict.
+        # build-linux.yml uploads the v2.0.0 build.
+        if: matrix.fb_major == '5' && matrix.duckdb == 'v1.5.6'
         uses: actions/upload-artifact@v7
         with:
           name: firebird.duckdb_extension-linux-x64
