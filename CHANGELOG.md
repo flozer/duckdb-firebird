@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- CI: the Linux workflows never saved their ccache cache. They cached
+  `~/.ccache`, but ccache 4.x keeps its files in `~/.cache/ccache` unless
+  `~/.ccache` already exists, so every run ended with "Path Validation
+  Error" and rebuilt DuckDB from scratch. `CCACHE_DIR` now points ccache at
+  `~/.ccache`, and the build steps print `ccache --show-stats`.
+
 ## [v1.4.1] - 2026-11-17
 
 ### Changed
