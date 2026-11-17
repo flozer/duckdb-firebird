@@ -18,7 +18,9 @@ name: Build + Test Linux x64 (FB 3/4/5 matrix)
 # The three legs build DuckDB v1.5.6. A fourth leg builds DuckDB v2.0.0
 # against Firebird 5, so the FIREBIRD_DUCKDB_V2 path also runs the FB4+-only
 # tests and scripts (build-linux.yml runs both DuckDB lines, but against a
-# Firebird 3 server only).
+# Firebird 3 server only). One deliberate exception to the matching client:
+# the DuckDB v1.5.6 Firebird 5 leg also runs firebird_health.test through a
+# Firebird 4 client (#108).
 
 on:
   push:
@@ -384,6 +386,60 @@ jobs:
           # DataTypeCompatibility guard: FB4/FB5 legs (FIREBIRD_TYPE_COMPAT_DB
           # exported above); self-skips on FB3.
           ./build/release/test/unittest test/sql/firebird_type_compat.test
+
+      - name: Firebird 4 client against the Firebird 5 server (inline_blobs_unavailable)
+        # One Firebird 5 leg is enough: the inline-blob decision in
+        # firebird_health.cpp and the client loader have no DuckDB-version
+        # branch.
+        if: matrix.fb_major == '5' && matrix.duckdb == 'v1.5.6'
+        env:
+          ISC_USER: SYSDBA
+          ISC_PASSWORD: masterkey
+        run: |
+          # Every other step pairs a client with a server of its own
+          # version, so firebird_health()'s inline_blobs_unavailable
+          # warning (a 5.0.3+ server reached over TCP through a client that
+          # can't inline blobs) never fires there (#108). Take the FB4
+          # libfbclient (and its own dependencies, as the extraction step
+          # above does) from the FB4 image and run firebird_health.test
+          # through it against this leg's FB5 server: the test derives its
+          # expectations from client_version, so it now expects NULL and
+          # the warning.
+          docker run -d --name fb4client --entrypoint sleep firebirdsql/firebird:4-noble infinity
+          trap 'docker rm -f fb4client >/dev/null 2>&1 || true' EXIT
+          LIB_IN_CONTAINER=$(docker exec fb4client sh -c "find / -xdev -name 'libfbclient.so*' 2>/dev/null | head -1")
+          if [ -z "$LIB_IN_CONTAINER" ]; then
+            echo "::error::could not locate libfbclient.so* in firebirdsql/firebird:4-noble"
+            exit 1
+          fi
+          echo "found $LIB_IN_CONTAINER in the FB4 image"
+          FB4_DIR="$PWD/fbclient-fb4-on-fb5"
+          mkdir -p "$FB4_DIR"
+          docker exec fb4client sh -c "ldd '$LIB_IN_CONTAINER'" \
+            | grep -oE '/[^ ]+' | sort -u \
+            | grep -vE '/(libc|libpthread|libm|libdl|librt|ld-linux)[.-]' \
+            | while read -r dep; do
+                docker cp -L "fb4client:$dep" "$FB4_DIR/$(basename "$dep")" 2>/dev/null || true
+              done
+          docker cp -L "fb4client:$LIB_IN_CONTAINER" "$FB4_DIR/$(basename "$LIB_IN_CONTAINER")"
+          ls -l "$FB4_DIR"
+          export DUCKDB_FIREBIRD_CLIENT_LIBRARY="$FB4_DIR/$(basename "$LIB_IN_CONTAINER")"
+          export LD_LIBRARY_PATH="$FB4_DIR"
+          # The pairing this step exists for: a 4.x client, a 5.0.3+ server,
+          # TCP. Checked directly, so a client that silently stayed 5.x
+          # can't make the test below pass vacuously.
+          out=$(./build/release/duckdb -csv -noheader -c "
+            ATTACH '${FIREBIRD_TEST_DB}' AS fb (TYPE firebird);
+            SELECT client_version, engine_version, network_protocol,
+                   inline_blob_size IS NULL,
+                   list_contains(warnings, 'inline_blobs_unavailable')
+            FROM firebird_health('fb');")
+          echo "$out"
+          echo "$out" | grep -qE '^4\.[0-9.]+,5\.[0-9.]+,TCPv[46],true,true$' || {
+            echo "::error::expected a 4.x client, a 5.0.3+ server over TCP, inline_blob_size NULL and the inline_blobs_unavailable warning"
+            exit 1
+          }
+          ./build/release/test/unittest test/sql/firebird_health.test
 
       - name: Shared-snapshot consistency under a concurrent writer
         env:
