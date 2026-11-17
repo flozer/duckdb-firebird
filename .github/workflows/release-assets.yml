@@ -40,7 +40,10 @@ jobs:
 
       - name: Configure ccache
         run: |
-          ccache --max-size=1G
+          # ccache 4.x uses ~/.cache/ccache unless ~/.ccache already exists,
+          # so pin it to the directory the cache step saves and restores.
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+          CCACHE_DIR=$HOME/.ccache ccache --max-size=1G
           echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
 
       - name: Cache ccache
@@ -221,7 +224,10 @@ jobs:
 
       - name: Configure ccache
         run: |
-          ccache --max-size=1G
+          # ccache 4.x uses ~/.cache/ccache unless ~/.ccache already exists,
+          # so pin it to the directory the cache step saves and restores.
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+          CCACHE_DIR=$HOME/.ccache ccache --max-size=1G
           echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
 
       - name: Build

@@ -83,7 +83,10 @@ jobs:
 
       - name: Configure ccache
         run: |
-          ccache --max-size=1G
+          # ccache 4.x uses ~/.cache/ccache unless ~/.ccache already exists,
+          # so pin it to the directory the cache step saves and restores.
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+          CCACHE_DIR=$HOME/.ccache ccache --max-size=1G
           echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
 
       - name: Cache ccache
@@ -303,7 +306,10 @@ jobs:
       - name: Build (release)
         env:
           GEN: ninja
-        run: make release
+        run: |
+          ccache --zero-stats
+          make release
+          ccache --show-stats
 
       - name: CLI with the extension loaded (DuckDB v2.0)
         if: matrix.duckdb == 'v2.0.0'
