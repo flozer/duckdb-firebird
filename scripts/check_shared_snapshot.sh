@@ -295,6 +295,7 @@ SELECT 'idle scan2=' || TRANSFERS FROM fbs.main.WRITER_STATE;
 SELECT 'idle long statement=' || COUNT(*) FROM fbs.main.ACC a JOIN fbs.main.ACC b USING (ID) JOIN fbs.main.ACC c USING (ID);
 .timer off
 SELECT 'idle scan3=' || TRANSFERS FROM fbs.main.WRITER_STATE;
+SELECT 'idle writer now=' || TRANSFERS FROM firebird_scan('$FIREBIRD_SNAPSHOT_DB', 'WRITER_STATE');
 .shell $wait_cmd
 SELECT 'idle scan4=' || TRANSFERS FROM fbs.main.WRITER_STATE;
 ROLLBACK;
@@ -306,16 +307,19 @@ SELECT 'idle pool active=' || active_connections FROM firebird_pool_stats('fbs')
     # (limit + 1 s), or it proves nothing.
     long_s=$(echo "$out" | sed -n 's/^Run Time (s): real \([0-9.]*\).*/\1/p' | head -1)
     long_ok=$(awk -v t="${long_s:-0}" 'BEGIN { print (t > 3) ? 1 : 0 }')
-    # The scans read the same counter only if the snapshot held while the
-    # writer committed: it must have committed something meanwhile.
-    if [ -n "$t1" ] && [ "$tx_moved" -gt 0 ] && echo "$out" | grep -qx "idle scan2=$t1" && [ "$long_ok" = 1 ] &&
+    # The scans reading the same counter proves the snapshot held only if
+    # the writer committed while they ran: a direct firebird_scan() (outside
+    # the transaction) right after scan3 must read a later counter.
+    now=$(echo "$out" | sed -n 's/^idle writer now=//p')
+    moved=$(( ${now:-0} - ${t1:-0} ))
+    if [ -n "$t1" ] && [ -n "$now" ] && [ "$moved" -gt 0 ] && echo "$out" | grep -qx "idle scan2=$t1" && [ "$long_ok" = 1 ] &&
        echo "$out" | grep -qx 'idle long statement=2000001' && echo "$out" | grep -qx "idle scan3=$t1" &&
        ! echo "$out" | grep -q '^idle scan4=' &&
        echo "$out" | grep -q 'firebird_transaction_snapshot_idle_timeout (2 s)' &&
        echo "$out" | grep -qx 'idle after rollback=1' && echo "$out" | grep -qx 'idle pool active=0'; then
-        echo "  idle limit (2 s): statements back to back and a ${long_s} s statement keep the snapshot while the writer committed $tx_moved transfers; the scan after 8 s idle failed and named the setting; after ROLLBACK scans work -> ok"
+        echo "  idle limit (2 s): statements back to back and a ${long_s} s statement keep the snapshot while the writer committed $moved transfers; the scan after 8 s idle failed and named the setting; after ROLLBACK scans work -> ok"
     else
-        echo "  idle limit (2 s; long statement ${long_s:-?} s, must exceed 3 s) -> FAIL"
+        echo "  idle limit (2 s; long statement ${long_s:-?} s, must exceed 3 s; transfers during the scans ${moved:-?}, must be > 0) -> FAIL"
         echo "$out" | sed 's/^/    | /'
         tx_failures=$((tx_failures + 1))
     fi
