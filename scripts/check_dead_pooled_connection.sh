@@ -32,7 +32,7 @@
 #          in the middle of a transaction must fail the next scan, pooled and
 #          with the pool disabled (Firebird 3: no coordinator, scans work);
 #   txreuse: Firebird 4+, in its own database txreuse.fdb, created next to
-#          the partitions database (and left there): another session pins the
+#          the partitions database (dropped at the end): another session pins the
 #          snapshot number of a lost coordinator, and the scan that joins it
 #          must be refused.
 # At the end of the first phases firebird_pool_stats() must show nothing
@@ -317,6 +317,9 @@ SQL
     tr -d '\r' < "$work/reuse_b.raw" > "$work/reuse_b.out"
     echo "=== session B"
     cat "$work/reuse_b.out"
+    $FB_ISQL -q -u "$FB_USER" -p "$FB_PASS" "$RE_ISQL_DB" > /dev/null 2>&1 <<'DROPSQL' || true
+DROP DATABASE;
+DROPSQL
 fi
 
 # value <phase> <regex with one group>: the group of the first matching line.
@@ -377,6 +380,12 @@ for n in 1 2 5; do
 done
 ! grep -q '^tx scan4 rows=' "$work/txsnap.out" ||
     fail "txsnap: the scan after the coordinator was killed did not fail"
+# On Firebird 4+ it must fail because the snapshot is gone, not for any
+# other reason (Firebird 3 has no coordinator: a dead parked worker fails it).
+if [ "$tx_mode" = transaction ]; then
+    grep -q "Firebird ATTACH 'fbd': the snapshot of this DuckDB transaction is gone" "$work/txsnap.out" ||
+        fail "txsnap: the scan after the coordinator was killed did not report the lost snapshot"
+fi
 [ -n "$(value txsnap 'pool after active=0 discarded=([0-9]+)')" ] ||
     fail "txsnap: a connection is still counted as leased at the end"
 # Pool disabled, no idle limit: the scan after the coordinator was killed

@@ -189,13 +189,28 @@ done
 # (Firebird 4+). Firebird 3 falls back to per-scan behavior: reported only.
 echo "== ATTACH, transaction snapshot (SET firebird_transaction_snapshot = true)"
 tx_failures=0
-tx_session() {  # tx_session <sql>: one CLI session with the option on, output on stdout
-    printf '%s\nSET firebird_transaction_snapshot = true;\nATTACH '"'"'%s'"'"' AS fbs (TYPE firebird);\n%s\n' \
-        "$DUCKDB_PRELUDE" "$FIREBIRD_SNAPSHOT_DB" "$1" | "$DUCKDB" -list -noheader 2>&1 | tr -d '\r' || true
+tx_session() {  # tx_session <sql> [on|off]: one CLI session, option on by default
+    local opt=true
+    [ "${2:-on}" = off ] && opt=false
+    printf '%s\nSET firebird_transaction_snapshot = %s;\nATTACH '"'"'%s'"'"' AS fbs (TYPE firebird);\n%s\n' \
+        "$DUCKDB_PRELUDE" "$opt" "$FIREBIRD_SNAPSHOT_DB" "$1" | "$DUCKDB" -list -noheader 2>&1 | tr -d '\r' || true
 }
-tx_expect() {  # tx_expect <label> <expected> <actual> <output> <Firebird 3 pattern>
-    if [ "$3" = "$2" ]; then
-        echo "  $1: $3 -> ok"
+# tx_run <sql> [on|off]: tx_session plus the writer's transfers committed
+# while it ran, in tx_out and tx_moved (a consistent result proves nothing
+# if the writer stalled).
+tx_run() {
+    local before after
+    before=$(isql_value 'SELECT TRANSFERS FROM WRITER_STATE;')
+    tx_out=$(tx_session "$1" "${2:-on}")
+    after=$(isql_value 'SELECT TRANSFERS FROM WRITER_STATE;')
+    tx_moved=$((after - before))
+}
+tx_expect() {  # tx_expect <label> <expected> <actual> <output> <Firebird 3 pattern> (uses tx_moved)
+    if [ "$3" = "$2" ] && [ "$tx_moved" -le 0 ]; then
+        echo "  $1: $3, but no transfer was committed meanwhile (writer stalled?) -> FAIL"
+        tx_failures=$((tx_failures + 1))
+    elif [ "$3" = "$2" ]; then
+        echo "  $1: $3, transfers meanwhile=$tx_moved -> ok"
     elif [ "$expected_mode" != shared ] && echo "$3" | grep -qxE "$5"; then
         # Firebird 3: the statement must work and report the per-scan
         # mode; only the values may drift.
@@ -210,33 +225,54 @@ tx_expect() {  # tx_expect <label> <expected> <actual> <output> <Firebird 3 patt
 # without the option (partitioned: independent, serial: serial).
 tx_mode=transaction tx_serial_mode=transaction
 [ "$expected_mode" = shared ] || { tx_mode=independent; tx_serial_mode=serial; }
-for i in $(seq 1 "$SCANS"); do
-    out=$(tx_session "SELECT 'sum=' || ((SELECT SUM(VAL) FROM fbs.main.ACC WHERE ID <= 1000000) + (SELECT SUM(VAL) FROM fbs.main.ACC WHERE ID > 1000000));
-SELECT 'mode=' || snapshot_mode FROM firebird_last_query();")
-    tx_expect "one statement, two scans $i" "sum=$EXPECTED_SUM mode=$tx_mode" \
-        "$(echo "$out" | grep -E '^(sum|mode)=' | tr '\n' ' ' | sed 's/ $//')" "$out" \
-        'sum=[0-9]+ mode=independent'
-    out=$(tx_session "BEGIN;
+two_statements="BEGIN;
 CREATE TEMP TABLE lo AS SELECT SUM(VAL) s FROM fbs.main.ACC WHERE ID <= 1000000;
 CREATE TEMP TABLE hi AS SELECT SUM(VAL) s FROM fbs.main.ACC WHERE ID > 1000000;
 SELECT 'sum=' || (lo.s + hi.s) FROM lo, hi;
-COMMIT;")
+COMMIT;"
+control_torn=0
+for i in $(seq 1 "$SCANS"); do
+    tx_run "SELECT 'sum=' || ((SELECT SUM(VAL) FROM fbs.main.ACC WHERE ID <= 1000000) + (SELECT SUM(VAL) FROM fbs.main.ACC WHERE ID > 1000000));
+SELECT 'mode=' || snapshot_mode FROM firebird_last_query();"
+    tx_expect "one statement, two scans $i" "sum=$EXPECTED_SUM mode=$tx_mode" \
+        "$(echo "$tx_out" | grep -E '^(sum|mode)=' | tr '\n' ' ' | sed 's/ $//')" "$tx_out" \
+        'sum=[0-9]+ mode=independent'
+    tx_run "$two_statements"
     tx_expect "two statements, one transaction $i" "sum=$EXPECTED_SUM" \
-        "$(echo "$out" | grep -E '^sum=' | head -1)" "$out" 'sum=[0-9]+'
+        "$(echo "$tx_out" | grep -E '^sum=' | head -1)" "$tx_out" 'sum=[0-9]+'
+    # Control: the same two statements with the option off. They must tear
+    # at least once over the runs (checked below), or the consistent results
+    # above prove nothing about the option.
+    tx_run "$two_statements" off
+    control=$(echo "$tx_out" | grep -E '^sum=' | head -1)
+    echo "  control, option off, two statements $i: $control (transfers meanwhile=$tx_moved)"
+    case $control in
+        "sum=$EXPECTED_SUM") ;;
+        sum=*) control_torn=$((control_torn + 1)) ;;
+        *) echo "$tx_out" | sed 's/^/    | /'; tx_failures=$((tx_failures + 1)) ;;
+    esac
     # Serial scans join too: the one-row WRITER_STATE read twice in one
     # transaction, with a full scan of ACC in between while the writer
     # commits, must return the same counter.
-    out=$(tx_session "BEGIN;
+    tx_run "BEGIN;
 CREATE TEMP TABLE c1 AS SELECT TRANSFERS t FROM fbs.main.WRITER_STATE;
 SELECT 'serial mode=' || snapshot_mode || ' partitions=' || partitions FROM firebird_last_query();
 SELECT 'in between=' || COUNT(*) FROM fbs.main.ACC;
 CREATE TEMP TABLE c2 AS SELECT TRANSFERS t FROM fbs.main.WRITER_STATE;
 SELECT 'same=' || (c1.t = c2.t) FROM c1, c2;
-COMMIT;")
+COMMIT;"
     tx_expect "serial scan read twice $i" "serial mode=$tx_serial_mode partitions=1 same=true" \
-        "$(echo "$out" | grep -E '^(serial mode|same)=' | tr '\n' ' ' | sed 's/ $//')" "$out" \
+        "$(echo "$tx_out" | grep -E '^(serial mode|same)=' | tr '\n' ' ' | sed 's/ $//')" "$tx_out" \
         'serial mode=serial partitions=1 same=(true|false)'
 done
+if [ "$expected_mode" = shared ]; then
+    if [ "$control_torn" -gt 0 ]; then
+        echo "  control: torn in $control_torn of $SCANS runs without the option -> ok"
+    else
+        echo "  control: never torn in $SCANS runs without the option; the checks above prove nothing -> FAIL"
+        tx_failures=$((tx_failures + 1))
+    fi
+fi
 
 if [ "$expected_mode" = shared ]; then
     # The idle limit: the server closes the coordinator after

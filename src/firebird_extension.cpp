@@ -220,9 +220,12 @@ static void LoadInternal(ExtensionLoader &loader) {
         LogicalType::BIGINT,
         Value::BIGINT(60),
         [](ClientContext &, SetScope, Value &parameter) {
-            if (!parameter.IsNull()) {
-                ValidateTransactionSnapshotIdleTimeout(parameter.GetValue<int64_t>());
+            if (parameter.IsNull()) {
+                throw BinderException(
+                    "firebird_transaction_snapshot_idle_timeout must be 0 (no limit) "
+                    "to 2147483646 seconds, got NULL");
             }
+            ValidateTransactionSnapshotIdleTimeout(parameter.GetValue<int64_t>());
         });
     config.AddExtensionOption(
         "firebird_query_log_size",

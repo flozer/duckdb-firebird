@@ -966,10 +966,15 @@ public:
             // current second plus the timeout), so n + 1 gives at least n.
             conn_->Execute("SET SESSION IDLE TIMEOUT " + std::to_string(idle_timeout_s_ + 1) + " SECOND");
             armed_ = true;
-        } catch (...) {
-            // A lost coordinator is reported by the next Pin(); on a live
-            // one the snapshot simply stays without an idle limit.
-            released_ = conn_->IsBroken();
+        } catch (std::exception &ex) {
+            // Never keep a snapshot without the limit it was asked for: the
+            // next scan fails, naming the reason. The coordinator goes now,
+            // so the pool doesn't count it until the transaction ends.
+            if (!conn_->IsBroken()) {
+                refused_ = ErrorData(ex).RawMessage();
+            }
+            released_ = true;
+            pool_->Discard(std::move(conn_));
         }
     }
 
@@ -994,11 +999,15 @@ private:
                         conn_ = std::move(conn);
                         return;
                     }
-                    if (!conn->IsBroken()) {
+                    if (n == -1) {
+                        // The server doesn't know snapshot numbers
+                        // (Firebird 3): remembered for this ATTACH.
                         no_snapshot_numbers_->store(true);
                         GiveBack(std::move(conn));
                         return;
                     }
+                    // Any other failure: never taken as Firebird 3.
+                    error = "the snapshot number could not be read";
                 }
             } catch (...) {
                 pool_->Discard(std::move(conn));
@@ -1052,6 +1061,13 @@ private:
     }
 
     std::string ReleasedMessage() const {
+        if (!refused_.empty()) {
+            return "Firebird ATTACH '" + catalog_name_ +
+                   "': the snapshot of this DuckDB transaction was released because "
+                   "the server refused its idle limit "
+                   "(firebird_transaction_snapshot_idle_timeout): " + refused_ +
+                   ". Run the query again (inside BEGIN ... COMMIT, after a ROLLBACK).";
+        }
         const std::string why =
             idle_timeout_s_ > 0
                 ? "was closed by the server, because no scan of this ATTACH ran in "
@@ -1090,6 +1106,7 @@ private:
     bool attempted_ = false;
     bool start_failed_ = false;
     bool released_ = false;
+    std::string refused_;  // why the server refused the idle limit, if it did
     bool armed_ = false;
     int64_t number_ = 0;
     int64_t idle_timeout_s_ = 0;

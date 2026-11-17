@@ -1,5 +1,5 @@
 #include "firebird_scanner.hpp"
-#include "firebird_storage.hpp"
+#include "firebird_transaction_snapshot.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -973,6 +973,9 @@ static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
     // partition_by='dbkey' (explicit partitions >= 2, base tables): pin the
     // shared snapshot first so the DB_KEY geometry is read in it.
     bool dbkey_done = false;
+    // partition_by is a firebird_scan() parameter, and a direct call never
+    // has a transaction snapshot (attach_catalog is null): the two can't
+    // meet today. The guard keeps it that way.
     if (bind.partition_by_dbkey && bind.partitions_override > 1 && !bind.is_view &&
         !gstate->tx_snapshot) {
         StartSharedSnapshot(bind, *gstate);

@@ -201,6 +201,11 @@ SET firebird_transaction_snapshot_idle_timeout = 2147483647;
 ----
 firebird_transaction_snapshot_idle_timeout must be 0 (no limit) to 2147483646 seconds, got 2147483647
 
+statement error
+SET firebird_transaction_snapshot_idle_timeout = NULL;
+----
+firebird_transaction_snapshot_idle_timeout must be 0 (no limit) to 2147483646 seconds, got NULL
+
 statement ok
 SET firebird_transaction_snapshot_idle_timeout = 2147483646;
 

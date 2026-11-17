@@ -751,7 +751,7 @@ bool FirebirdConnection::TryStartSnapshotTransaction(int64_t at_snapshot_number,
 
 int64_t FirebirdConnection::SnapshotNumber() {
     if (!tr_) {
-        return 0;
+        return -2;
     }
     char items[] = {static_cast<char>(fb_info_tra_snapshot_number), isc_info_end};
     char buf[32] = {};
@@ -759,17 +759,22 @@ int64_t FirebirdConnection::SnapshotNumber() {
     isc_transaction_info(status, &tr_, static_cast<short>(sizeof(items)), items,
                          static_cast<short>(sizeof(buf)), buf);
     if (NoteStatus(status)) {
-        return 0;
+        return -2;
     }
     // Reply: item byte, 2-byte little-endian length, little-endian value.
-    // A server that doesn't know the item answers isc_info_error instead.
-    if (static_cast<unsigned char>(buf[0]) != fb_info_tra_snapshot_number) {
-        return 0;
+    // A server that doesn't know the item (Firebird 3) answers
+    // isc_info_error instead.
+    const auto item = static_cast<unsigned char>(buf[0]);
+    if (item == isc_info_error) {
+        return -1;
+    }
+    if (item != fb_info_tra_snapshot_number) {
+        return -2;
     }
     const unsigned len = static_cast<unsigned char>(buf[1]) |
                          (static_cast<unsigned>(static_cast<unsigned char>(buf[2])) << 8);
     if (len == 0 || len > 8) {
-        return 0;
+        return -2;
     }
     uint64_t value = 0;
     for (unsigned i = 0; i < len; ++i) {
@@ -1044,40 +1049,55 @@ void FirebirdStatement::Prepare(const std::string &sql) {
 
 FirebirdStatement::FirebirdStatement(FirebirdConnection &conn, const std::string &sql)
     : conn_(conn) {
-    Prepare(sql);
+    try {
+        Prepare(sql);
 
-    ISC_STATUS status[20] = {};
-    isc_dsql_execute(status, &conn_.tr(), &stmt_, 1, nullptr);
-    conn_.CheckStatus(status, "isc_dsql_execute:\n" + sql);
+        ISC_STATUS status[20] = {};
+        isc_dsql_execute(status, &conn_.tr(), &stmt_, 1, nullptr);
+        conn_.CheckStatus(status, "isc_dsql_execute:\n" + sql);
+    } catch (...) {
+        Release();  // the destructor won't run for a throwing constructor
+        throw;
+    }
 }
 
 FirebirdStatement::FirebirdStatement(FirebirdConnection &conn,
                                      const std::string &sql,
                                      const std::vector<Value> &params)
     : conn_(conn) {
-    Prepare(sql);
+    try {
+        Prepare(sql);
 
-    if (params.empty()) {
-        // No placeholders → same code path as the no-parameter constructor.
+        if (params.empty()) {
+            // No placeholders → same code path as the no-parameter constructor.
+            ISC_STATUS status[20] = {};
+            isc_dsql_execute(status, &conn_.tr(), &stmt_, 1, nullptr);
+            conn_.CheckStatus(status, "isc_dsql_execute:\n" + sql);
+            return;
+        }
+
+        BindInputParameters(params, sql);
+
         ISC_STATUS status[20] = {};
-        isc_dsql_execute(status, &conn_.tr(), &stmt_, 1, nullptr);
-        conn_.CheckStatus(status, "isc_dsql_execute:\n" + sql);
-        return;
+        isc_dsql_execute(status, &conn_.tr(), &stmt_, 1, in_sqlda_);
+        conn_.CheckStatus(status, "isc_dsql_execute (with params):\n" + sql);
+    } catch (...) {
+        Release();
+        throw;
     }
-
-    BindInputParameters(params, sql);
-
-    ISC_STATUS status[20] = {};
-    isc_dsql_execute(status, &conn_.tr(), &stmt_, 1, in_sqlda_);
-    conn_.CheckStatus(status, "isc_dsql_execute (with params):\n" + sql);
 }
 
 FirebirdStatement::FirebirdStatement(FirebirdConnection &conn,
                                      const std::string &sql,
                                      PrepareOnlyTag)
     : conn_(conn) {
-    Prepare(sql);
-    // Deliberately no isc_dsql_execute call — describe-only.
+    try {
+        Prepare(sql);
+        // Deliberately no isc_dsql_execute call — describe-only.
+    } catch (...) {
+        Release();
+        throw;
+    }
 }
 
 // Lifetime rule: a statement must be destroyed before its connection, since
@@ -1086,13 +1106,24 @@ FirebirdStatement::FirebirdStatement(FirebirdConnection &conn,
 // connection, and the scanner's local state resets its cursor before it
 // releases the connection.
 FirebirdStatement::~FirebirdStatement() {
+    Release();
+}
+
+void FirebirdStatement::Release() {
     if (stmt_) {
         ISC_STATUS s[20] = {};
         isc_dsql_free_statement(s, &stmt_, DSQL_drop);
         conn_.NoteStatus(s);  // a kill after the last fetch can show up here
+        stmt_ = 0;
     }
-    if (out_sqlda_) std::free(out_sqlda_);
-    if (in_sqlda_)  std::free(in_sqlda_);
+    if (out_sqlda_) {
+        std::free(out_sqlda_);
+        out_sqlda_ = nullptr;
+    }
+    if (in_sqlda_) {
+        std::free(in_sqlda_);
+        in_sqlda_ = nullptr;
+    }
 }
 
 void FirebirdStatement::AllocateBuffers() {

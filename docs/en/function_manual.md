@@ -354,7 +354,8 @@ The ATTACH option wins over the setting in both directions
   ATTACH finds that out, and later ones don't try again until the next
   `ATTACH`.
 - A direct `firebird_scan()` call is not part of an ATTACH's transaction
-  and is not affected.
+  and is not affected. So `partition_by`, a `firebird_scan()` parameter,
+  never meets this option: ATTACH scans don't take it.
 - The known server issues listed
   [above](#partitioned-scans-read-one-snapshot) apply here too, for the
   whole transaction.
@@ -389,7 +390,8 @@ ROLLBACK).
   the next transaction.
 - Firebird counts the timeout in whole seconds, so the extension asks for
   one second more: the snapshot survives at least the configured time. If
-  the server refuses the timer, the snapshot stays without a limit.
+  the server refuses the timer, the snapshot is released at once, and the
+  next scan of the transaction fails with the server's reason.
 - Values outside `0..2147483646` are rejected by `SET` (the server takes
   up to 2³¹ − 1 seconds, and the extension adds one):
   `firebird_transaction_snapshot_idle_timeout must be 0 (no limit) to 2147483646 seconds, got -1`.

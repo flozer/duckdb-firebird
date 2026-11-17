@@ -601,7 +601,9 @@ A opcao do `ATTACH` vence a configuracao nos dois sentidos
   `ATTACH` descobre isso, e as seguintes nao tentam de novo ate o proximo
   `ATTACH`.
 - Uma chamada direta de `firebird_scan()` nao faz parte da transacao de um
-  `ATTACH` e nao e afetada.
+  `ATTACH` e nao e afetada. Assim `partition_by`, um parametro de
+  `firebird_scan()`, nunca se combina com esta opcao: scans do `ATTACH` nao
+  o aceitam.
 - Os problemas conhecidos no servidor listados em "Scans particionados leem
   um unico snapshot" valem aqui tambem, pela transacao inteira.
 
@@ -636,7 +638,8 @@ ROLLBACK).
   a proxima transacao.
 - O Firebird conta o timeout em segundos inteiros, entao a extensao pede um
   segundo a mais: o snapshot sobrevive pelo menos o tempo configurado. Se o
-  servidor recusar o timer, o snapshot fica sem limite.
+  servidor recusar o timer, o snapshot e liberado na hora, e o proximo scan
+  da transacao falha com o motivo informado pelo servidor.
 - Valores fora de `0..2147483646` sao rejeitados pelo `SET` (o servidor
   aceita ate 2³¹ − 1 segundos, e a extensao soma um):
   `firebird_transaction_snapshot_idle_timeout must be 0 (no limit) to 2147483646 seconds, got -1`.
