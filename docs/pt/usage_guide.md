@@ -123,10 +123,24 @@ no catalogo DuckDB local.
 
 ### Status atual
 
-A versao publica atual do projeto e `v0.6.0`. O pedido de publicacao no
+A versao publica atual do projeto e `v1.4.1`. O pedido de publicacao no
 catalogo DuckDB Community foi mergeado em
-[`duckdb/community-extensions#1980`](https://github.com/duckdb/community-extensions/pull/1980)
-e agora aponta para essa tag.
+[`duckdb/community-extensions#3655`](https://github.com/duckdb/community-extensions/pull/3655),
+com `repo.ref` fixado no commit do release. Depois do merge o binario no CDN
+da comunidade pode atrasar em relacao ao descriptor por um tempo, entao o
+`INSTALL firebird FROM community` pode brevemente ainda baixar o build
+anterior — use um release baixado (abaixo) se precisar do build mais novo na
+hora.
+
+A v1.4.1 adiciona tres recursos opt-in, somente leitura e retrocompativeis
+(veja `docs/pt/function_manual.md`): `firebird_scan(partition_by='dbkey')`
+para particionar uma tabela sem chave primaria utilizavel sobre faixas de
+`RDB$DB_KEY` (Firebird 4/5); `SET firebird_max_inline_blob_size` para ajustar
+ou desligar os blobs inline do Firebird 5.0.3+; e
+`SET firebird_transaction_snapshot=true` (ou a opcao de ATTACH
+`transaction_snapshot`) para que uma transacao DuckDB leia um unico snapshot
+do Firebird (Firebird 4+). As consultas existentes nao mudam, a menos que
+ativem essas opcoes.
 
 ### Instalacao oficial pelo catalogo community
 

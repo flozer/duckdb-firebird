@@ -266,7 +266,10 @@ partitioned), tuning and reporting of Firebird 5.0.3+ inline blobs, and an
 opt-in transaction snapshot that makes every scan of an ATTACH in one DuckDB
 transaction read a single Firebird snapshot (Firebird 4+); it also stops a
 dead pooled connection from being re-parked and names the called function in
-ATTACH-alias errors. v1.4.0 made partitioned scans read a single Firebird
+ATTACH-alias errors. It surfaces the new state too: `firebird_health()` adds
+`client_version`, `inline_blob_size` and `network_protocol` columns with an
+`inline_blobs_unavailable` warning, and `firebird_last_query()` /
+`firebird_query_log()` add a `partition_method` column (`none`/`pk`/`dbkey`). v1.4.0 made partitioned scans read a single Firebird
 snapshot (Firebird 4+), read new data types correctly from servers with
 `DataTypeCompatibility` set, stopped partitioned scans from dropping rows
 outside the cached key range, and fixed Windows client-library loading from a

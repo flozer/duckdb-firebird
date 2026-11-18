@@ -120,10 +120,22 @@ tables in the local DuckDB catalog.
 
 ### Current status
 
-The current public version of the project is `v0.6.0`. The publishing
+The current public version of the project is `v1.4.1`. The publishing
 request to the DuckDB Community catalog was merged at
-[`duckdb/community-extensions#1980`](https://github.com/duckdb/community-extensions/pull/1980)
-and now points to that tag.
+[`duckdb/community-extensions#3655`](https://github.com/duckdb/community-extensions/pull/3655),
+with `repo.ref` pinned to the release commit. After a merge the community
+CDN binary can lag the descriptor for a while, so `INSTALL firebird FROM
+community` may briefly still fetch the previous build — use a downloaded
+release (below) if you need the newest build immediately.
+
+v1.4.1 adds three opt-in, read-only, backward-compatible capabilities (see
+`docs/en/function_manual.md`): `firebird_scan(partition_by='dbkey')` to
+partition a table with no usable primary key over `RDB$DB_KEY` ranges
+(Firebird 4/5); `SET firebird_max_inline_blob_size` to tune or disable
+Firebird 5.0.3+ inline blobs; and `SET firebird_transaction_snapshot=true`
+(or the ATTACH option `transaction_snapshot`) so one DuckDB transaction
+reads a single Firebird snapshot (Firebird 4+). Existing queries are
+unchanged unless they set these options.
 
 ### Official community-catalog installation
 
