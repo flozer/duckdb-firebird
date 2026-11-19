@@ -430,9 +430,25 @@ Both arguments may be any constant expression, for example
 
 - **Only SELECTs.** The statement is prepared at bind time and its type
   read (`isc_info_sql_stmt_type`); `UPDATE`, `EXECUTE PROCEDURE`, DDL and
-  the rest fail at bind. It runs in the ATTACH pool's read-only
-  transaction, so a procedure that writes fails on the server ("attempted
-  update during read-only transaction").
+  the rest fail at bind.
+- **Read-only transaction.** A `SELECT` can still run code that writes: a
+  selectable procedure, or an `EXECUTE BLOCK` with `SUSPEND`. It runs in
+  the ATTACH pool's read-only transaction, so the server refuses those
+  writes ("attempted update during read-only transaction"). Tested on
+  Firebird 3, 4 and 5, the refusal also covers:
+  - DDL run through `EXECUTE STATEMENT`;
+  - `IN AUTONOMOUS TRANSACTION` blocks (the autonomous transaction is
+    read-only too);
+  - `EXECUTE STATEMENT ... ON EXTERNAL DATA SOURCE`, sharing the caller's
+    transaction or `WITH AUTONOMOUS TRANSACTION` (tested against the same
+    database).
+- **Where read-only stops.**
+  - Sequences are not transactional: `GEN_ID(G, 1)` or `NEXT VALUE FOR G`
+    in the `SELECT` advances `G`, and the step stays.
+  - External functions (UDFs and UDRs) run outside transaction control.
+    The read-only transaction doesn't stop what they do outside the
+    database, the same as running the statement in `isql` against your
+    own database.
 - **Types.** Each result column maps to the DuckDB type a scan gives the
   same Firebird type, with the ATTACH's `none_encoding` and
   `numeric_widen_int64`. `DECFLOAT` comes back as text, as in a scan.
