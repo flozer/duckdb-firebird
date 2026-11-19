@@ -161,7 +161,61 @@ SELECT * FROM firebird_query('fb', 'EXECUTE PROCEDURE SP_SEQ(2)');
 only SELECT statements are accepted
 
 statement error
+SELECT * FROM firebird_query('fb', 'CREATE TABLE QDDL (I INTEGER)');
+----
+only SELECT statements are accepted
+
+statement error
 SELECT * FROM firebird_query('fb', 'SELECT * FROM SP_WRITE');
+----
+read-only transaction
+
+# An EXECUTE BLOCK with SUSPEND passes the SELECT check (it reads) ...
+query I
+SELECT X FROM firebird_query('fb',
+    'EXECUTE BLOCK RETURNS (X INTEGER) AS BEGIN SELECT COUNT(*) FROM QTYPES INTO :X; SUSPEND; END');
+----
+4
+
+# ... and the server refuses its writes: DML, and DDL through EXECUTE STATEMENT.
+statement error
+SELECT * FROM firebird_query('fb',
+    'EXECUTE BLOCK RETURNS (X INTEGER) AS BEGIN INSERT INTO QLOG (ID, NOTE) VALUES (5, ''block''); X = 5; SUSPEND; END');
+----
+read-only transaction
+
+statement error
+SELECT * FROM firebird_query('fb',
+    'EXECUTE BLOCK RETURNS (X INTEGER) AS BEGIN EXECUTE STATEMENT ''CREATE TABLE QDDL (I INTEGER)''; X = 6; SUSPEND; END');
+----
+read-only transaction
+
+query I
+SELECT count(*) FROM firebird_query('fb', 'SELECT 1 FROM RDB$RELATIONS WHERE RDB$RELATION_NAME = ''QDDL''');
+----
+0
+
+# An autonomous transaction inside the procedure is read-only too.
+statement error
+SELECT * FROM firebird_query('fb', 'SELECT * FROM SP_AUTO');
+----
+read-only transaction
+
+# EXECUTE STATEMENT ON EXTERNAL DATA SOURCE (here the same database): the
+# external connection works (SP_EDS_READ), and its transaction is read-only,
+# shared with the caller's or autonomous.
+query I
+SELECT N FROM firebird_query('fb', 'SELECT N FROM SP_EDS_READ');
+----
+4
+
+statement error
+SELECT * FROM firebird_query('fb', 'SELECT * FROM SP_EDS');
+----
+read-only transaction
+
+statement error
+SELECT * FROM firebird_query('fb', 'SELECT * FROM SP_EDS_AUTO');
 ----
 read-only transaction
 
@@ -169,6 +223,64 @@ query I
 SELECT count(*) FROM fb.main.QLOG;
 ----
 0
+
+# Sequences are not transactional: GEN_ID and NEXT VALUE FOR in a SELECT
+# advance the sequence, read-only transaction or not, and the step stays.
+statement ok
+SET VARIABLE qseq0 = (SELECT V FROM firebird_query('fb', 'SELECT GEN_ID(QSEQ, 0) AS V FROM RDB$DATABASE'));
+
+query I
+SELECT V - getvariable('qseq0') FROM firebird_query('fb', 'SELECT GEN_ID(QSEQ, 1) AS V FROM RDB$DATABASE');
+----
+1
+
+query I
+SELECT V - getvariable('qseq0') FROM firebird_query('fb', 'SELECT NEXT VALUE FOR QSEQ AS V FROM RDB$DATABASE');
+----
+2
+
+query I
+SELECT V - getvariable('qseq0') FROM firebird_query('fb', 'SELECT GEN_ID(QSEQ, 0) AS V FROM RDB$DATABASE');
+----
+2
+
+# The same in the snapshot transaction of firebird_transaction_snapshot:
+# writes refused, the sequence still advances.
+statement ok
+SET firebird_transaction_snapshot = true;
+
+statement error
+SELECT * FROM firebird_query('fb', 'SELECT * FROM SP_WRITE');
+----
+read-only transaction
+
+statement error
+SELECT * FROM firebird_query('fb', 'SELECT * FROM SP_AUTO');
+----
+read-only transaction
+
+statement error
+SELECT * FROM firebird_query('fb', 'SELECT * FROM SP_EDS');
+----
+read-only transaction
+
+statement error
+SELECT * FROM firebird_query('fb', 'SELECT * FROM SP_EDS_AUTO');
+----
+read-only transaction
+
+query I
+SELECT V - getvariable('qseq0') FROM firebird_query('fb', 'SELECT NEXT VALUE FOR QSEQ AS V FROM RDB$DATABASE');
+----
+3
+
+statement ok
+SET firebird_transaction_snapshot = false;
+
+query I
+SELECT V - getvariable('qseq0') FROM firebird_query('fb', 'SELECT GEN_ID(QSEQ, 0) AS V FROM RDB$DATABASE');
+----
+3
 
 # --- Errors -------------------------------------------------------------------
 

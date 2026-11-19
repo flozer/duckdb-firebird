@@ -9,6 +9,13 @@
  *   SP_SEQ   : selectable procedure returning N rows.
  *   QLOG / SP_WRITE : a selectable procedure that writes (firebird_query
  *                     must refuse it: its transaction is read-only).
+ *   SP_AUTO, SP_EDS, SP_EDS_AUTO : selectable procedures that write to
+ *                     QLOG from an autonomous transaction and through
+ *                     EXECUTE STATEMENT ON EXTERNAL DATA SOURCE (this same
+ *                     database); the read-only transaction refuses them too.
+ *   SP_EDS_READ : reads through the same external data source, to show
+ *                 the external connection itself works.
+ *   QSEQ : a sequence; GEN_ID / NEXT VALUE FOR in a SELECT advance it.
  */
 SET SQL DIALECT 3;
 
@@ -57,6 +64,8 @@ CREATE TABLE QLOG (
     NOTE VARCHAR(20)
 );
 
+CREATE SEQUENCE QSEQ;
+
 SET TERM ^ ;
 
 CREATE PROCEDURE SP_SEQ (N INTEGER)
@@ -78,6 +87,47 @@ AS
 BEGIN
     INSERT INTO QLOG (ID, NOTE) VALUES (1, 'written');
     ID = 1;
+    SUSPEND;
+END^
+
+CREATE PROCEDURE SP_AUTO
+RETURNS (ID INTEGER)
+AS
+BEGIN
+    IN AUTONOMOUS TRANSACTION DO
+        INSERT INTO QLOG (ID, NOTE) VALUES (2, 'autonomous');
+    ID = 2;
+    SUSPEND;
+END^
+
+CREATE PROCEDURE SP_EDS
+RETURNS (ID INTEGER)
+AS
+BEGIN
+    EXECUTE STATEMENT 'INSERT INTO QLOG (ID, NOTE) VALUES (3, ''external'')'
+        ON EXTERNAL DATA SOURCE RDB$GET_CONTEXT('SYSTEM', 'DB_NAME');
+    ID = 3;
+    SUSPEND;
+END^
+
+CREATE PROCEDURE SP_EDS_AUTO
+RETURNS (ID INTEGER)
+AS
+BEGIN
+    EXECUTE STATEMENT 'INSERT INTO QLOG (ID, NOTE) VALUES (4, ''external'')'
+        ON EXTERNAL DATA SOURCE RDB$GET_CONTEXT('SYSTEM', 'DB_NAME')
+        WITH AUTONOMOUS TRANSACTION;
+    ID = 4;
+    SUSPEND;
+END^
+
+CREATE PROCEDURE SP_EDS_READ
+RETURNS (N INTEGER)
+AS
+BEGIN
+    EXECUTE STATEMENT 'SELECT COUNT(*) FROM QTYPES'
+        ON EXTERNAL DATA SOURCE RDB$GET_CONTEXT('SYSTEM', 'DB_NAME')
+        INTO :N;
     SUSPEND;
 END^
 

@@ -9,8 +9,9 @@
   functions) and returns its rows, typed as a scan types the same Firebird
   types. Non-SELECT statements fail at bind; it runs in a read-only
   transaction (or the DuckDB transaction's snapshot with
-  `firebird_transaction_snapshot`), leaves a `firebird_last_query()` /
-  `firebird_query_log()` record, and appears in
+  `firebird_transaction_snapshot`), though a `GEN_ID` / `NEXT VALUE FOR`
+  in the SELECT still advances its sequence. It leaves a
+  `firebird_last_query()` / `firebird_query_log()` record, and appears in
   `firebird_explain_pushdown()` as `scan_strategy = 'passthrough'`.
 
 ### Changed

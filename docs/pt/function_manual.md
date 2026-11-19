@@ -678,9 +678,25 @@ Os dois argumentos podem ser qualquer expressao constante, por exemplo
 
 - **Somente SELECT.** O comando e preparado no bind e seu tipo lido
   (`isc_info_sql_stmt_type`); `UPDATE`, `EXECUTE PROCEDURE`, DDL e os
-  demais falham no bind. Ele roda na transacao somente leitura do pool do
-  ATTACH, entao uma procedure que grava falha no servidor ("attempted
-  update during read-only transaction").
+  demais falham no bind.
+- **Transacao somente leitura.** Um `SELECT` ainda pode executar codigo
+  que grava: uma procedure selecionavel, ou um `EXECUTE BLOCK` com
+  `SUSPEND`. Ele roda na transacao somente leitura do pool do ATTACH,
+  entao o servidor recusa essas gravacoes ("attempted update during
+  read-only transaction"). Testado no Firebird 3, 4 e 5, a recusa tambem
+  cobre:
+  - DDL executado via `EXECUTE STATEMENT`;
+  - blocos `IN AUTONOMOUS TRANSACTION` (a transacao autonoma tambem e
+    somente leitura);
+  - `EXECUTE STATEMENT ... ON EXTERNAL DATA SOURCE`, na transacao de quem
+    chama ou `WITH AUTONOMOUS TRANSACTION` (testado contra o proprio
+    banco).
+- **Onde o somente leitura para.**
+  - Sequences nao sao transacionais: `GEN_ID(G, 1)` ou `NEXT VALUE FOR G`
+    no `SELECT` avanca `G`, e o avanco fica.
+  - Funcoes externas (UDFs e UDRs) rodam fora do controle de transacao. A
+    transacao somente leitura nao impede o que elas fazem fora do banco,
+    como ao executar o comando no `isql` contra o seu proprio banco.
 - **Tipos.** Cada coluna do resultado vira o tipo DuckDB que um scan da ao
   mesmo tipo Firebird, com o `none_encoding` e o `numeric_widen_int64` do
   ATTACH. `DECFLOAT` volta como texto, como no scan. Os nomes das colunas
