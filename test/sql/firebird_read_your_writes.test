@@ -1,0 +1,177 @@
+# name: test/sql/firebird_read_your_writes.test
+# description: What a read sees after a write, on an ATTACH opened with
+#              READ_WRITE. Reads (scans, firebird_query) run on the read
+#              pool's connections and transactions; writes run on the
+#              DuckDB transaction's write connection. So a read sees a write
+#              once it is committed: in autocommit, from the next statement;
+#              between BEGIN and COMMIT, not before COMMIT. With
+#              firebird_transaction_snapshot on (Firebird 4+), the reads of
+#              one DuckDB transaction keep the snapshot of its first read,
+#              so they don't see a write another connection commits after
+#              it either. And one DuckDB transaction can't write both a
+#              local table and Firebird: DuckDB refuses the second database.
+# group: [firebird]
+#
+# Needs scripts/fixture_rw.sql in the database named by FIREBIRD_RW_DB.
+# Uses RW_LOG rows 601 to 610 only.
+
+require firebird
+
+require-env FIREBIRD_RW_DB
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS rw (TYPE firebird, READ_WRITE);
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG WHERE ID BETWEEN 601 AND 610');
+
+statement ok
+CREATE OR REPLACE TABLE expected AS
+SELECT CAST(split_part(engine_version, '.', 1) AS INTEGER) >= 4 AS fb4
+FROM firebird_health('rw');
+
+# --- Autocommit: the next statement sees the write ------------------------------
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (601, ''auto'')');
+
+query I
+SELECT count(*) FROM rw.main.RW_LOG WHERE ID = 601;
+----
+1
+
+query I
+SELECT * FROM firebird_query('rw', 'SELECT count(*) FROM RW_LOG WHERE ID = 601');
+----
+1
+
+# --- BEGIN ... COMMIT: the transaction's reads don't see its own writes ----------
+
+statement ok
+BEGIN;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (602, ''txn'')');
+
+query I
+SELECT count(*) FROM rw.main.RW_LOG WHERE ID = 602;
+----
+0
+
+query I
+SELECT * FROM firebird_query('rw', 'SELECT count(*) FROM RW_LOG WHERE ID = 602');
+----
+0
+
+statement ok
+COMMIT;
+
+query I
+SELECT count(*) FROM rw.main.RW_LOG WHERE ID = 602;
+----
+1
+
+# --- With firebird_transaction_snapshot ------------------------------------------
+
+statement ok
+SET firebird_transaction_snapshot = true;
+
+# Autocommit: each statement is a DuckDB transaction of its own, with a
+# snapshot of its own, so the next statement still sees the write.
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (603, ''auto snap'')');
+
+query I
+SELECT count(*) FROM rw.main.RW_LOG WHERE ID = 603;
+----
+1
+
+statement ok
+BEGIN;
+
+# The first read pins the transaction's snapshot (Firebird 4+).
+query I
+SELECT count(*) FROM rw.main.RW_LOG WHERE ID IN (604, 605);
+----
+0
+
+# Another connection writes, and commits (autocommit).
+statement ok con2
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (604, ''other'')');
+
+# The snapshot doesn't see it on Firebird 4+; Firebird 3 has no
+# transaction snapshot, so its read-committed reads do.
+query I
+SELECT (SELECT count(*) FROM rw.main.RW_LOG WHERE ID = 604) = CASE WHEN fb4 THEN 0 ELSE 1 END
+FROM expected;
+----
+true
+
+query I
+SELECT (SELECT * FROM firebird_query('rw', 'SELECT count(*) FROM RW_LOG WHERE ID = 604'))
+       = CASE WHEN fb4 THEN 0 ELSE 1 END
+FROM expected;
+----
+true
+
+# The transaction's own write: not visible before COMMIT, as without it.
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (605, ''txn snap'')');
+
+query I
+SELECT count(*) FROM rw.main.RW_LOG WHERE ID = 605;
+----
+0
+
+statement ok
+COMMIT;
+
+# A new transaction, a new snapshot: both rows.
+query I
+SELECT count(*) FROM rw.main.RW_LOG WHERE ID IN (604, 605);
+----
+2
+
+statement ok
+SET firebird_transaction_snapshot = false;
+
+# --- No atomicity across engines: DuckDB refuses the second database ------------
+
+statement ok
+CREATE OR REPLACE TABLE local_log (id INTEGER);
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO local_log VALUES (606);
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (606, ''both'')');
+----
+single transaction can only write to a single attached database
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (607, ''both'')');
+
+statement error
+INSERT INTO local_log VALUES (607);
+----
+single transaction can only write to a single attached database
+
+statement ok
+ROLLBACK;
+
+query II
+SELECT (SELECT count(*) FROM local_log), (SELECT count(*) FROM rw.main.RW_LOG WHERE ID IN (606, 607));
+----
+0	0
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG WHERE ID BETWEEN 601 AND 610');

@@ -72,6 +72,19 @@ static void LoadInternal(ExtensionLoader &loader) {
         "SELECT * FROM firebird_query('fb', 'SELECT DEPT_NO, COUNT(*) FROM EMPLOYEE GROUP BY 1');",
         {"firebird", "query"}));
     loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdExecuteFunction(), {"alias", "sql"},
+        "Runs one Firebird statement (DML, DDL, EXECUTE PROCEDURE, EXECUTE BLOCK) on an "
+        "ATTACH opened with READ_WRITE, in the DuckDB transaction's Firebird write "
+        "transaction; returns rows_affected and executions.",
+        "SELECT * FROM firebird_execute('fb', 'UPDATE CUSTOMER SET ACTIVE = TRUE WHERE ID = 1');",
+        {"firebird", "write"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdClearCacheFunction(), {"alias"},
+        "Forgets the tables an ATTACH has cached, so the next query loads the table list and columns "
+        "again (after DDL made outside this ATTACH; DDL through firebird_execute does it on commit).",
+        "SELECT * FROM firebird_clear_cache('fb');",
+        {"firebird", "catalog"}));
+    loader.RegisterFunction(DescribedTableFunction(
         GetFirebirdTablesFunction(), {"connection_string"},
         "Lists the Firebird tables visible to a connection, without attaching the database.",
         "SELECT * FROM firebird_tables('database=C:/data/erp.fdb user=APP_READONLY password=secret');",
@@ -321,6 +334,27 @@ static void LoadInternal(ExtensionLoader &loader) {
         "See firebird_health().inline_blob_size.",
         LogicalType::BIGINT,
         Value::BIGINT(-1));
+
+    // How long a Firebird write waits for a lock held by another
+    // transaction before it fails.
+    config.AddExtensionOption(
+        "firebird_write_lock_timeout",
+        "Seconds a Firebird write (firebird_execute) waits for a row lock held by another "
+        "transaction before failing "
+        "(0 = fail at once). Read when the write transaction starts. Default 10.",
+        LogicalType::BIGINT,
+        Value::BIGINT(10));
+
+    // ALTER SESSION RESET of the connections that ran caller SQL, before
+    // they go back to a pool (Firebird 4+).
+    config.AddExtensionOption(
+        "firebird_pool_session_reset",
+        "Reset the Firebird session (ALTER SESSION RESET, Firebird 4+) of a connection that ran a "
+        "write transaction or a firebird_query before it goes back to the ATTACH's pool, so later "
+        "queries don't inherit context variables, a role or a time zone. A reset fires the "
+        "database's ON DISCONNECT and ON CONNECT triggers. Default true.",
+        LogicalType::BOOLEAN,
+        Value::BOOLEAN(true));
 }
 
 void FirebirdExtension::Load(ExtensionLoader &loader) {

@@ -66,7 +66,8 @@ std::unique_ptr<FirebirdStatement> PrepareSelect(FirebirdConnection &conn, const
     if (type != isc_info_sql_stmt_select && type != isc_info_sql_stmt_select_for_upd) {
         throw BinderException(
             "%s: only SELECT statements are accepted (a selectable procedure, a CTE or an "
-            "EXECUTE BLOCK with SUSPEND are SELECTs too); this statement's type is %d.",
+            "EXECUTE BLOCK with SUSPEND are SELECTs too); this statement's type is %d. Use "
+            "firebird_execute() for other statements.",
             kFunctionName, type);
     }
     return stmt;
@@ -165,6 +166,15 @@ unique_ptr<GlobalTableFunctionState> FirebirdQueryInitGlobal(ClientContext &cont
     state->pool = bind.attach.pool;
     auto lease = state->pool->AcquireWithInfo();
     state->conn = std::move(lease.conn);
+    // The caller's SELECT can change the session (a selectable procedure,
+    // RDB$SET_CONTEXT): the pool resets it on release.
+    {
+        Value v;
+        if (!context.TryGetCurrentSetting("firebird_pool_session_reset", v) || v.IsNull() ||
+            BooleanValue::Get(v)) {
+            state->conn->MarkSessionChanged();
+        }
+    }
 
     // Transaction snapshot (ATTACH option or SET firebird_transaction_snapshot):
     // read the DuckDB transaction's snapshot, like the scans do.
@@ -206,6 +216,7 @@ unique_ptr<GlobalTableFunctionState> FirebirdQueryInitGlobal(ClientContext &cont
     rec.parallel_scan = false;
     rec.snapshot_mode = tx_snapshot ? "transaction" : "serial";
     rec.partition_method = "none";
+    rec.operation = "query";
     rec.captured_at = Timestamp::GetCurrentTimestamp();
     rec.connection_id = state->conn->Id();
     rec.connection_reused = lease.reused;

@@ -984,11 +984,11 @@ then, ship per-DuckDB-minor-version binaries via community-extensions.
 
 ## Out of scope (rejected for now)
 
-- **Writes** — `INSERT / UPDATE / DELETE / CREATE TABLE` against
-  `fb.main.…`. The use case is "lift Firebird OLTP data into DuckDB
-  for analytics", not "use Firebird through DuckDB". Adding writes
-  changes the transaction profile (`isc_tpb_read` is hard-wired) and
-  the risk envelope (a bug deletes user data).
+- **Writes through `fb.main.…`** — `INSERT / UPDATE / DELETE / CREATE
+  TABLE` against `fb.main.…`. Writes are opt-in instead: an
+  ATTACH opened with `READ_WRITE` runs the Firebird SQL the caller wrote
+  through `firebird_execute`, in its own write transaction and connection
+  pool, while reads keep the read-only transaction profile.
 - **DDL emission** — `firebird_attach_sql()` already covers the view-
   based path; replicating Firebird's DDL inside DuckDB is a much bigger
   surface than the wins justify.

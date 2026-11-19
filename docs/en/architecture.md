@@ -224,6 +224,51 @@ XSQLDA buffers are owned by `FirebirdStatement` and reused across every
 `isc_get_segment` loop and are materialized into a single DuckDB
 `string_t` / blob value.
 
+## Writes
+
+Writes are opt-in per ATTACH, with DuckDB's own `READ_WRITE` option
+(`FirebirdCatalog::write_enabled`); without it nothing below happens. The
+read side is unchanged: scans and `firebird_query` keep the read pool and
+its read-only transaction.
+
+- **A second pool per ATTACH** (`FirebirdCatalog::WritePool()`). A
+  connection that held a write transaction never serves a read; it goes
+  back to its pool on a fresh read-only transaction.
+- **Session reset.** A connection that ran caller SQL (a write
+  transaction, a `firebird_query`) is marked
+  (`FirebirdConnection::MarkSessionChanged`, when `firebird_pool_session_reset`
+  is true); `FirebirdConnectionPool::Release` runs `ALTER SESSION RESET` on
+  a marked connection before parking it (Firebird 4+; a failure discards
+  it). The reset runs in the parked read-only transaction, which the
+  server restarts; it would roll back a write transaction's uncommitted
+  work, so it only ever runs after the commit or rollback.
+- **The write transaction** (`FirebirdConnection::StartWriteTransaction`):
+  `isc_tpb_write | isc_tpb_read_committed | isc_tpb_rec_version |
+  isc_tpb_wait` with `isc_tpb_lock_timeout` from `firebird_write_lock_timeout`
+  (`isc_tpb_nowait` for 0).
+- **It follows the DuckDB transaction.** `FirebirdTransaction` starts it on
+  the first write (`GetFirebirdWriteConnection`) and commits or rolls it
+  back in `FirebirdTransactionManager::CommitTransaction` /
+  `RollbackTransaction`. Autocommit gives one Firebird transaction per
+  statement; `BEGIN ... COMMIT` gives one for all its writes.
+- **`firebird_execute`** (`firebird_execute.cpp`) prepares the statement
+  on the write connection, refuses transaction control and `?` parameters,
+  runs it (reading and discarding the rows of a statement that returns
+  rows) and reads the record counts with `isc_dsql_sql_info`
+  (`isc_info_sql_records`).
+- **A result read halfway keeps the write.** DuckDB commits a streamed
+  result only once it is fully read. On DuckDB 1.5 the bind sets
+  `QueryResultOutputType::FORCE_MATERIALIZED`; DuckDB 2.0 has no such
+  property, so there, in autocommit, `firebird_execute` commits its write
+  transaction before it returns its row (`CommitFirebirdWriteNow`). Both
+  register the write at bind (`RegisterDBModify`).
+- **DDL** (`isc_info_sql_stmt_ddl`) first closes the ATTACH's idle
+  connections (their metadata cache would make Firebird refuse DROP /
+  ALTER of tables they used: "object ... is in use"), then marks the
+  transaction (`NoteFirebirdDdl`); when it commits, the catalog clears
+  its table cache, so `fb.main` loads the tables again.
+  `firebird_clear_cache(alias)` does the same on demand.
+
 ## Build
 
 The build follows the standard DuckDB out-of-tree extension layout:

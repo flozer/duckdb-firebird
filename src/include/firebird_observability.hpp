@@ -53,6 +53,19 @@ struct FirebirdQueryTelemetry {
     // How the table was split: "none" (one partition), "pk" (PK ranges)
     // or "dbkey" (RDB$DB_KEY ranges, partition_by = 'dbkey').
     std::string partition_method = "none";
+    // What the record is: "scan" (firebird_scan / an ATTACH table),
+    // "query" (firebird_query), "execute" (firebird_execute), "insert"
+    // (INSERT INTO an ATTACH table).
+    std::string operation = "scan";
+    // Writes only (empty = SQL NULL for reads): "row" (one execution per
+    // row) or "batch" (Firebird 4+ IBatch).
+    std::string write_mode;
+    // Writes only: executions (statement runs, source rows or inserted
+    // rows); -1 = SQL NULL.
+    int64_t rows_written = -1;
+    // Writes only: rows inserted + updated + deleted as Firebird reports
+    // them; -1 = SQL NULL (not counted, or not reported for the mode).
+    int64_t rows_affected = -1;
     // Pushdown explainability (Phase 4 #3). limit_pushed / offset_pushed
     // mirror the ROWS clause actually emitted to Firebird; invalid
     // (optional_idx default) means no paging was pushed and the column
@@ -117,6 +130,8 @@ public:
     // calls of the other pipelines; their interrupt must not replace the
     // error that stopped the query.
     void SetErrorIfEmpty(const std::string &msg);
+    // Writes: the final (or in-flight) counts and mode of the current record.
+    void SetWriteResult(const std::string &write_mode, int64_t rows_written, int64_t rows_affected);
 
 private:
     mutable std::mutex lock_;
@@ -137,6 +152,12 @@ private:
 // Fetch (or create) the observability state attached to this ClientContext.
 // Always returns a non-null shared_ptr; lifetime is tied to the context.
 shared_ptr<FirebirdObservabilityState> GetObservabilityState(ClientContext &ctx);
+
+// Starts the telemetry record of a write (firebird_execute or INSERT into
+// an ATTACH table): operation "execute" or "insert", the SQL as prepared,
+// write_mode "row" until the caller sets the result.
+void RecordFirebirdWrite(ClientContext &ctx, const std::string &sql, const std::string &operation,
+                         const std::string &table_name, int64_t connection_id);
 
 // G1 observability wave — react to a scan that has residual (not pushed)
 // filters, according to the firebird_unpushed_mode session setting:

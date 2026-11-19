@@ -33,6 +33,7 @@
 #define isc_dsql_describe            (::duckdb::fbapi().isc_dsql_describe)
 #define isc_dsql_describe_bind       (::duckdb::fbapi().isc_dsql_describe_bind)
 #define isc_dsql_execute             (::duckdb::fbapi().isc_dsql_execute)
+#define isc_dsql_execute_immediate   (::duckdb::fbapi().isc_dsql_execute_immediate)
 #define isc_dsql_fetch               (::duckdb::fbapi().isc_dsql_fetch)
 #define isc_dsql_free_statement      (::duckdb::fbapi().isc_dsql_free_statement)
 #define isc_open_blob2               (::duckdb::fbapi().isc_open_blob2)
@@ -44,6 +45,7 @@
 #define isc_get_client_version       (::duckdb::fbapi().isc_get_client_version)
 #define isc_dsql_sql_info            (::duckdb::fbapi().isc_dsql_sql_info)
 #define fb_cancel_operation          (::duckdb::fbapi().fb_cancel_operation)
+#define isc_commit_transaction       (::duckdb::fbapi().isc_commit_transaction)
 
 namespace duckdb {
 
@@ -405,6 +407,16 @@ static void DpbAppend(std::vector<char> &dpb, char tag, const std::string &val) 
 
 // --- FirebirdConnectionPool --------------------------------------------------
 
+void FirebirdConnectionPool::DiscardIdle() {
+    std::vector<IdleEntry> drop;
+    {
+        std::lock_guard<std::mutex> g(lock_);
+        drop.swap(idle_);
+    }
+    total_discarded_.fetch_add(static_cast<int64_t>(drop.size()), std::memory_order_relaxed);
+    drop.clear();  // detaches outside the lock
+}
+
 std::unique_ptr<FirebirdConnection> FirebirdConnectionPool::Acquire() {
     return AcquireWithInfo().conn;
 }
@@ -516,6 +528,18 @@ void FirebirdConnectionPool::Release(std::unique_ptr<FirebirdConnection> conn) {
     if (conn->IsBroken()) {
         Discard(std::move(conn));
         return;
+    }
+
+    // SQL the caller wrote may have changed the session (see
+    // MarkSessionChanged): reset it before the next lease inherits it. A
+    // connection the pool won't park needs none.
+    if (conn->SessionChanged() && config_.enabled) {
+        try {
+            conn->ResetSession();
+        } catch (...) {
+            Discard(std::move(conn));
+            return;
+        }
     }
 
     active_.fetch_sub(1, std::memory_order_relaxed);
@@ -882,7 +906,7 @@ int64_t FirebirdConnection::PageSize() {
 }
 
 void FirebirdConnection::RestoreDefaultTransaction() {
-    if (!in_snapshot_ && tr_) {
+    if (!in_snapshot_ && !in_write_ && tr_) {
         return;  // already on the default read-committed transaction
     }
     ISC_STATUS status[20] = {};
@@ -891,6 +915,7 @@ void FirebirdConnection::RestoreDefaultTransaction() {
         CheckStatus(status, "isc_rollback_transaction");
     }
     in_snapshot_ = false;
+    in_write_ = false;
     StartReadOnlyTransaction();
 }
 
@@ -903,6 +928,104 @@ void FirebirdConnection::CancelOperation(bool abort) {
     cancel_sent_.store(abort ? 2 : 1);
     ISC_STATUS status[20] = {};
     fb_cancel_operation(status, &db_, abort ? fb_cancel_abort : fb_cancel_raise);
+}
+
+#ifndef isc_tpb_lock_timeout
+#define isc_tpb_lock_timeout 21
+#endif
+
+void FirebirdConnection::StartWriteTransaction(int64_t lock_timeout_s) {
+    std::vector<char> tpb = {
+        isc_tpb_version3,
+        isc_tpb_write,
+        isc_tpb_read_committed,
+        isc_tpb_rec_version,
+    };
+    if (lock_timeout_s > 0) {
+        tpb.push_back(isc_tpb_wait);
+        // Length-prefixed little-endian integer.
+        tpb.push_back(static_cast<char>(isc_tpb_lock_timeout));
+        tpb.push_back(4);
+        const uint32_t secs = static_cast<uint32_t>(lock_timeout_s);
+        for (int shift = 0; shift < 32; shift += 8) {
+            tpb.push_back(static_cast<char>((secs >> shift) & 0xFF));
+        }
+    } else {
+        tpb.push_back(isc_tpb_nowait);
+    }
+    ISC_STATUS status[20] = {};
+    if (tr_) {
+        isc_rollback_transaction(status, &tr_);
+        CheckStatus(status, "isc_rollback_transaction");
+        tr_ = 0;
+    }
+    in_snapshot_ = false;
+    in_write_ = false;
+    isc_start_transaction(status, &tr_, 1, &db_, static_cast<unsigned short>(tpb.size()), tpb.data());
+    if (NoteStatus(status)) {
+        tr_ = 0;
+        const std::string text = StatusText(status);
+        // Leave the connection on its default transaction if possible.
+        ISC_STATUS restore_status[20] = {};
+        StartReadOnlyTransaction(restore_status);
+        if (NoteStatus(restore_status)) {
+            tr_ = 0;
+        }
+        throw IOException("isc_start_transaction (read-write): " + text);
+    }
+    in_write_ = true;
+}
+
+void FirebirdConnection::CommitWrite() {
+    ISC_STATUS status[20] = {};
+    isc_commit_transaction(status, &tr_);
+    CheckStatus(status, "isc_commit_transaction");
+    tr_ = 0;
+    in_write_ = false;
+    // The write is committed: failing to start the next read-only
+    // transaction must not turn it into a failed COMMIT (a client could
+    // write again). The connection is marked broken instead, so the pool
+    // drops it.
+    try {
+        StartReadOnlyTransaction();
+    } catch (...) {
+        broken_.store(true, std::memory_order_relaxed);
+    }
+}
+
+void FirebirdConnection::ResetSession() {
+    session_changed_ = false;
+    if (EngineMajor() < 4) {
+        return;
+    }
+    ISC_STATUS status[20] = {};
+    isc_dsql_execute_immediate(status, &db_, &tr_, 0, "ALTER SESSION RESET", SQL_DIALECT_V6, nullptr);
+    CheckStatus(status, "ALTER SESSION RESET");
+}
+
+void FirebirdConnection::RollbackWrite() {
+    ISC_STATUS status[20] = {};
+    if (tr_) {
+        isc_rollback_transaction(status, &tr_);
+        CheckStatus(status, "isc_rollback_transaction");
+    }
+    tr_ = 0;
+    in_write_ = false;
+    StartReadOnlyTransaction();
+}
+
+int FirebirdConnection::EngineMajor() {
+    // Only a successful read is kept: a failed one is tried again next time.
+    if (engine_major_ <= 0) {
+        try {
+            auto cur = OpenCursor("SELECT RDB$GET_CONTEXT('SYSTEM', 'ENGINE_VERSION') FROM RDB$DATABASE");
+            if (cur->Fetch() && !cur->IsNull(0)) {
+                engine_major_ = std::atoi(cur->GetText(0).c_str());
+            }
+        } catch (...) {
+        }
+    }
+    return engine_major_ > 0 ? engine_major_ : 0;
 }
 
 std::unique_ptr<FirebirdStatement> FirebirdConnection::OpenCursor(const std::string &sql) {
@@ -1347,6 +1470,93 @@ void FirebirdStatement::ExecuteCursor(const std::string &sql_for_error) {
     ISC_STATUS status[20] = {};
     isc_dsql_execute(status, &conn_.tr(), &stmt_, 1, nullptr);
     conn_.CheckStatus(status, "isc_dsql_execute:\n" + sql_for_error);
+}
+
+void FirebirdStatement::ExecuteNoCursor(const std::string &sql_for_error) {
+    ISC_STATUS status[20] = {};
+    isc_dsql_execute(status, &conn_.tr(), &stmt_, 1, nullptr);
+    conn_.CheckStatus(status, "isc_dsql_execute:\n" + sql_for_error);
+}
+
+const std::vector<FirebirdColumnDesc> &FirebirdStatement::DescribeInput() {
+    if (input_described_) {
+        return in_params_;
+    }
+    ISC_STATUS status[20] = {};
+    if (in_sqlda_) {
+        std::free(in_sqlda_);
+        in_sqlda_ = nullptr;
+    }
+    in_sqlda_ = AllocXSQLDA(16);
+    isc_dsql_describe_bind(status, &stmt_, 1, in_sqlda_);
+    conn_.CheckStatus(status, "isc_dsql_describe_bind");
+    if (in_sqlda_->sqld > in_sqlda_->sqln) {
+        const int n = in_sqlda_->sqld;
+        std::free(in_sqlda_);
+        in_sqlda_ = nullptr;
+        in_sqlda_ = AllocXSQLDA(n);
+        std::memset(status, 0, sizeof(status));
+        isc_dsql_describe_bind(status, &stmt_, 1, in_sqlda_);
+        conn_.CheckStatus(status, "isc_dsql_describe_bind");
+    }
+    in_params_.clear();
+    for (int i = 0; i < in_sqlda_->sqld; ++i) {
+        const XSQLVAR &v = in_sqlda_->sqlvar[i];
+        FirebirdColumnDesc d;
+        d.name.assign(v.sqlname, v.sqlname_length);
+        d.sqltype = v.sqltype & ~1;
+        d.sqlsubtype = v.sqlsubtype;
+        d.sqlscale = v.sqlscale;
+        d.sqllen = v.sqllen;
+        d.nullable = (v.sqltype & 1) != 0;
+        if (d.sqltype == SQL_TEXT || d.sqltype == SQL_VARYING) {
+            d.character_set_id = static_cast<int16_t>(v.sqlsubtype & 0xFF);
+        } else if (d.sqltype == SQL_BLOB) {
+            d.character_set_id = static_cast<int16_t>(v.sqlscale & 0xFF);
+        }
+        in_params_.push_back(std::move(d));
+    }
+    input_described_ = true;
+    return in_params_;
+}
+
+int64_t FirebirdStatement::RecordsAffected() {
+    char items[] = {isc_info_sql_records, isc_info_end};
+    char buf[128] = {};
+    ISC_STATUS status[20] = {};
+    isc_dsql_sql_info(status, &stmt_, static_cast<short>(sizeof(items)), items,
+                      static_cast<short>(sizeof(buf)), buf);
+    if (conn_.NoteStatus(status) || buf[0] != isc_info_sql_records) {
+        return 0;
+    }
+    // Reply: isc_info_sql_records, 2-byte length, then sub-items
+    // (isc_info_req_*_count, 2-byte length, little-endian value) up to
+    // isc_info_end.
+    auto le = [&](size_t pos, unsigned len) {
+        int64_t v = 0;
+        for (unsigned k = 0; k < len && pos + k < sizeof(buf); ++k) {
+            v |= static_cast<int64_t>(static_cast<unsigned char>(buf[pos + k])) << (8 * k);
+        }
+        return v;
+    };
+    const size_t total = static_cast<size_t>(le(1, 2));
+    size_t pos = 3;
+    const size_t end = std::min(sizeof(buf), 3 + total);
+    int64_t affected = 0;
+    while (pos + 3 <= end) {
+        const auto item = static_cast<unsigned char>(buf[pos]);
+        if (item == isc_info_end) {
+            break;
+        }
+        const unsigned len = static_cast<unsigned>(le(pos + 1, 2));
+        const int64_t value = le(pos + 3, len);
+        if (item == isc_info_req_insert_count || item == isc_info_req_update_count ||
+            item == isc_info_req_delete_count) {
+            affected += value;
+        }
+        pos += 3 + len;
+    }
+    return affected;
 }
 
 bool FirebirdStatement::Fetch() {

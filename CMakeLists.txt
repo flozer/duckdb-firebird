@@ -58,6 +58,7 @@ set(EXTENSION_SOURCES
     src/firebird_explain_pushdown.cpp
     src/firebird_query_function.cpp
     src/firebird_cancel.cpp
+    src/firebird_execute.cpp
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

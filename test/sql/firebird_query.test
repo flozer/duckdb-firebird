@@ -165,11 +165,11 @@ SELECT * FROM firebird_query('fb', 'CREATE TABLE QDDL (I INTEGER)');
 ----
 only SELECT statements are accepted
 
-# The refusal names no other function (none in this extension runs them).
+# The refusal points to firebird_execute(), which runs them.
 statement error
 SELECT * FROM firebird_query('fb', 'UPDATE QTYPES SET C_INTEGER = 0');
 ----
-<!REGEX>:.*firebird_execute.*
+Use firebird_execute() for other statements.
 
 statement error
 SELECT * FROM firebird_query('fb', 'SELECT * FROM SP_WRITE');

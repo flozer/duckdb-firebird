@@ -4,10 +4,10 @@
   <p><em>The first Firebird extension published in the
     <a href="https://github.com/duckdb/community-extensions">DuckDB Community Extensions</a> registry.</em></p>
   <p>
-    Read-only scan, native ATTACH, metadata/diagnostics, and pushdown explain
-    for Firebird 3/4/5 -- DuckDB's own SQL (CREATE TABLE AS, COPY ... TO
-    PARQUET) handles materialization and export; this extension is the read
-    path, not an ETL/CDC/scheduler layer.
+    Scan, native ATTACH (read-only by default, with opt-in writes),
+    metadata/diagnostics, and pushdown explain for Firebird 3/4/5 -- DuckDB's
+    own SQL (CREATE TABLE AS, COPY ... TO PARQUET) handles materialization and
+    export; this extension is the data path, not an ETL/CDC/scheduler layer.
   </p>
   <p>
     <a href="LICENSE"><img alt="license MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
@@ -27,16 +27,17 @@
   </p>
 </div>
 
-`duckdb-firebird` is a DuckDB extension for read-only analytics on Firebird
-databases. It lets analysts keep Firebird as the transactional source of truth
+`duckdb-firebird` is a DuckDB extension for analytics on Firebird
+databases: read-only by default, with an opt-in write path. It lets analysts keep Firebird as the transactional source of truth
 and use DuckDB as the local OLAP engine for ad hoc analysis, materialized
 tables, Parquet exports, lakehouse-style caches, and BI serving through tools
 such as GizmoSQL.
 
 ## Principles
 
-- **Read-only by design** - optimized for analytics without mutating the OLTP
-  source.
+- **Read-only by default** - optimized for analytics without mutating the OLTP
+  source. Writing needs an ATTACH opened with `READ_WRITE` and runs the
+  Firebird SQL the caller wrote (`firebird_execute`).
 - **Push work to Firebird when safe** - projection, filters, paging, and
   PK-range partitioning reduce wire traffic.
 - **Keep DuckDB in charge of analytics** - joins, aggregations, Parquet/S3, and
@@ -463,6 +464,7 @@ src/
   firebird_query.cpp       SQL builder and pushdown
   firebird_scanner.cpp     table functions
   firebird_storage.cpp     native ATTACH catalog
+  firebird_execute.cpp     firebird_execute / firebird_clear_cache (writes)
   include/
 test/sql/                  sqllogictest coverage
 scripts/                   fixtures and smoke scripts

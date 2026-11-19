@@ -1,0 +1,89 @@
+# name: test/sql/firebird_session_reset.test
+# description: a pooled connection that ran caller SQL gets ALTER SESSION RESET (Firebird 4+)
+# group: [firebird]
+#
+# Needs scripts/fixture_rw.sql in the database named by FIREBIRD_RW_DB.
+# Each step runs alone, so the pool (LIFO) hands the same connection to the
+# next step. With the reset off, a context variable set by one call reaches
+# the next: that proves the reuse. With it on, the next call sees NULL on
+# Firebird 4+; Firebird 3 has no session reset.
+
+require firebird
+
+require-env FIREBIRD_RW_DB
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS ro (TYPE firebird);
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS rw (TYPE firebird, READ_WRITE);
+
+statement ok
+CREATE TABLE fb_major AS
+SELECT V AS major
+  FROM firebird_query('ro', 'SELECT CAST(SUBSTRING(RDB$GET_CONTEXT(''SYSTEM'', ''ENGINE_VERSION'') FROM 1 FOR 1) AS INTEGER) AS V FROM RDB$DATABASE');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG WHERE ID IN (-481, -482)');
+
+# --- Write connections ---------------------------------------------------------
+
+statement ok
+SET firebird_pool_session_reset = false;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'EXECUTE BLOCK AS DECLARE X INTEGER; BEGIN X = RDB$SET_CONTEXT(''USER_SESSION'', ''K48'', ''leak''); END');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (-481, RDB$GET_CONTEXT(''USER_SESSION'', ''K48''))');
+
+statement ok
+SET firebird_pool_session_reset = true;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'EXECUTE BLOCK AS DECLARE X INTEGER; BEGIN X = RDB$SET_CONTEXT(''USER_SESSION'', ''K48'', ''leak''); END');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (-482, RDB$GET_CONTEXT(''USER_SESSION'', ''K48''))');
+
+# -481: the reset was off, so the next write saw the variable (the same
+# connection, on every Firebird version).
+query T
+SELECT NOTE FROM firebird_query('ro', 'SELECT NOTE FROM RW_LOG WHERE ID = -481');
+----
+leak
+
+# -482: the connection was reset after the call that set it (Firebird 4+).
+query T
+SELECT l.NOTE IS NOT DISTINCT FROM CASE WHEN m.major >= 4 THEN NULL ELSE 'leak' END
+  FROM firebird_query('ro', 'SELECT NOTE FROM RW_LOG WHERE ID = -482') l, fb_major m;
+----
+true
+
+# --- firebird_query ----------------------------------------------------------------
+
+statement ok
+SET firebird_pool_session_reset = false;
+
+statement ok
+SELECT * FROM firebird_query('ro', 'SELECT RDB$SET_CONTEXT(''USER_SESSION'', ''K48Q'', ''leak'') AS R FROM RDB$DATABASE');
+
+query T
+SELECT * FROM firebird_query('ro', 'SELECT RDB$GET_CONTEXT(''USER_SESSION'', ''K48Q'') AS V FROM RDB$DATABASE');
+----
+leak
+
+statement ok
+SET firebird_pool_session_reset = true;
+
+statement ok
+SELECT * FROM firebird_query('ro', 'SELECT RDB$SET_CONTEXT(''USER_SESSION'', ''K48Q'', ''leak'') AS R FROM RDB$DATABASE');
+
+query T
+SELECT V IS NOT DISTINCT FROM CASE WHEN m.major >= 4 THEN NULL ELSE 'leak' END
+  FROM firebird_query('ro', 'SELECT RDB$GET_CONTEXT(''USER_SESSION'', ''K48Q'') AS V FROM RDB$DATABASE'), fb_major m;
+----
+true
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG WHERE ID IN (-481, -482)');

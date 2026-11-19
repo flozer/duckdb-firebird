@@ -16,7 +16,7 @@ FROM duckdb_functions()
 WHERE function_type = 'table'
   AND function_name LIKE 'firebird%'
 ----
-20
+22
 
 # Every function carries description, examples, and categories
 query I

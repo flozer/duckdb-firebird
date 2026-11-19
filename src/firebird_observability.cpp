@@ -122,6 +122,38 @@ void FirebirdObservabilityState::SetErrorIfEmpty(const std::string &msg) {
     }
 }
 
+void FirebirdObservabilityState::SetWriteResult(const std::string &write_mode, int64_t rows_written,
+                                                int64_t rows_affected) {
+    std::lock_guard<std::mutex> g(lock_);
+    last_.write_mode = write_mode;
+    last_.rows_written = rows_written;
+    last_.rows_affected = rows_affected;
+    if (!log_.empty()) {
+        log_.back().write_mode = write_mode;
+        log_.back().rows_written = rows_written;
+        log_.back().rows_affected = rows_affected;
+    }
+}
+
+void RecordFirebirdWrite(ClientContext &ctx, const std::string &sql, const std::string &operation,
+                         const std::string &table_name, int64_t connection_id) {
+    FirebirdQueryTelemetry rec;
+    rec.remote_sql = MakeTelemetrySafeUtf8(sql);
+    rec.table_name = table_name;
+    rec.operation = operation;
+    rec.write_mode = "row";
+    rec.rows_written = 0;
+    rec.partitions = 1;
+    rec.connection_id = connection_id;
+    rec.captured_at = Timestamp::GetCurrentTimestamp();
+    int64_t log_size = 0;
+    Value v;
+    if (ctx.TryGetCurrentSetting("firebird_query_log_size", v) && !v.IsNull()) {
+        log_size = v.GetValue<int64_t>();
+    }
+    GetObservabilityState(ctx)->RecordQuery(rec, log_size);
+}
+
 shared_ptr<FirebirdObservabilityState> GetObservabilityState(ClientContext &ctx) {
     return ctx.registered_state->GetOrCreate<FirebirdObservabilityState>(
         FirebirdObservabilityState::KEY);
@@ -366,6 +398,11 @@ std::string RedactBindValue(const Value &v) {
 //                                   XSQLDA width + BLOB segments)
 //   snapshot_mode       VARCHAR   - 'serial' | 'shared' | 'independent' | 'transaction'
 //   partition_method    VARCHAR   - 'none' | 'pk' | 'dbkey'
+//   operation           VARCHAR   - 'scan' | 'query' | 'execute' | 'insert'
+//   write_mode          VARCHAR   - writes: 'row' | 'batch'; NULL for reads
+//   rows_written        BIGINT    - writes: executions; NULL for reads
+//   rows_affected       BIGINT    - writes: Firebird's record counts; NULL
+//                                   for reads or when not counted
 
 // Forward declarations - shared by firebird_last_query() and
 // firebird_query_log() below.
@@ -453,6 +490,11 @@ static void EmitTelemetryRow(DataChunk &output, idx_t row,
     // Additive tail column (shared snapshot for partitioned scans).
     output.data[19].SetValue(row, Value(t.snapshot_mode));
     output.data[20].SetValue(row, Value(t.partition_method));
+    // Additive tail columns: what the record is, and the write counts.
+    output.data[21].SetValue(row, Value(t.operation));
+    output.data[22].SetValue(row, t.write_mode.empty() ? Value(LogicalType::VARCHAR) : Value(t.write_mode));
+    output.data[23].SetValue(row, t.rows_written < 0 ? Value(LogicalType::BIGINT) : Value::BIGINT(t.rows_written));
+    output.data[24].SetValue(row, t.rows_affected < 0 ? Value(LogicalType::BIGINT) : Value::BIGINT(t.rows_affected));
 }
 
 // Returns the canonical (names, types) the two observability table
@@ -486,6 +528,10 @@ static void TelemetrySchema(vector<string> &names,
         "bytes_read_estimate",
         "snapshot_mode",
         "partition_method",
+        "operation",
+        "write_mode",
+        "rows_written",
+        "rows_affected",
     };
     types = {
         LogicalType::VARCHAR,
@@ -509,6 +555,10 @@ static void TelemetrySchema(vector<string> &names,
         LogicalType::BIGINT,
         LogicalType::VARCHAR,
         LogicalType::VARCHAR,
+        LogicalType::VARCHAR,
+        LogicalType::VARCHAR,
+        LogicalType::BIGINT,
+        LogicalType::BIGINT,
     };
 }
 

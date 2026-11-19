@@ -1,0 +1,110 @@
+# name: test/sql/firebird_least_privilege.test
+# description: The users and grants of the usage guide ("Firebird users and
+#              grants"): a read-only user for a plain ATTACH, and a
+#              separate user, with only the grants its writes need, for an
+#              ATTACH opened with READ_WRITE. Firebird enforces the grants;
+#              the extension passes its errors through.
+# group: [firebird]
+#
+# Needs scripts/fixture_rw.sql in the database named by FIREBIRD_RW_DB, as a
+# user that can create users (SYSDBA in CI). Uses RW_LOG row 611 only.
+
+require firebird
+
+require-env FIREBIRD_RW_DB
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS rw (TYPE firebird, READ_WRITE);
+
+# Leftovers of an earlier run. (User DDL runs at commit, so the block can't
+# catch a missing user: it checks first.)
+statement ok
+SELECT * FROM firebird_execute('rw', 'EXECUTE BLOCK AS BEGIN IF (EXISTS (SELECT 1 FROM SEC$USERS WHERE SEC$USER_NAME = ''FBX_LP_R'')) THEN EXECUTE STATEMENT ''DROP USER FBX_LP_R''; END');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'EXECUTE BLOCK AS BEGIN IF (EXISTS (SELECT 1 FROM SEC$USERS WHERE SEC$USER_NAME = ''FBX_LP_W'')) THEN EXECUTE STATEMENT ''DROP USER FBX_LP_W''; END');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG WHERE ID = 611');
+
+# --- The users and grants, in the guide's forms ---------------------------------
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'CREATE USER FBX_LP_R PASSWORD ''lpr32x''');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'GRANT SELECT ON RW_LOG TO USER FBX_LP_R');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'CREATE USER FBX_LP_W PASSWORD ''lpw32x''');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'GRANT SELECT, INSERT ON RW_LOG TO USER FBX_LP_W');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'GRANT UPDATE (NOTE) ON RW_LOG TO USER FBX_LP_W');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'GRANT EXECUTE ON PROCEDURE SP_WRITE TO USER FBX_LP_W');
+
+# --- The read-only user: reads what it was granted, nothing else ------------------
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS lp_r (TYPE firebird, user 'FBX_LP_R', password 'lpr32x');
+
+statement ok
+SELECT count(*) FROM lp_r.main.RW_LOG;
+
+statement error
+SELECT * FROM firebird_query('lp_r', 'SELECT count(*) FROM RW_TYPES');
+----
+no permission for SELECT access
+
+# --- The write user, on its own READ_WRITE ATTACH --------------------------------
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS lp_w (TYPE firebird, READ_WRITE, user 'FBX_LP_W', password 'lpw32x');
+
+query II
+SELECT * FROM firebird_execute('lp_w', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (611, ''lp'')');
+----
+1	1
+
+query II
+SELECT * FROM firebird_execute('lp_w', 'UPDATE RW_LOG SET NOTE = ''lp 2'' WHERE ID = 611');
+----
+1	1
+
+# Not granted: DELETE, and UPDATE of another column.
+statement error
+SELECT * FROM firebird_execute('lp_w', 'DELETE FROM RW_LOG WHERE ID = 611');
+----
+no permission for DELETE access
+
+statement error
+SELECT * FROM firebird_execute('lp_w', 'UPDATE RW_LOG SET ID = 612 WHERE ID = 611');
+----
+no permission for UPDATE access
+
+# The read-only ATTACH sees the committed write.
+query T
+SELECT NOTE FROM lp_r.main.RW_LOG WHERE ID = 611;
+----
+lp 2
+
+# --- Clean up --------------------------------------------------------------------
+
+statement ok
+DETACH lp_r;
+
+statement ok
+DETACH lp_w;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG WHERE ID = 611');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DROP USER FBX_LP_R');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DROP USER FBX_LP_W');
