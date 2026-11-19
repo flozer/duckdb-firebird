@@ -118,8 +118,8 @@ LIMIT 10;
 ```
 
 O catalogo Firebird e read-only, a menos que o ATTACH use a opcao
-`READ_WRITE` do DuckDB, que permite escritas via `firebird_execute` (veja o
-manual de funcoes). Crie tabelas analiticas no catalogo DuckDB local.
+`READ_WRITE` do DuckDB, que permite escritas via `firebird_execute` e
+`INSERT INTO` (veja o manual de funcoes). Crie tabelas analiticas no catalogo DuckDB local.
 
 ## 2. Instalacao e carregamento
 

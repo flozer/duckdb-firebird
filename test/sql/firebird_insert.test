@@ -1,0 +1,397 @@
+# name: test/sql/firebird_insert.test
+# description: INSERT INTO <firebird ATTACH>.main.T (READ_WRITE)
+# group: [firebird]
+#
+# Needs scripts/fixture_rw.sql in the database named by FIREBIRD_RW_DB.
+
+require firebird
+
+require-env FIREBIRD_RW_DB
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS ro (TYPE firebird);
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS rw (TYPE firebird, READ_WRITE);
+
+statement ok
+SET firebird_write_lock_timeout = 1;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM CUSTOMER');
+
+# --- The opt-in ---------------------------------------------------------------
+
+statement error
+INSERT INTO ro.main.CUSTOMER VALUES (1, 'a', 'b');
+----
+Attach it with (TYPE firebird, READ_WRITE)
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS rdo (TYPE firebird, READ_ONLY);
+
+statement error
+INSERT INTO rdo.main.CUSTOMER VALUES (1, 'a', 'b');
+----
+ATTACH 'rdo' is READ_ONLY
+
+# --- From a Firebird scan of another table: every type family -----------------
+
+query I
+INSERT INTO rw.main.RW_TARGET SELECT * FROM rw.main.RW_TYPES;
+----
+4
+
+query I
+SELECT count(*) FROM (SELECT * FROM rw.main.RW_TARGET EXCEPT ALL SELECT * FROM rw.main.RW_TYPES);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT * FROM rw.main.RW_TYPES EXCEPT ALL SELECT * FROM rw.main.RW_TARGET);
+----
+0
+
+# --- From a DuckDB table, and VALUES ------------------------------------------------
+
+statement ok
+CREATE TABLE src AS SELECT * FROM (VALUES (1, 'Ana', 'Recife'), (2, NULL, 'Natal'), (3, 'Cy', NULL)) t(id, name, city);
+
+query I
+INSERT INTO rw.main.CUSTOMER SELECT * FROM src;
+----
+3
+
+query I
+INSERT INTO rw.main.CUSTOMER VALUES (4, 'Di', 'Olinda'), (5, 'Ed', 'Caruaru');
+----
+2
+
+query III
+SELECT ID, NAME, CITY FROM ro.main.CUSTOMER ORDER BY ID;
+----
+1	Ana	Recife
+2	NULL	Natal
+3	Cy	NULL
+4	Di	Olinda
+5	Ed	Caruaru
+
+# --- A column list: the other columns are left to Firebird -------------------------
+
+query I
+INSERT INTO rw.main.CUSTOMER (NAME, ID) VALUES ('Fa', 6);
+----
+1
+
+query III
+SELECT ID, NAME, CITY FROM ro.main.CUSTOMER WHERE ID = 6;
+----
+6	Fa	NULL
+
+query I
+INSERT INTO rw.main.RW_TARGET (ID, C_NUM9_3, C_VARCHAR_NONE) VALUES (10, 1.5, 'Ação');
+----
+1
+
+query III
+SELECT C_NUM9_3, C_VARCHAR_NONE, C_INTEGER FROM rw.main.RW_TARGET WHERE ID = 10;
+----
+1.500	Ação	NULL
+
+# Omitted columns get Firebird's defaults, not NULL (DuckDB 2.0 hands the
+# INSERT every column; only the named ones are sent).
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_DEFAULTS');
+
+query I
+INSERT INTO rw.main.RW_DEFAULTS (ID) VALUES (1);
+----
+1
+
+query I
+INSERT INTO rw.main.RW_DEFAULTS (QTY, ID) VALUES (9, 2);
+----
+1
+
+# DEFAULT inside VALUES is DuckDB's default, NULL: the ATTACH doesn't
+# declare Firebird's defaults (documented).
+query I
+INSERT INTO rw.main.RW_DEFAULTS (ID, NOTE) VALUES (3, DEFAULT);
+----
+1
+
+query III
+SELECT ID, NOTE, QTY FROM ro.main.RW_DEFAULTS ORDER BY ID;
+----
+1	dflt	7
+2	dflt	9
+3	NULL	7
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_DEFAULTS');
+
+# --- Firebird's constraints and errors; everything rolls back ----------------------
+
+statement error
+INSERT INTO rw.main.CUSTOMER (NAME) VALUES ('no id');
+----
+row 1 failed
+
+statement error
+INSERT INTO rw.main.CUSTOMER VALUES (7, 'ok', NULL), (1, 'duplicate', NULL);
+----
+row 2 failed
+
+query I
+SELECT count(*) FROM ro.main.CUSTOMER WHERE ID = 7;
+----
+0
+
+# --- Refused forms -------------------------------------------------------------------
+
+# Firebird refuses a COMPUTED BY column at prepare; the error is on the
+# INSERT's telemetry record too.
+statement error
+INSERT INTO rw.main.RW_COMPUTED VALUES (1, 2);
+----
+INSERT into Firebird table "RW_COMPUTED"
+
+query II
+SELECT operation, error_message <> '' FROM firebird_last_query();
+----
+insert	true
+
+query I
+INSERT INTO rw.main.RW_COMPUTED (ID) VALUES (1);
+----
+1
+
+query II
+SELECT ID, TWICE FROM ro.main.RW_COMPUTED;
+----
+1	2
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_COMPUTED');
+
+# COPY ... FROM a file inserts through the same path.
+statement ok
+COPY (SELECT 50 AS ID, 'copied' AS NAME, 'x' AS CITY) TO '__TEST_DIR__/fb_insert_copy.csv' (HEADER);
+
+statement ok
+COPY rw.main.CUSTOMER FROM '__TEST_DIR__/fb_insert_copy.csv' (HEADER);
+
+query III
+SELECT ID, NAME, CITY FROM ro.main.CUSTOMER WHERE ID = 50;
+----
+50	copied	x
+
+statement error
+INSERT INTO rw.main.CUSTOMER VALUES (8, 'r', NULL) RETURNING *;
+----
+RETURNING is not supported
+
+statement error
+INSERT INTO rw.main.CUSTOMER DEFAULT VALUES;
+----
+DEFAULT VALUES is not supported
+
+# (DuckDB's binder refuses it first: the ATTACH declares no unique keys)
+statement error
+INSERT INTO rw.main.CUSTOMER VALUES (8, 'c', NULL) ON CONFLICT DO NOTHING;
+----
+ON CONFLICT
+
+# --- In a transaction: one Firebird transaction, committed with DuckDB's ---------------
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO rw.main.CUSTOMER VALUES (20, 'tx', NULL);
+
+query I con2
+SELECT count(*) FROM ro.main.CUSTOMER WHERE ID = 20;
+----
+0
+
+statement ok
+COMMIT;
+
+query I con2
+SELECT count(*) FROM ro.main.CUSTOMER WHERE ID = 20;
+----
+1
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO rw.main.CUSTOMER VALUES (21, 'rolled back', NULL);
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM ro.main.CUSTOMER WHERE ID = 21;
+----
+0
+
+# --- A larger insert ---------------------------------------------------------------
+
+query I
+INSERT INTO rw.main.RW_LOG SELECT i, 'n' || i FROM range(20000) t(i);
+----
+20000
+
+query IIIII
+SELECT operation, table_name, write_mode, rows_written, remote_sql FROM firebird_last_query();
+----
+insert	RW_LOG	row	20000	INSERT INTO "RW_LOG" ("ID", "NOTE") VALUES (?, ?)
+
+query II
+SELECT firebird_time_us > 0, total_time_us >= firebird_time_us FROM firebird_last_query();
+----
+true	true
+
+# A Firebird scan as the source records itself while the INSERT runs; the
+# INSERT records itself when it ends, after it, with its own counts.
+statement ok
+SET firebird_query_log_size = 20;
+
+query I
+INSERT INTO rw.main.RW_TARGET (ID) SELECT ID + 500000 FROM ro.main.RW_LOG WHERE ID < 5;
+----
+5
+
+query IIII
+SELECT operation, table_name, rows_written, error_message = '' FROM firebird_query_log() LIMIT 1;
+----
+insert	RW_TARGET	5	true
+
+query I
+SELECT count(*) > 0 FROM firebird_query_log() WHERE operation = 'scan' AND table_name = 'RW_LOG';
+----
+true
+
+# A failing row: the error is on the INSERT's record, not on the scan's.
+statement error
+INSERT INTO rw.main.CUSTOMER (ID, NAME) SELECT 30 + ID % 2, 'dup' FROM ro.main.RW_LOG WHERE ID < 4 ORDER BY ID;
+----
+row 3 failed
+
+query III
+SELECT operation, table_name, error_message LIKE '%row 3 failed%' FROM firebird_query_log() LIMIT 1;
+----
+insert	CUSTOMER	true
+
+query I
+SELECT count(*) FROM firebird_query_log() WHERE operation = 'scan' AND error_message <> '';
+----
+0
+
+statement ok
+SET firebird_query_log_size = 0;
+
+query II
+SELECT count(*), sum(ID) FROM ro.main.RW_LOG;
+----
+20000	199990000
+
+# --- An INSERT fed by firebird_execute on the same ATTACH ---------------------------
+# Both share the transaction's write connection. The INSERT keeps its
+# statement prepared on it, so the call doesn't commit early on DuckDB 2.0
+# (an autocommit call must otherwise be the whole statement): both rows are
+# committed together, or neither.
+
+query I
+INSERT INTO rw.main.RW_TARGET (ID)
+SELECT executions + 600000 FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (-62, ''pinned'')');
+----
+1
+
+query II
+SELECT (SELECT count(*) FROM firebird_query('ro', 'SELECT ID FROM RW_TARGET WHERE ID = 600001')),
+       (SELECT count(*) FROM firebird_query('ro', 'SELECT ID FROM RW_LOG WHERE ID = -62'));
+----
+1	1
+
+# A failure between the call and the INSERT: neither write is kept.
+statement error
+INSERT INTO rw.main.RW_TARGET (ID)
+SELECT CASE WHEN executions = 1 THEN error('after the write') ELSE 600002 END
+  FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (-63, ''pinned fail'')');
+----
+after the write
+
+# With an ORDER BY in between, DuckDB 2.0 may run the call before the INSERT
+# starts: in autocommit the call is then refused. Either way, a failure
+# after it keeps nothing.
+statement error
+INSERT INTO rw.main.RW_TARGET (ID)
+SELECT CASE WHEN executions = 1 THEN error('after the sort') ELSE 600003 END
+  FROM (SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (-64, ''sorted fail'')') ORDER BY 1);
+----
+<REGEX>:.*(after the sort|must be the whole statement).*
+
+query II
+SELECT (SELECT count(*) FROM firebird_query('ro', 'SELECT ID FROM RW_TARGET WHERE ID IN (600002, 600003)')),
+       (SELECT count(*) FROM firebird_query('ro', 'SELECT ID FROM RW_LOG WHERE ID IN (-63, -64)'));
+----
+0	0
+
+# commit_every would commit the INSERT's rows mid-statement: refused there.
+statement error
+INSERT INTO rw.main.RW_TARGET (ID)
+SELECT executions + 700000 FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (?, ?)',
+    source := 'SELECT -70, ''x''', commit_every := 1);
+----
+commit_every can't run inside an INSERT into the same ATTACH
+
+# --- The INSERT's statement goes before its connection -------------------------------
+# With the pool disabled a released write connection is closed at once; the
+# INSERT's prepared statement is freed first, also when a row fails.
+
+statement ok
+SET firebird_pool_enabled = false;
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS rw_nopool (TYPE firebird, READ_WRITE);
+
+query I
+INSERT INTO rw_nopool.main.RW_LOG VALUES (-81, 'no pool'), (-82, 'no pool');
+----
+2
+
+statement error
+INSERT INTO rw_nopool.main.CUSTOMER (ID, NAME) VALUES (81, 'a'), (81, 'b');
+----
+row 2 failed
+
+query I
+INSERT INTO rw_nopool.main.RW_LOG VALUES (-83, 'no pool');
+----
+1
+
+query I
+SELECT count(*) FROM firebird_query('ro', 'SELECT ID FROM RW_LOG WHERE ID IN (-81, -82, -83)');
+----
+3
+
+statement ok
+DETACH rw_nopool;
+
+statement ok
+SET firebird_pool_enabled = true;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM CUSTOMER');

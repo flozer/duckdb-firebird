@@ -48,6 +48,7 @@ cases = {
     9001: "SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (9001, ''fetchone'')')",
     9002: "SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (?, ?)', "
           "source := 'SELECT 9002, ''fetchone''')",
+    9003: "INSERT INTO rw.main.RW_LOG VALUES (9003, 'fetchone')",
 }
 for marker, sql in cases.items():
     con = connect()

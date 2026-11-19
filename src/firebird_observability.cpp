@@ -98,6 +98,14 @@ void FirebirdObservabilityState::UpdateTotalTimeUs() {
     }
 }
 
+void FirebirdObservabilityState::SetTotalTimeUs(int64_t us) {
+    std::lock_guard<std::mutex> g(lock_);
+    last_.total_time_us = us;
+    if (!log_.empty()) {
+        log_.back().total_time_us = us;
+    }
+}
+
 void FirebirdObservabilityState::SetError(const std::string &msg) {
     auto sanitized = SanitizeErrorMessage(msg);
     std::lock_guard<std::mutex> g(lock_);

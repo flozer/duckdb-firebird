@@ -123,6 +123,9 @@ public:
     void AddBytes(int64_t bytes);
     void AddFirebirdTimeUs(int64_t us);
     void UpdateTotalTimeUs();
+    // For a record made after the fact (an INSERT records itself when it
+    // ends): the wall time it measured itself.
+    void SetTotalTimeUs(int64_t us);
     void SetError(const std::string &msg);
     // For an interrupt: records msg only when the query has no error yet.
     // DuckDB interrupts a query itself when one of its pipelines fails

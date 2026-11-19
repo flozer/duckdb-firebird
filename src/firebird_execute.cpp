@@ -463,8 +463,12 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
     // In autocommit the call commits its write before returning its row
     // (see below), so nothing after it in the same statement could roll it
     // back. Only a call that is the whole statement can do that and stay
-    // all or nothing; anything else is refused before it writes.
-    if (context.transaction.IsAutoCommit() && !bind.whole_statement) {
+    // all or nothing; anything else is refused before it writes. The one
+    // exception: an INSERT into the same ATTACH that the call feeds directly
+    // has the write connection pinned, so the call doesn't commit, and the
+    // write commits with the INSERT's statement.
+    if (context.transaction.IsAutoCommit() && !bind.whole_statement &&
+        !FirebirdWritesPinned(context, *bind.attach.catalog)) {
         throw InvalidInputException(
             "%s: on DuckDB 2.0, in autocommit, firebird_execute must be the whole statement "
             "(SELECT * FROM firebird_execute(...)): it commits as soon as it runs, so the rest of the "
@@ -479,6 +483,13 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
     if (bind.commit_every > 0 && !context.transaction.IsAutoCommit()) {
         throw InvalidInputException("%s: commit_every needs autocommit; inside BEGIN ... COMMIT its commits would "
                                     "also commit the transaction's earlier writes",
+                                    kFunctionName);
+    }
+    // Inside an INSERT into the same ATTACH (INSERT ... SELECT ... FROM
+    // firebird_execute(...)), the INSERT's rows share the write transaction.
+    if (bind.commit_every > 0 && FirebirdWritesPinned(context, *bind.attach.catalog)) {
+        throw InvalidInputException("%s: commit_every can't run inside an INSERT into the same ATTACH: its "
+                                    "commits would also commit the INSERT's rows",
                                     kFunctionName);
     }
 

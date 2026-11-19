@@ -445,6 +445,7 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_session_reset.test
           ./build/release/test/unittest test/sql/firebird_execute_source.test
           ./build/release/test/unittest test/sql/firebird_execute_source_fb4.test
+          ./build/release/test/unittest test/sql/firebird_insert.test
 
       - name: Writes commit when a client reads one row and closes (Python)
         # sqllogictest reads every result fully; this needs a real client
@@ -563,7 +564,7 @@ jobs:
           # Firebird 4+ server returns as INT128, which a Firebird 3
           # client can't describe ("Data type unknown").
           export FIREBIRD_FB3_CLIENT_RW_DB="$FIREBIRD_RW_DB"
-          for t in firebird_fb3_client firebird_execute firebird_execute_source firebird_bind_params firebird_ddl_cache firebird_query; do
+          for t in firebird_fb3_client firebird_execute firebird_execute_source firebird_bind_params firebird_ddl_cache firebird_insert firebird_query; do
             out=$(./build/release/test/unittest "test/sql/$t.test" 2>&1) || { echo "$out"; exit 1; }
             echo "$t: $(echo "$out" | tail -n 1)"
             if echo "$out" | grep -q 'All tests were skipped'; then

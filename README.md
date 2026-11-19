@@ -36,8 +36,8 @@ such as GizmoSQL.
 ## Principles
 
 - **Read-only by default** - optimized for analytics without mutating the OLTP
-  source. Writing needs an ATTACH opened with `READ_WRITE` and runs the
-  Firebird SQL the caller wrote (`firebird_execute`).
+  source. Writing needs an ATTACH opened with `READ_WRITE`: the Firebird
+  SQL the caller wrote (`firebird_execute`), or `INSERT INTO fb.main.T`.
 - **Push work to Firebird when safe** - projection, filters, paging, and
   PK-range partitioning reduce wire traffic.
 - **Keep DuckDB in charge of analytics** - joins, aggregations, Parquet/S3, and
@@ -465,6 +465,7 @@ src/
   firebird_scanner.cpp     table functions
   firebird_storage.cpp     native ATTACH catalog
   firebird_execute.cpp     firebird_execute / firebird_clear_cache (writes)
+  firebird_insert.cpp      INSERT INTO an ATTACH table
   include/
 test/sql/                  sqllogictest coverage
 scripts/                   fixtures and smoke scripts

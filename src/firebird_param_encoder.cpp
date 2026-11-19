@@ -505,4 +505,10 @@ void FirebirdParamEncoder::Encode(DataChunk &chunk, idx_t row) {
     }
 }
 
+void FirebirdParamEncoder::Encode(DataChunk &chunk, idx_t row, const vector<idx_t> &columns) {
+    for (idx_t i = 0; i < slots_.size(); ++i) {
+        EncodeValue(i, slots_[i], chunk.GetValue(columns[i], row));
+    }
+}
+
 } // namespace duckdb

@@ -39,7 +39,7 @@ statement ok
 SELECT * FROM firebird_execute('rw', 'CREATE TABLE RW_DDL_A (ID INTEGER NOT NULL, NAME VARCHAR(10))');
 
 query I
-SELECT rows_affected FROM firebird_execute('rw', 'INSERT INTO RW_DDL_A SELECT 1, ''one'' FROM RDB$DATABASE UNION ALL SELECT 2, ''two'' FROM RDB$DATABASE');
+INSERT INTO rw.main.RW_DDL_A VALUES (1, 'one'), (2, 'two');
 ----
 2
 

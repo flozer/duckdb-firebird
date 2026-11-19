@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <mutex>
 
 #include "duckdb.hpp"
@@ -36,8 +37,31 @@ FirebirdConnection &GetFirebirdWriteConnection(ClientContext &context, Catalog &
 // connection would not see the first call's rows nor share its locks).
 std::unique_lock<std::mutex> LockFirebirdWrites(ClientContext &context, Catalog &catalog);
 
+// Firebird objects an operator keeps on the write connection across its
+// steps (an INSERT's prepared statement): the write transaction releases
+// them before the connection goes back to the pool, unless the operator did.
+class FirebirdWriteResources {
+public:
+    virtual ~FirebirdWriteResources() = default;
+    virtual void ReleaseFirebird() = 0;
+};
+
+// The transaction keeps a weak reference: an operator gone first is skipped.
+void HoldFirebirdWriteResources(ClientContext &context, Catalog &catalog,
+                                const std::shared_ptr<FirebirdWriteResources> &resources);
+
+// Whether an INSERT has the write connection pinned (see PinFirebirdWrites).
+bool FirebirdWritesPinned(ClientContext &context, Catalog &catalog);
+
+// An INSERT keeps a statement prepared on the write connection from its
+// first step to its last. While one is open, CommitFirebirdWriteNow does
+// nothing, and the write commits with the DuckDB transaction.
+void PinFirebirdWrites(ClientContext &context, Catalog &catalog);
+void UnpinFirebirdWrites(ClientContext &context, Catalog &catalog);
+
 // Commits the current DuckDB transaction's Firebird write transaction on
-// this ATTACH now, if one was started (a later write starts a new one).
+// this ATTACH now, if one was started (a later write starts a new one), and
+// unless an INSERT has it pinned (see PinFirebirdWrites).
 void CommitFirebirdWriteNow(ClientContext &context, Catalog &catalog);
 
 // firebird_execute ran a DDL statement in the current DuckDB transaction:

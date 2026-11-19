@@ -269,6 +269,14 @@ its read-only transaction.
   converts it to the declared type. Every execution resets type, length,
   data pointer and NULL indicator of every parameter. The scan's
   pushed-down filter values go through the same encoder.
+- **`INSERT INTO fb.main.T`** (`firebird_insert.cpp`):
+  `FirebirdCatalog::PlanInsert` builds a sink (`FIREBIRD_INSERT`) that
+  prepares `INSERT INTO "T" ("C1", ...) VALUES (?, ...)` once, with the
+  columns the INSERT names, and runs it once per row through the
+  parameter encoder. DuckDB 1.5 gives the column map in
+  `LogicalInsert::column_index_map`; DuckDB 2.0 passes every column, and
+  the named ones are those whose `bound_defaults` entry the binder left
+  in place.
 - **A result read halfway keeps the write.** DuckDB commits a streamed
   result only once it is fully read. On DuckDB 1.5 the bind sets
   `QueryResultOutputType::FORCE_MATERIALIZED`; DuckDB 2.0 has no such

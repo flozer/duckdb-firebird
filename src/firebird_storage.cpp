@@ -26,6 +26,7 @@
 
 #include "firebird_storage.hpp"
 #include "firebird_query_function.hpp"
+#include "firebird_insert.hpp"
 #include "firebird_dbt_sources.hpp"
 #include "firebird_scanner.hpp"
 #include "firebird_cancel.hpp"
@@ -858,26 +859,28 @@ public:
             "DROP SCHEMA is not supported on a Firebird-attached catalog.");
     }
 
-    // -- planner hooks: read-only → all throw --------------------------------
+    // -- planner hooks: INSERT writes (READ_WRITE); the others throw ---------
     PhysicalOperator &PlanCreateTableAs(ClientContext &, PhysicalPlanGenerator &,
                                         LogicalCreateTable &, PhysicalOperator &) override {
         throw NotImplementedException("CTAS not supported on Firebird catalog");
     }
-    PhysicalOperator &PlanInsert(ClientContext &, PhysicalPlanGenerator &,
-                                 LogicalInsert &, optional_ptr<PhysicalOperator>) override {
-        throw NotImplementedException("INSERT not supported on Firebird catalog");
+    PhysicalOperator &PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner,
+                                 LogicalInsert &op, optional_ptr<PhysicalOperator> plan) override {
+        return PlanFirebirdInsert(context, planner, op, plan, *this, write_enabled, none_encoding_);
     }
     PhysicalOperator &PlanDelete(ClientContext &, PhysicalPlanGenerator &,
                                  LogicalDelete &, PhysicalOperator &) override {
-        throw NotImplementedException("DELETE not supported on Firebird catalog");
+        throw NotImplementedException("DELETE not supported on Firebird catalog; use firebird_execute()");
     }
     PhysicalOperator &PlanUpdate(ClientContext &, PhysicalPlanGenerator &,
                                  LogicalUpdate &, PhysicalOperator &) override {
-        throw NotImplementedException("UPDATE not supported on Firebird catalog");
+        throw NotImplementedException("UPDATE not supported on Firebird catalog; use firebird_execute()");
     }
     PhysicalOperator &PlanMergeInto(ClientContext &, PhysicalPlanGenerator &,
                                     LogicalMergeInto &, PhysicalOperator &) override {
-        throw NotImplementedException("MERGE not supported on Firebird catalog");
+        throw NotImplementedException("MERGE (and ON CONFLICT, INSERT OR REPLACE) not supported on Firebird "
+                                      "catalog; for an upsert use firebird_execute() with UPDATE OR INSERT ... "
+                                      "MATCHING");
     }
     unique_ptr<LogicalOperator> BindCreateIndex(Binder &, CreateStatement &,
                                                 TableCatalogEntry &,
@@ -992,9 +995,21 @@ public:
     // fails either is discarded; a failed commit throws.
     void EndWrite(bool commit) {
         std::unique_ptr<FirebirdConnection> conn;
+        std::vector<std::weak_ptr<FirebirdWriteResources>> resources;
         {
             std::lock_guard<std::mutex> g(write_lock_);
             conn = std::move(write_conn_);
+            resources.swap(write_resources_);
+        }
+        // Statements prepared on the connection go first: a statement must
+        // not outlive its connection, and Release may close it.
+        for (auto &weak : resources) {
+            if (auto held = weak.lock()) {
+                try {
+                    held->ReleaseFirebird();
+                } catch (...) {
+                }
+            }
         }
         if (!conn) {
             return;
@@ -1029,6 +1044,23 @@ public:
     // LockFirebirdWrites).
     std::mutex &WriteUseLock() {
         return write_use_lock_;
+    }
+
+    // Open INSERTs with a statement on the write connection (see
+    // PinFirebirdWrites).
+    void PinWrites(int64_t delta) {
+        std::lock_guard<std::mutex> g(write_lock_);
+        write_pins_ += delta;
+    }
+    bool WritesPinned() {
+        std::lock_guard<std::mutex> g(write_lock_);
+        return write_pins_ > 0;
+    }
+
+    // See HoldFirebirdWriteResources.
+    void HoldResources(const std::shared_ptr<FirebirdWriteResources> &resources) {
+        std::lock_guard<std::mutex> g(write_lock_);
+        write_resources_.push_back(resources);
     }
 
 
@@ -1246,6 +1278,8 @@ private:
     bool reset_session_ = true;  // SET firebird_pool_session_reset, when the transaction started
     std::mutex write_lock_;
     std::mutex write_use_lock_;
+    int64_t write_pins_ = 0;
+    std::vector<std::weak_ptr<FirebirdWriteResources>> write_resources_;
     std::unique_ptr<FirebirdConnection> write_conn_;
     std::string catalog_name_;
     std::shared_ptr<std::atomic<bool>> no_snapshot_numbers_;
@@ -1563,8 +1597,32 @@ std::unique_lock<std::mutex> LockFirebirdWrites(ClientContext &context, Catalog 
     return std::unique_lock<std::mutex>(tx.WriteUseLock());
 }
 
+void HoldFirebirdWriteResources(ClientContext &context, Catalog &catalog,
+                                const std::shared_ptr<FirebirdWriteResources> &resources) {
+    Transaction::Get(context, catalog).Cast<FirebirdTransaction>().HoldResources(resources);
+}
+
+bool FirebirdWritesPinned(ClientContext &context, Catalog &catalog) {
+    return Transaction::Get(context, catalog).Cast<FirebirdTransaction>().WritesPinned();
+}
+
+void PinFirebirdWrites(ClientContext &context, Catalog &catalog) {
+    Transaction::Get(context, catalog).Cast<FirebirdTransaction>().PinWrites(1);
+}
+
+void UnpinFirebirdWrites(ClientContext &context, Catalog &catalog) {
+    Transaction::Get(context, catalog).Cast<FirebirdTransaction>().PinWrites(-1);
+}
+
 void CommitFirebirdWriteNow(ClientContext &context, Catalog &catalog) {
-    Transaction::Get(context, catalog).Cast<FirebirdTransaction>().EndWrite(true);
+    auto &tx = Transaction::Get(context, catalog).Cast<FirebirdTransaction>();
+    // An INSERT in this statement (fed by this firebird_execute) still has
+    // its statement prepared on the connection: the commit waits for the
+    // DuckDB transaction.
+    if (tx.WritesPinned()) {
+        return;
+    }
+    tx.EndWrite(true);
 }
 
 void NoteFirebirdDdl(ClientContext &context, Catalog &catalog) {
