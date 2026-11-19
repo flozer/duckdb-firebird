@@ -770,7 +770,9 @@ public:
 
     bool InMemory() override { return false; }
 
-    string GetDBPath() override { return conn_info_.database; }
+    string GetDBPath() override {
+        return RedactConnectionSecrets(conn_info_.database, conn_info_.password);
+    }
 
     DatabaseSize GetDatabaseSize(ClientContext & /*ctx*/) override {
         // We could surface MON$RECORD_STATS / RDB$PAGES totals here, but

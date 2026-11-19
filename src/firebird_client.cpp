@@ -1,4 +1,5 @@
 #include "firebird_client.hpp"
+#include "firebird_observability.hpp"
 #include "firebird_client_loader.hpp"
 
 #include <cctype>
@@ -154,10 +155,34 @@ FirebirdConnectionInfo FirebirdConnectionInfo::Parse(const std::string &conn_str
         return info;
     }
 
-    // Key=value form (semicolon separated).
-    if (conn_str.find('=') != std::string::npos &&
-        conn_str.find(';') != std::string::npos) {
-        std::stringstream ss(conn_str);
+    // Key=value form (semicolon separated). The space-separated spelling
+    // used in the function examples ('database=... user=... password=...')
+    // is the same form: every whitespace-separated token is a known
+    // key=value pair. Without this it fell through to the bare-path case,
+    // and the whole string, password included, became the database name.
+    std::string kv_str = conn_str;
+    if (kv_str.find('=') != std::string::npos && kv_str.find(';') == std::string::npos) {
+        std::stringstream ws(kv_str);
+        std::string token, joined;
+        bool all_known = true, any = false;
+        while (ws >> token) {
+            auto eq = token.find('=');
+            const std::string key = eq == std::string::npos ? std::string() : token.substr(0, eq);
+            if (key != "database" && key != "user" && key != "password" && key != "charset" &&
+                key != "role" && key != "dialect" && key != "none_encoding" && key != "none_pushdown") {
+                all_known = false;
+                break;
+            }
+            joined += token + ";";
+            any = true;
+        }
+        if (all_known && any) {
+            kv_str = joined;
+        }
+    }
+    if (kv_str.find('=') != std::string::npos &&
+        kv_str.find(';') != std::string::npos) {
+        std::stringstream ss(kv_str);
         std::string kv;
         while (std::getline(ss, kv, ';')) {
             auto eq = kv.find('=');
@@ -380,6 +405,19 @@ static void DpbAppend(std::vector<char> &dpb, char tag, const std::string &val) 
 
 std::unique_ptr<FirebirdConnection> FirebirdConnectionPool::Acquire() {
     return AcquireWithInfo().conn;
+}
+
+std::string RedactConnectionSecrets(std::string message, const std::string &password) {
+    message = SanitizeErrorMessage(std::move(message));
+    if (!password.empty()) {
+        const std::string redacted = "<redacted>";
+        size_t pos = 0;
+        while ((pos = message.find(password, pos)) != std::string::npos) {
+            message.replace(pos, password.size(), redacted);
+            pos += redacted.size();
+        }
+    }
+    return message;
 }
 
 // Redact every occurrence of the connection password (both the
@@ -613,7 +651,13 @@ void FirebirdConnection::Attach() {
                             static_cast<short>(dpb.size()),
                             dpb.data());
     }
-    Check(status, "isc_attach_database(" + info_.database + ")");
+    // The database string, and with it any error that names it, can carry
+    // a password (a connection string that was not parsed as key=value).
+    if (status[0] == 1 && status[1] != 0) {
+        throw IOException(RedactConnectionSecrets(
+            "isc_attach_database(" + info_.database + "): " + StatusText(status),
+            info_.password));
+    }
 }
 
 void FirebirdConnection::StartReadOnlyTransaction(ISC_STATUS *status) {

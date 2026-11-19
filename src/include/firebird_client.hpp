@@ -90,6 +90,11 @@ void ValidateMaxInlineBlobSize(int64_t bytes);
 // returns "" when the library doesn't export isc_get_client_version.
 std::string FirebirdClientVersion();
 
+// Removes credentials from a message that may echo a connection string:
+// 'password=...' values, 'scheme://user:pass@' user info, and every
+// literal occurrence of `password`.
+std::string RedactConnectionSecrets(std::string message, const std::string &password);
+
 // Throws a BinderException if `charset` would deliver bytes DuckDB's
 // UTF-8-only string vectors can't ingest. UTF8, UTF-8, NONE, OCTETS pass;
 // anything else is rejected with a hint to keep the default UTF8 (Firebird
