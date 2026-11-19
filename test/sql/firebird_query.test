@@ -1,0 +1,231 @@
+# name: test/sql/firebird_query.test
+# description: firebird_query(alias, sql) - a SELECT sent to Firebird as written
+# group: [firebird]
+#
+# Needs scripts/fixture_query.sql in its own database, named by
+# FIREBIRD_QUERY_DB (Firebird 3, 4 and 5).
+
+require firebird
+
+require-env FIREBIRD_QUERY_DB
+
+statement ok
+ATTACH '${FIREBIRD_QUERY_DB}' AS fb (TYPE firebird);
+
+# --- Every Firebird 3 type family reads as the scan reads it ----------------
+
+query I
+SELECT count(*) FROM firebird_query('fb', 'SELECT * FROM QTYPES');
+----
+4
+
+# Same column names and DuckDB types as a scan of the table.
+query I
+SELECT count(*) FROM (
+    (SELECT column_name, column_type
+       FROM (DESCRIBE SELECT * FROM firebird_query('fb', 'SELECT * FROM QTYPES')))
+    EXCEPT
+    (SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM fb.main.QTYPES)));
+----
+0
+
+query I
+SELECT count(*) FROM (DESCRIBE SELECT * FROM firebird_query('fb', 'SELECT * FROM QTYPES'));
+----
+19
+
+# Same values, both ways (NULLs, extremes, dates before 1900, empty strings,
+# CHARACTER SET NONE bytes, text and binary BLOBs).
+query I
+SELECT count(*) FROM (
+    SELECT * FROM firebird_query('fb', 'SELECT * FROM QTYPES')
+    EXCEPT ALL
+    SELECT * FROM fb.main.QTYPES);
+----
+0
+
+query I
+SELECT count(*) FROM (
+    SELECT * FROM fb.main.QTYPES
+    EXCEPT ALL
+    SELECT * FROM firebird_query('fb', 'SELECT * FROM QTYPES'));
+----
+0
+
+# The values themselves, so the comparison above cannot pass on two equally
+# wrong readers.
+query IIIIIII
+SELECT C_NUM9_3, C_NUM18_4, C_DATE, C_TS, C_VARCHAR, C_VARCHAR_NONE, C_BLOB_TEXT
+  FROM firebird_query('fb', 'SELECT * FROM QTYPES WHERE ID IN (1, 2) ORDER BY ID');
+----
+1.500	12345.6789	2026-11-18	2026-11-18 13:45:30.1234	Ação ñ €	Ação	Ação ñ €
+-0.001	-922337203685477.5808	1850-06-01	1899-12-31 23:59:59.9999	(empty)	(empty)	(empty)
+
+query IIII
+SELECT C_SMALLINT, C_BIGINT, C_BOOL, C_BLOB_BIN
+  FROM firebird_query('fb', 'SELECT * FROM QTYPES WHERE ID = 2');
+----
+-32768	-9223372036854775808	false	(empty)
+
+query II
+SELECT C_BIGINT, C_NUM18_4 FROM firebird_query('fb', 'SELECT C_BIGINT, C_NUM18_4 FROM QTYPES WHERE ID = 4');
+----
+9223372036854775807	922337203685477.5807
+
+query I
+SELECT C_BLOB_BIN FROM firebird_query('fb', 'SELECT C_BLOB_BIN FROM QTYPES WHERE ID = 1');
+----
+\x00\xFF\x10
+
+# --- Firebird SQL as written: joins, aggregates, CTEs, procedures -----------
+
+query II
+SELECT B, N FROM firebird_query('fb',
+    'SELECT t.C_BOOL AS B, COUNT(*) AS N
+       FROM QTYPES t JOIN QTYPES u ON u.ID = t.ID
+      GROUP BY t.C_BOOL ORDER BY 1');
+----
+NULL	2
+false	1
+true	1
+
+query I
+SELECT S FROM firebird_query('fb',
+    'WITH RECURSIVE R (N) AS (
+         SELECT 1 FROM RDB$DATABASE
+         UNION ALL
+         SELECT N + 1 FROM R WHERE N < 5)
+     SELECT SUM(N) AS S FROM R');
+----
+15
+
+query II
+SELECT I, SQ FROM firebird_query('fb', 'SELECT I, SQ FROM SP_SEQ(4)');
+----
+1	1
+2	4
+3	9
+4	16
+
+# Firebird-only syntax that DuckDB could not parse
+query I
+SELECT X FROM firebird_query('fb', 'SELECT FIRST 1 SKIP 1 ID AS X FROM QTYPES ORDER BY ID');
+----
+2
+
+# Unnamed and duplicate column names get usable DuckDB names
+query I
+SELECT count(DISTINCT column_name) FROM (DESCRIBE SELECT * FROM firebird_query('fb', 'SELECT 1, 1, ID, ID FROM QTYPES'));
+----
+4
+
+# --- Empty result -----------------------------------------------------------
+
+query II
+SELECT * FROM firebird_query('fb', 'SELECT ID, C_VARCHAR FROM QTYPES WHERE 1 = 0');
+----
+
+query I
+SELECT count(*) FROM (DESCRIBE SELECT * FROM firebird_query('fb', 'SELECT ID, C_VARCHAR FROM QTYPES WHERE 1 = 0'));
+----
+2
+
+# --- Arguments may be constant expressions -----------------------------------
+
+statement ok
+SET VARIABLE fb_alias = 'fb';
+
+statement ok
+SET VARIABLE src_query = 'SELECT COUNT(*) AS N FROM QTYPES WHERE C_BOOL = TRUE';
+
+query I
+SELECT N FROM firebird_query(getvariable('fb_alias'), getvariable('src_query'));
+----
+1
+
+query I
+SELECT N FROM firebird_query('f' || 'b', 'SELECT COUNT(*) AS N FROM ' || 'QTYPES');
+----
+4
+
+# --- Only SELECTs; the transaction is read-only -------------------------------
+
+statement error
+SELECT * FROM firebird_query('fb', 'UPDATE QTYPES SET C_INTEGER = 0');
+----
+only SELECT statements are accepted
+
+statement error
+SELECT * FROM firebird_query('fb', 'EXECUTE PROCEDURE SP_SEQ(2)');
+----
+only SELECT statements are accepted
+
+statement error
+SELECT * FROM firebird_query('fb', 'SELECT * FROM SP_WRITE');
+----
+read-only transaction
+
+query I
+SELECT count(*) FROM fb.main.QLOG;
+----
+0
+
+# --- Errors -------------------------------------------------------------------
+
+statement error
+SELECT * FROM firebird_query('fb', 'SELECT NO_SUCH_COLUMN FROM QTYPES');
+----
+NO_SUCH_COLUMN
+
+statement error
+SELECT * FROM firebird_query('no_such_alias', 'SELECT 1 FROM RDB$DATABASE');
+----
+firebird_query: no attached catalog named 'no_such_alias'
+
+statement error
+SELECT * FROM firebird_query('fb', NULL);
+----
+requires two non-NULL arguments
+
+# --- Telemetry: one record, the SQL as sent -----------------------------------
+
+statement ok
+SELECT * FROM firebird_query('fb', 'SELECT I FROM SP_SEQ(7)');
+
+query III
+SELECT remote_sql, rows_read, partitions FROM firebird_last_query();
+----
+SELECT I FROM SP_SEQ(7)	7	1
+
+statement ok
+SET firebird_query_log_size = 10;
+
+statement ok
+SELECT * FROM firebird_query('fb', 'SELECT I FROM SP_SEQ(3)');
+
+query II
+SELECT remote_sql, rows_read FROM firebird_query_log() LIMIT 1;
+----
+SELECT I FROM SP_SEQ(3)	3
+
+# --- firebird_explain_pushdown: a passthrough, nothing planned into it -------
+
+query IIIIII
+SELECT table_name, remote_sql, scan_strategy, planned_partitions, len(pushed_filters), projected_columns
+  FROM firebird_explain_pushdown('SELECT * FROM firebird_query(''fb'', ''SELECT ID, C_INTEGER FROM QTYPES'') WHERE ID > 1');
+----
+NULL	SELECT ID, C_INTEGER FROM QTYPES	passthrough	1	0	[ID, C_INTEGER]
+
+# Next to an ordinary scan, each gets its own row.
+query II
+SELECT count(*), list(scan_strategy ORDER BY scan_strategy)
+  FROM firebird_explain_pushdown('SELECT q.ID FROM firebird_query(''fb'', ''SELECT ID FROM QTYPES'') q JOIN fb.main.QTYPES t ON t.ID = q.ID');
+----
+2	[passthrough, pk-range-partitionable]
+
+# --- The pool's connections stay usable afterwards ---------------------------
+
+query I
+SELECT count(*) FROM fb.main.QTYPES;
+----
+4

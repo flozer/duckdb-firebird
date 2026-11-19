@@ -42,6 +42,7 @@
 #define fb_interpret                 (::duckdb::fbapi().fb_interpret)
 #define isc_database_info            (::duckdb::fbapi().isc_database_info)
 #define isc_get_client_version       (::duckdb::fbapi().isc_get_client_version)
+#define isc_dsql_sql_info            (::duckdb::fbapi().isc_dsql_sql_info)
 
 namespace duckdb {
 
@@ -1261,6 +1262,53 @@ void FirebirdStatement::AllocateBuffers() {
         v.sqlind  = &indicators_[i];
     }
     row_width_bytes_ = width;
+}
+
+int FirebirdStatement::StatementType() {
+    char items[] = {isc_info_sql_stmt_type};
+    char buf[16] = {};
+    ISC_STATUS status[20] = {};
+    isc_dsql_sql_info(status, &stmt_, static_cast<short>(sizeof(items)), items,
+                      static_cast<short>(sizeof(buf)), buf);
+    if (conn_.NoteStatus(status) || buf[0] != isc_info_sql_stmt_type) {
+        return -1;
+    }
+    // Reply: item byte, 2-byte little-endian length, little-endian value.
+    const unsigned len = static_cast<unsigned char>(buf[1]) |
+                         (static_cast<unsigned>(static_cast<unsigned char>(buf[2])) << 8);
+    if (len == 0 || len > 4) {
+        return -1;
+    }
+    int value = 0;
+    for (unsigned i = 0; i < len; ++i) {
+        value |= static_cast<int>(static_cast<unsigned char>(buf[3 + i])) << (8 * i);
+    }
+    return value;
+}
+
+void FirebirdStatement::CoerceOutputToText(idx_t col, int16_t len) {
+    XSQLVAR &v = out_sqlda_->sqlvar[col];
+    row_width_bytes_ -= static_cast<int64_t>(buffers_[col].size());
+    buffers_[col].assign(static_cast<size_t>(len) + sizeof(ISC_USHORT), 0);
+    row_width_bytes_ += static_cast<int64_t>(buffers_[col].size());
+    v.sqltype    = SQL_VARYING | 1;
+    v.sqlsubtype = 0;
+    v.sqlscale   = 0;
+    v.sqllen     = len;
+    v.sqldata    = buffers_[col].data();
+    v.sqlind     = &indicators_[col];
+    FirebirdColumnDesc &c = columns_[col];
+    c.sqltype          = SQL_VARYING;
+    c.sqlsubtype       = 0;
+    c.sqlscale         = 0;
+    c.sqllen           = len;
+    c.character_set_id = -1;  // plain ASCII digits: no NONE handling
+}
+
+void FirebirdStatement::ExecuteCursor(const std::string &sql_for_error) {
+    ISC_STATUS status[20] = {};
+    isc_dsql_execute(status, &conn_.tr(), &stmt_, 1, nullptr);
+    conn_.CheckStatus(status, "isc_dsql_execute:\n" + sql_for_error);
 }
 
 bool FirebirdStatement::Fetch() {

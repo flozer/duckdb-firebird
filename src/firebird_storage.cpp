@@ -25,6 +25,7 @@
 // data verbatim and never re-invokes the bind callback.
 
 #include "firebird_storage.hpp"
+#include "firebird_query_function.hpp"
 #include "firebird_dbt_sources.hpp"
 #include "firebird_scanner.hpp"
 #include "firebird_client.hpp"
@@ -746,6 +747,8 @@ public:
         std::make_shared<std::atomic<bool>>(false);
 
     const std::shared_ptr<FirebirdConnectionPool> &Pool() const { return pool_; }
+    NoneEncoding NoneEncodingOption() const { return none_encoding_; }
+    bool NumericWidenInt64() const { return numeric_widen_int64_; }
 
     void Initialize(bool /*load_builtin*/) override {
         // One hard-coded "main" schema. Real schema discovery on Firebird
@@ -1371,6 +1374,23 @@ FirebirdMetadataLease AcquireFirebirdCatalogLease(ClientContext &context,
     lease.conn          = fb_catalog.pool_->Acquire();
     lease.none_encoding = fb_catalog.none_encoding_;
     return lease;
+}
+
+FirebirdAttachHandle GetFirebirdAttachHandle(ClientContext &context, const string &alias,
+                                             const string &function_name) {
+    ValidateFirebirdAttachAlias(context, alias, function_name);
+#ifdef FIREBIRD_DUCKDB_V2
+    auto catalog_ptr = Catalog::GetCatalogEntry(context, Identifier(alias));
+#else
+    auto catalog_ptr = Catalog::GetCatalogEntry(context, alias);
+#endif
+    auto &fb_catalog = catalog_ptr->Cast<FirebirdCatalog>();
+    FirebirdAttachHandle handle;
+    handle.pool = fb_catalog.Pool();
+    handle.catalog = &fb_catalog;
+    handle.none_encoding = fb_catalog.NoneEncodingOption();
+    handle.numeric_widen_int64 = fb_catalog.NumericWidenInt64();
+    return handle;
 }
 
 // ---------------------------------------------------------------------------

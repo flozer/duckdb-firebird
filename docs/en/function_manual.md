@@ -406,6 +406,51 @@ ROLLBACK).
   up to 2³¹ − 1 seconds, and the extension adds one):
   `firebird_transaction_snapshot_idle_timeout must be 0 (no limit) to 2147483646 seconds, got -1`.
 
+### `firebird_query(alias, sql)`
+
+Runs one `SELECT` on an attached Firebird database exactly as written and
+returns its rows. Use it for Firebird SQL that DuckDB can't express over
+`fb.main.<table>`: selectable stored procedures, `FIRST`/`SKIP`, Firebird
+functions, joins and aggregates you want the server to run.
+
+```sql
+ATTACH 'database=C:/data/erp.fdb;user=APP_READONLY;password=secret' AS fb (TYPE firebird);
+
+SELECT * FROM firebird_query('fb', 'SELECT DEPT_NO, COUNT(*) AS N FROM EMPLOYEE GROUP BY 1');
+SELECT * FROM firebird_query('fb', 'SELECT * FROM SP_ORDERS_OF_DAY(CURRENT_DATE)');
+```
+
+| Argument | Type | Description |
+|---|---|---|
+| `alias` | VARCHAR | Name of a `TYPE firebird` ATTACH |
+| `sql` | VARCHAR | One Firebird `SELECT` (a CTE, a selectable procedure and an `EXECUTE BLOCK` with `SUSPEND` are `SELECT`s too) |
+
+Both arguments may be any constant expression, for example
+`firebird_query('fb', getvariable('extract_sql'))`.
+
+- **Only SELECTs.** The statement is prepared at bind time and its type
+  read (`isc_info_sql_stmt_type`); `UPDATE`, `EXECUTE PROCEDURE`, DDL and
+  the rest fail at bind. It runs in the ATTACH pool's read-only
+  transaction, so a procedure that writes fails on the server ("attempted
+  update during read-only transaction").
+- **Types.** Each result column maps to the DuckDB type a scan gives the
+  same Firebird type, with the ATTACH's `none_encoding` and
+  `numeric_widen_int64`. `DECFLOAT` comes back as text, as in a scan.
+  Column names are Firebird's (aliases); duplicates get DuckDB's usual
+  suffixes, and an empty name becomes `columnN`.
+- **No planning.** The SQL goes to Firebird as written: no projection,
+  filter or `ROWS` pushdown, no partitions. A filter written around it in
+  DuckDB is applied after the rows arrive. `firebird_explain_pushdown`
+  shows it as `scan_strategy = 'passthrough'` with `table_name` NULL.
+- **Snapshot.** With `firebird_transaction_snapshot` on, it reads the
+  snapshot of the DuckDB transaction, like the scans of the ATTACH.
+- **Telemetry.** Each call leaves one `firebird_last_query()` /
+  `firebird_query_log()` record: the SQL as sent in `remote_sql`,
+  `rows_read`, timings, `partitions` 1, `table_name` empty.
+- **Prepared twice.** The statement is prepared at bind (to learn its
+  columns) and again when it runs. If its columns changed in between, the
+  query fails and asks to be run again.
+
 ### `firebird_attach_sql(connection_string [, schema])`
 
 Generates DuckDB SQL views for Firebird tables.
@@ -978,7 +1023,7 @@ Rejected input (raises an error):
 | `pk_range_eligible` | BOOLEAN | `true` only for a single-column numeric primary key |
 | `pk_range_column` | VARCHAR | Name of that PK column, or `NULL` when not eligible (e.g. composite or non-numeric PK) |
 | `pk_range_reason` | VARCHAR | One of four normalized values: `single numeric PK`, `non-numeric PK`, `composite PK`, `no primary key` |
-| `scan_strategy` | VARCHAR | `pk-range-partitionable` when `pk_range_eligible` is true; `serial` otherwise |
+| `scan_strategy` | VARCHAR | `pk-range-partitionable` when `pk_range_eligible` is true; `passthrough` for a `firebird_query()` call (SQL sent as written, `table_name` NULL); `serial` otherwise |
 | `view_heavy` | BOOLEAN | `NULL` when the scan target is a base table; for a view, `true` if it has a JOIN, `GROUP BY`, an aggregate function, or an unreadable/uninspectable definition, `false` for a simple pass-through view |
 | `view_heavy_reasons` | VARCHAR[] | Factual notes about the view's shape: `view contains a JOIN`, `view contains aggregation (GROUP BY or aggregate functions)`, `view definition not inspected (RDB$VIEW_SOURCE unavailable or unreadable)`, `view has no WHERE filter in its definition`. The last one can appear even when `view_heavy` is `false` (a filterless-but-simple view is not "heavy", but the observation is still useful) — do not assume this list is empty whenever `view_heavy` is `false`. Empty (and `view_heavy` is `NULL`) when the target is a base table. |
 | `charset_pushdown_blocked` | BOOLEAN | `true` when any entry in `not_pushed_reasons` is `NONE_CHARSET` — a pure synthesis of that already-existing signal, no new detection |

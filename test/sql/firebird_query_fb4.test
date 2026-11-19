@@ -1,0 +1,58 @@
+# name: test/sql/firebird_query_fb4.test
+# description: firebird_query(alias, sql) with the Firebird 4+ types
+# group: [firebird]
+#
+# Needs scripts/fixture_query.sql and scripts/fixture_query4.sql loaded into
+# the database named by FIREBIRD_QUERY4_DB (exported on Firebird 4/5 only).
+
+require firebird
+
+require-env FIREBIRD_QUERY4_DB
+
+statement ok
+ATTACH '${FIREBIRD_QUERY4_DB}' AS fb (TYPE firebird);
+
+query I
+SELECT count(*) FROM (
+    (SELECT column_name, column_type
+       FROM (DESCRIBE SELECT * FROM firebird_query('fb', 'SELECT * FROM QTYPES4')))
+    EXCEPT
+    (SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM fb.main.QTYPES4)));
+----
+0
+
+query I
+SELECT count(*) FROM (
+    SELECT * FROM firebird_query('fb', 'SELECT * FROM QTYPES4')
+    EXCEPT ALL
+    SELECT * FROM fb.main.QTYPES4);
+----
+0
+
+query I
+SELECT count(*) FROM (
+    SELECT * FROM fb.main.QTYPES4
+    EXCEPT ALL
+    SELECT * FROM firebird_query('fb', 'SELECT * FROM QTYPES4'));
+----
+0
+
+# DECFLOAT has no binary decoder here: it arrives as text, as in a scan.
+query IIII
+SELECT C_INT128, C_NUM38_6, C_DEC16, C_DEC34
+  FROM firebird_query('fb', 'SELECT * FROM QTYPES4 ORDER BY ID');
+----
+170141183460469231731687303715884105727	12345678901234567890123456789012.123456	1234567890.123456	1.234567890123456789012345678901234E+100
+-170141183460469231731687303715884105728	-0.000001	-0.5	-1E-6000
+NULL	NULL	NULL	NULL
+
+query II
+SELECT C_TSTZ, C_TTZ FROM firebird_query('fb', 'SELECT C_TSTZ, C_TTZ FROM QTYPES4 WHERE ID = 1');
+----
+2026-11-18 13:45:30.1234+00	13:45:30.1234+00
+
+# A DECFLOAT expression, not only a column
+query I
+SELECT D FROM firebird_query('fb', 'SELECT CAST(1.5 AS DECFLOAT(34)) * 2 AS D FROM RDB$DATABASE');
+----
+3.0

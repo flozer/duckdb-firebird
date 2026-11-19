@@ -654,6 +654,52 @@ ROLLBACK).
   aceita ate 2³¹ − 1 segundos, e a extensao soma um):
   `firebird_transaction_snapshot_idle_timeout must be 0 (no limit) to 2147483646 seconds, got -1`.
 
+### `firebird_query(alias, sql)`
+
+Executa um `SELECT` em um banco Firebird anexado exatamente como escrito e
+retorna suas linhas. Use para SQL Firebird que o DuckDB nao expressa sobre
+`fb.main.<tabela>`: procedures selecionaveis, `FIRST`/`SKIP`, funcoes do
+Firebird, joins e agregacoes que voce quer que o servidor execute.
+
+```sql
+ATTACH 'database=C:/dados/empresa.fdb;user=APP_READONLY;password=secret' AS fb (TYPE firebird);
+
+SELECT * FROM firebird_query('fb', 'SELECT DEPT_NO, COUNT(*) AS N FROM EMPLOYEE GROUP BY 1');
+SELECT * FROM firebird_query('fb', 'SELECT * FROM SP_PEDIDOS_DO_DIA(CURRENT_DATE)');
+```
+
+| Argumento | Tipo | Descricao |
+|---|---|---|
+| `alias` | VARCHAR | Nome de um ATTACH `TYPE firebird` |
+| `sql` | VARCHAR | Um `SELECT` Firebird (CTE, procedure selecionavel e `EXECUTE BLOCK` com `SUSPEND` tambem sao `SELECT`s) |
+
+Os dois argumentos podem ser qualquer expressao constante, por exemplo
+`firebird_query('fb', getvariable('sql_extracao'))`.
+
+- **Somente SELECT.** O comando e preparado no bind e seu tipo lido
+  (`isc_info_sql_stmt_type`); `UPDATE`, `EXECUTE PROCEDURE`, DDL e os
+  demais falham no bind. Ele roda na transacao somente leitura do pool do
+  ATTACH, entao uma procedure que grava falha no servidor ("attempted
+  update during read-only transaction").
+- **Tipos.** Cada coluna do resultado vira o tipo DuckDB que um scan da ao
+  mesmo tipo Firebird, com o `none_encoding` e o `numeric_widen_int64` do
+  ATTACH. `DECFLOAT` volta como texto, como no scan. Os nomes das colunas
+  sao os do Firebird (aliases); duplicados ganham os sufixos usuais do
+  DuckDB, e um nome vazio vira `columnN`.
+- **Sem planejamento.** O SQL vai ao Firebird como escrito: sem pushdown
+  de projecao, filtro ou `ROWS`, sem particoes. Um filtro escrito em volta
+  dele no DuckDB e aplicado depois que as linhas chegam.
+  `firebird_explain_pushdown` o mostra com `scan_strategy = 'passthrough'`
+  e `table_name` NULL.
+- **Snapshot.** Com `firebird_transaction_snapshot` ligado, ele le o
+  snapshot da transacao DuckDB, como os scans do ATTACH.
+- **Telemetria.** Cada chamada deixa um registro em
+  `firebird_last_query()` / `firebird_query_log()`: o SQL enviado em
+  `remote_sql`, `rows_read`, tempos, `partitions` 1 e `table_name` vazio.
+- **Preparado duas vezes.** O comando e preparado no bind (para conhecer
+  as colunas) e de novo ao executar. Se as colunas mudarem nesse
+  intervalo, a consulta falha e pede para ser executada de novo.
+
 ### `firebird_attach_sql(connection_string [, schema])`
 
 #### O que faz e como funciona
@@ -1579,7 +1625,7 @@ Entrada rejeitada (levanta erro):
 | `pk_range_eligible` | BOOLEAN | `true` apenas para chave primaria de coluna unica numerica |
 | `pk_range_column` | VARCHAR | Nome dessa coluna PK, ou `NULL` quando nao elegivel (ex.: PK composta ou nao numerica) |
 | `pk_range_reason` | VARCHAR | Um de quatro valores normalizados: `single numeric PK`, `non-numeric PK`, `composite PK`, `no primary key` |
-| `scan_strategy` | VARCHAR | `pk-range-partitionable` quando `pk_range_eligible` for true; `serial` caso contrario |
+| `scan_strategy` | VARCHAR | `pk-range-partitionable` quando `pk_range_eligible` for true; `passthrough` para uma chamada de `firebird_query()` (SQL enviado como escrito, `table_name` NULL); `serial` caso contrario |
 | `view_heavy` | BOOLEAN | `NULL` quando o alvo do scan e uma tabela base; para uma view, `true` se ela tem `JOIN`, `GROUP BY`, funcao de agregacao, ou definicao ilegivel/nao-inspecionavel, `false` para uma view simples de passagem |
 | `view_heavy_reasons` | VARCHAR[] | Notas factuais sobre a forma da view: `view contains a JOIN`, `view contains aggregation (GROUP BY or aggregate functions)`, `view definition not inspected (RDB$VIEW_SOURCE unavailable or unreadable)`, `view has no WHERE filter in its definition`. Esta ultima pode aparecer mesmo quando `view_heavy` e `false` (uma view simples sem filtro nao e "pesada", mas a observacao ainda e util) — nao assuma que a lista fica vazia sempre que `view_heavy` e `false`. Vazio (e `view_heavy` e `NULL`) quando o alvo e uma tabela base. |
 | `charset_pushdown_blocked` | BOOLEAN | `true` quando qualquer entrada em `not_pushed_reasons` e `NONE_CHARSET` — uma sintese pura de um sinal ja existente, sem deteccao nova |
