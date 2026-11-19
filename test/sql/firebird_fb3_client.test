@@ -63,5 +63,32 @@ SELECT ID, C_NUM18_4 FROM rw.main.RW_TARGET WHERE ID BETWEEN 9303 AND 9304 ORDER
 ----
 9304	1.1235
 
+# A Firebird 3 client has no batch API: firebird_write_batch_size changes
+# nothing, and the writes go one row at a time.
+statement ok
+SET firebird_write_batch_size = 1000;
+
+statement ok
+INSERT INTO rw.main.RW_TARGET (ID, C_NUM18_4) SELECT 9310 + i, i / 4 FROM range(5) t(i);
+
+query TI
+SELECT write_mode, rows_written FROM firebird_last_query();
+----
+row	5
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM18_4) VALUES (?, ?)',
+    source := 'SELECT 9320 + i, i / 4 FROM range(5) t(i)');
+
+query TII
+SELECT write_mode, rows_written, rows_affected FROM firebird_last_query();
+----
+row	5	5
+
+query II
+SELECT count(*), sum(C_NUM18_4) FROM rw.main.RW_TARGET WHERE ID BETWEEN 9310 AND 9324;
+----
+10	5.0000
+
 statement ok
 SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET WHERE ID >= 9300 AND ID < 9400');

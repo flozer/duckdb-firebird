@@ -1,0 +1,504 @@
+# name: test/sql/firebird_execute_batch.test
+# description: writes with SET firebird_write_batch_size (Firebird 4+ IBatch) keep every value exact
+# group: [firebird]
+#
+# Needs scripts/fixture_rw.sql in the database named by FIREBIRD_RW_DB.
+# Firebird 3 has no batches: the same statements run per row there, and
+# write_mode says which mode ran. Firebird 4 batches plain DML only; Firebird
+# 5 batches EXECUTE BLOCK too.
+
+require firebird
+
+require-env FIREBIRD_RW_DB
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS ro (TYPE firebird);
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS rw (TYPE firebird, READ_WRITE);
+
+statement ok
+SET firebird_write_lock_timeout = 1;
+
+statement ok
+SET firebird_write_batch_size = 100;
+
+statement ok
+SET firebird_query_log_size = 100;
+
+# What this client and server pair batches: the server's major version, or
+# 3 with a Firebird 3 client, which has no batch API (the matrix runs this
+# file through one against a Firebird 4+ server too).
+statement ok
+CREATE TABLE fb_major AS
+SELECT CASE WHEN c.client_major >= 4 THEN s.V ELSE c.client_major END AS major
+  FROM firebird_query('ro', 'SELECT CAST(SUBSTRING(RDB$GET_CONTEXT(''SYSTEM'', ''ENGINE_VERSION'') FROM 1 FOR 1) AS INTEGER) AS V FROM RDB$DATABASE') s,
+       (SELECT TRY_CAST(split_part(client_version, '.', 1) AS INTEGER) AS client_major
+          FROM firebird_health('ro')) c;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG');
+
+# --- Every non-BLOB type family round-trips exactly --------------------------
+
+query I
+SELECT executions FROM firebird_execute('rw',
+    'INSERT INTO RW_TARGET (ID, C_SMALLINT, C_INTEGER, C_BIGINT, C_NUM4_2, C_DEC9_2, C_NUM9_3, C_NUM18_4,
+                            C_FLOAT, C_DOUBLE, C_DATE, C_TIME, C_TS, C_CHAR, C_VARCHAR, C_VARCHAR_NONE, C_BOOL)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    source := 'SELECT ID, C_SMALLINT, C_INTEGER, C_BIGINT, C_NUM4_2, C_DEC9_2, C_NUM9_3, C_NUM18_4,
+                       C_FLOAT, C_DOUBLE, C_DATE, C_TIME, C_TS, C_CHAR, C_VARCHAR, C_VARCHAR_NONE, C_BOOL
+                  FROM ro.main.RW_TYPES');
+----
+4
+
+query I
+SELECT write_mode = CASE WHEN major >= 4 THEN 'batch' ELSE 'row' END FROM firebird_last_query(), fb_major;
+----
+true
+
+query I
+SELECT count(*) FROM (
+    SELECT * EXCLUDE (C_BLOB_TEXT, C_BLOB_BIN) FROM rw.main.RW_TARGET
+    EXCEPT ALL
+    SELECT * EXCLUDE (C_BLOB_TEXT, C_BLOB_BIN) FROM rw.main.RW_TYPES);
+----
+0
+
+query I
+SELECT count(*) FROM (
+    SELECT * EXCLUDE (C_BLOB_TEXT, C_BLOB_BIN) FROM rw.main.RW_TYPES
+    EXCEPT ALL
+    SELECT * EXCLUDE (C_BLOB_TEXT, C_BLOB_BIN) FROM rw.main.RW_TARGET);
+----
+0
+
+# NONE column: WIN1252 bytes (4), not UTF-8 (6)
+query I
+SELECT N FROM firebird_query('ro', 'SELECT OCTET_LENGTH(C_VARCHAR_NONE) AS N FROM RW_TARGET WHERE ID = 1');
+----
+4
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+# --- Sticky NULLs in a batch ---------------------------------------------------
+
+statement ok
+SELECT * FROM firebird_execute('rw',
+    'INSERT INTO RW_TARGET (ID, C_NUM9_3, C_BIGINT, C_INTEGER, C_DOUBLE, C_VARCHAR, C_DATE, C_BOOL)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    source := 'SELECT * FROM (VALUES
+        (10, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+        (11, 1.5::DECIMAL(9,3), 9007199254740993, 7, 2.25, ''x'', DATE ''1850-06-01'', true),
+        (12, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+        (13, -2.125::DECIMAL(9,3), -1, 0, -0.5, '''', DATE ''2026-11-18'', false),
+        (14, NULL, NULL, NULL, NULL, NULL, NULL, NULL)) t');
+
+query IIIIIIII
+SELECT ID, C_NUM9_3, C_BIGINT, C_INTEGER, C_DOUBLE, C_VARCHAR, C_DATE, C_BOOL FROM rw.main.RW_TARGET ORDER BY ID;
+----
+10	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+11	1.500	9007199254740993	7	2.25	x	1850-06-01	true
+12	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+13	-2.125	-1	0	-0.5	(empty)	2026-11-18	false
+14	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+# --- 1.5 into NUMERIC(9,3) from every source type (wide DECIMAL as INT128) ----
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM9_3) VALUES (?, ?)',
+    source := 'SELECT 20, 1.5::DECIMAL(2,1)');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM9_3) VALUES (?, ?)',
+    source := 'SELECT 21, 1.5::DECIMAL(38,10)');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM9_3) VALUES (?, ?)',
+    source := 'SELECT 22, 1.5::DOUBLE UNION ALL SELECT 23, 1::INTEGER UNION ALL SELECT 24, 9007199254740993::HUGEINT // 1000000000000000');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM9_3) VALUES (?, ?)',
+    source := 'SELECT 25, ''1.5''');
+
+query II
+SELECT ID, C_NUM9_3 FROM rw.main.RW_TARGET ORDER BY ID;
+----
+20	1.500
+21	1.500
+22	1.500
+23	1.000
+24	9.000
+25	1.500
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+# --- Both modes store the same values ------------------------------------------
+# A wide DECIMAL into text: 1.5 one row at a time, and 1.5 in a batch too.
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_VARCHAR, C_NUM9_3) VALUES (?, ?, ?)',
+    source := 'SELECT 30 + i, (1.5 + i)::DECIMAL(38,10), (1.5 + i)::DECIMAL(38,10) FROM range(3) t(i)',
+    batch_size := 0);
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_VARCHAR, C_NUM9_3) VALUES (?, ?, ?)',
+    source := 'SELECT 40 + i, (1.5 + i)::DECIMAL(38,10), (1.5 + i)::DECIMAL(38,10) FROM range(3) t(i)',
+    batch_size := 100);
+
+query III
+SELECT ID, C_VARCHAR, C_NUM9_3 FROM ro.main.RW_TARGET WHERE ID >= 40 ORDER BY ID;
+----
+40	1.5	1.500
+41	2.5	2.500
+42	3.5	3.500
+
+query I
+SELECT count(*) FROM (
+    SELECT ID - 30, C_VARCHAR, C_NUM9_3 FROM ro.main.RW_TARGET WHERE ID < 40
+    EXCEPT ALL
+    SELECT ID - 40, C_VARCHAR, C_NUM9_3 FROM ro.main.RW_TARGET WHERE ID >= 40);
+----
+0
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+# --- Both modes name the same failing row ------------------------------------------
+# Row 2 is a duplicate key (found by the server), row 5 too long for the
+# parameter (found by the client, before its batch is sent): row 2 either way.
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_VARCHAR) VALUES (?, ?)',
+    source := $$SELECT * FROM (VALUES (80, 'a'), (80, 'b'), (81, 'c'), (82, 'd'), (83, repeat('x', 200))) t$$,
+    batch_size := 0);
+----
+source row 2 failed
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_VARCHAR) VALUES (?, ?)',
+    source := $$SELECT * FROM (VALUES (80, 'a'), (80, 'b'), (81, 'c'), (82, 'd'), (83, repeat('x', 200))) t$$,
+    batch_size := 100);
+----
+source row 2 failed
+
+statement error
+INSERT INTO rw.main.RW_TARGET (ID, C_VARCHAR)
+SELECT * FROM (VALUES (80, 'a'), (80, 'b'), (81, 'c'), (82, 'd'), (83, repeat('x', 200))) t;
+----
+row 2 failed
+
+query I
+SELECT count(*) FROM ro.main.RW_TARGET;
+----
+0
+
+# --- batch_size := overrides the setting, both ways; NULL means not given ---------
+
+# A negative size is refused when it is set (INSERT and firebird_execute
+# would otherwise read it differently).
+statement error
+SET firebird_write_batch_size = -1;
+----
+firebird_write_batch_size must be >= 0
+
+statement ok
+SET firebird_write_batch_size = 0;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (?, ?)',
+    source := 'SELECT 1, ''a''', batch_size := 100);
+
+query I
+SELECT write_mode = CASE WHEN major >= 4 THEN 'batch' ELSE 'row' END FROM firebird_last_query(), fb_major;
+----
+true
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (?, ?)',
+    source := 'SELECT 2, ''b''', batch_size := NULL);
+
+query I
+SELECT write_mode FROM firebird_last_query();
+----
+row
+
+statement ok
+SET firebird_write_batch_size = 100;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (?, ?)',
+    source := 'SELECT 3, ''c''', batch_size := 0);
+
+query I
+SELECT write_mode FROM firebird_last_query();
+----
+row
+
+# --- A batched UPDATE: record counts of 2, 0 and 1 per message ---------------------
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (?, ?)',
+    source := 'SELECT 1, ''d''');
+
+query II
+SELECT rows_affected, executions FROM firebird_execute('rw', 'UPDATE RW_LOG SET NOTE = ? WHERE ID = ?',
+    source := $$SELECT * FROM (VALUES ('x', 1), ('y', 9), ('z', 2)) t$$);
+----
+3	3
+
+query I
+SELECT write_mode = CASE WHEN major >= 4 THEN 'batch' ELSE 'row' END FROM firebird_last_query(), fb_major;
+----
+true
+
+query II
+SELECT ID, NOTE FROM ro.main.RW_LOG ORDER BY ID, NOTE;
+----
+1	x
+1	x
+2	z
+3	c
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG');
+
+# --- Batch boundaries: 250 rows in batches of 100 ------------------------------
+
+query II
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (?, ?)',
+    source := 'SELECT i, ''n'' || i FROM range(250) t(i)');
+----
+250	250
+
+query III
+SELECT count(*), sum(ID), count(DISTINCT NOTE) FROM ro.main.RW_LOG;
+----
+250	31125	250
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG');
+
+# --- An error in row N: the whole call rolls back, or back to the last commit ----
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (?)',
+    source := 'SELECT * FROM (VALUES (70), (71), (72), (70), (73)) t');
+----
+source row 4 failed
+
+query I
+SELECT count(*) FROM ro.main.RW_TARGET;
+----
+0
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (?)',
+    source := 'SELECT * FROM (VALUES (70), (71), (72), (70), (73)) t', commit_every := 2);
+----
+Source rows 1 to 2 were committed
+
+query I
+SELECT list(ID ORDER BY ID) FROM ro.main.RW_TARGET;
+----
+[70, 71]
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+# A failure in a later batch names its source row.
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (?)',
+    source := 'SELECT CASE WHEN i = 251 THEN 5 ELSE i END FROM range(1, 252) t(i)', batch_size := 100);
+----
+source row 251 failed
+
+# --- A wide row: the batch never outgrows the IBatch buffer --------------------------
+# ~64 KB per message: 1000 rows would be ~64 MB, past the buffer; batch_size
+# is an upper bound, never a failure.
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_WIDE');
+
+query II
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_WIDE (ID, A, B) VALUES (?, ?, ?)',
+    source := 'SELECT i, repeat(''a'', i % 50), ''b'' || i FROM range(1000) t(i)', batch_size := 1000);
+----
+1000	1000
+
+query I
+SELECT write_mode = CASE WHEN major >= 4 THEN 'batch' ELSE 'row' END FROM firebird_last_query(), fb_major;
+----
+true
+
+query III
+SELECT count(*), sum(ID), sum(strlen(A)) FROM ro.main.RW_WIDE;
+----
+1000	499500	24500
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_WIDE');
+
+statement ok
+SET firebird_write_batch_size = 10000;
+
+query I
+INSERT INTO rw.main.RW_WIDE SELECT i, 'x', 'y' FROM range(3000) t(i);
+----
+3000
+
+statement ok
+SET firebird_write_batch_size = 100;
+
+query I
+SELECT count(*) FROM ro.main.RW_WIDE;
+----
+3000
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_WIDE');
+
+# --- EXECUTE BLOCK: batched on Firebird 5+, per row on Firebird 3/4 -------------
+
+statement ok
+SELECT * FROM firebird_execute('rw',
+    'EXECUTE BLOCK (ID INTEGER = ?, NAME VARCHAR(40) = ?, CITY VARCHAR(30) = ?) AS BEGIN
+         UPDATE OR INSERT INTO CUSTOMER (ID, NAME, CITY) VALUES (:ID, :NAME, :CITY) MATCHING (ID); END',
+    source := 'SELECT i, ''c'' || i, CASE WHEN i % 3 = 0 THEN NULL ELSE ''city'' END FROM range(1, 301) t(i)');
+
+query IIII
+SELECT write_mode = CASE WHEN major >= 5 THEN 'batch' ELSE 'row' END,
+       rows_written,
+       -- Firebird reports no record counts for a batched EXECUTE BLOCK.
+       rows_affected IS NULL = (major >= 5),
+       (major >= 5) OR rows_affected = 300
+  FROM firebird_last_query(), fb_major;
+----
+true	300	true	true
+
+query III
+SELECT count(*), count(CITY), sum(ID) FROM ro.main.CUSTOMER;
+----
+300	200	45150
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM CUSTOMER');
+
+# --- BLOB parameters keep the per-row path ---------------------------------------
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_BLOB_TEXT) VALUES (?, ?)',
+    source := 'SELECT 1, repeat(''Ação '', 20000)');
+
+query I
+SELECT write_mode FROM firebird_last_query();
+----
+row
+
+query I
+SELECT strlen(C_BLOB_TEXT) FROM rw.main.RW_TARGET;
+----
+140000
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+# --- INSERT INTO an ATTACH table -----------------------------------------------------
+
+query I
+INSERT INTO rw.main.RW_TARGET (ID, C_SMALLINT, C_INTEGER, C_BIGINT, C_NUM4_2, C_DEC9_2, C_NUM9_3, C_NUM18_4,
+                               C_FLOAT, C_DOUBLE, C_DATE, C_TIME, C_TS, C_CHAR, C_VARCHAR, C_VARCHAR_NONE, C_BOOL)
+SELECT ID, C_SMALLINT, C_INTEGER, C_BIGINT, C_NUM4_2, C_DEC9_2, C_NUM9_3, C_NUM18_4,
+       C_FLOAT, C_DOUBLE, C_DATE, C_TIME, C_TS, C_CHAR, C_VARCHAR, C_VARCHAR_NONE, C_BOOL
+  FROM rw.main.RW_TYPES;
+----
+4
+
+# The source scan records after the INSERT: look the INSERT up in the log.
+query II
+SELECT operation, write_mode = CASE WHEN major >= 4 THEN 'batch' ELSE 'row' END
+  FROM (SELECT * FROM firebird_query_log() WHERE operation = 'insert' LIMIT 1), fb_major;
+----
+insert	true
+
+query I
+SELECT count(*) FROM (
+    SELECT * EXCLUDE (C_BLOB_TEXT, C_BLOB_BIN) FROM rw.main.RW_TARGET
+    EXCEPT ALL
+    SELECT * EXCLUDE (C_BLOB_TEXT, C_BLOB_BIN) FROM rw.main.RW_TYPES);
+----
+0
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+query I
+INSERT INTO rw.main.RW_LOG SELECT i, 'n' || i FROM range(2500) t(i);
+----
+2500
+
+# rows_affected: Firebird's record counts in batch mode (no extra round
+# trip); not counted per row (it would cost one per row).
+query III
+SELECT write_mode = CASE WHEN major >= 4 THEN 'batch' ELSE 'row' END, rows_written,
+       rows_affected IS NOT DISTINCT FROM CASE WHEN major >= 4 THEN 2500 END
+  FROM (SELECT * FROM firebird_query_log() WHERE operation = 'insert' LIMIT 1), fb_major;
+----
+true	2500	true
+
+query II
+SELECT count(*), sum(ID) FROM ro.main.RW_LOG;
+----
+2500	3123750
+
+statement error
+INSERT INTO rw.main.RW_TARGET (ID) SELECT CASE WHEN i = 251 THEN 7 ELSE i END FROM range(1, 252) t(i);
+----
+row 251 failed
+
+# Nothing kept: rows_written is 0, and so are the record counts in batch
+# mode (the first two batches had counted 200). Read before any scan of
+# the ATTACH, which makes its own record.
+query III
+SELECT rows_written, rows_affected IS NOT DISTINCT FROM CASE WHEN major >= 4 THEN 0 END,
+       error_message LIKE '%row 251 failed%'
+  FROM firebird_last_query(), fb_major;
+----
+0	true	true
+
+query I
+SELECT count(*) FROM ro.main.RW_TARGET;
+----
+0
+
+# A commit that Firebird refuses (the RW_COMMIT_CHECK trigger, while
+# RW_COMMIT_GUARD has a row) marks the INSERT's record: its counts go to 0
+# too.
+statement error
+INSERT INTO rw.main.RW_COMMIT_GUARD VALUES (1), (2);
+----
+commit refused: RW_COMMIT_GUARD has a row
+
+query IIII
+SELECT write_mode = CASE WHEN major >= 4 THEN 'batch' ELSE 'row' END, rows_written,
+       rows_affected IS NOT DISTINCT FROM CASE WHEN major >= 4 THEN 0 END,
+       error_message LIKE '%the Firebird commit failed: %commit refused%'
+  FROM firebird_last_query(), fb_major;
+----
+true	0	true	true
+
+query I
+SELECT count(*) FROM firebird_query('ro', 'SELECT ID FROM RW_COMMIT_GUARD');
+----
+0
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG');

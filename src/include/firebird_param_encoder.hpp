@@ -42,8 +42,20 @@ class FirebirdParamEncoder {
 public:
     // `stmt` must be prepared; its parameters are described here.
     // source_types[i] is the DuckDB type of the values for parameter i.
+    // fixed_layout: every row uses the same wire types (a batch has one
+    // message layout): wide integers and DECIMALs always travel as INT128.
     FirebirdParamEncoder(FirebirdStatement &stmt, const vector<LogicalType> &source_types,
-                         NoneEncoding none_encoding);
+                         NoneEncoding none_encoding, bool fixed_layout = false);
+
+    // The wire type of each parameter (fixed_layout encoders only).
+    struct Layout {
+        int16_t sqltype;
+        int16_t sqllen;
+        int16_t sqlscale;
+        int16_t sqlsubtype;
+        bool blob;
+    };
+    vector<Layout> GetLayout() const;
 
     idx_t ParamCount() const {
         return slots_.size();
@@ -85,6 +97,9 @@ private:
         int16_t sqlsubtype = 0;
         int16_t sqllen = 0;
         bool none_target = false;  // text for a CHARACTER SET NONE target
+        // Fixed layout, a wide DECIMAL / HUGEINT into a text parameter: the
+        // text WIDE sends one row at a time (trailing zero decimals dropped).
+        bool wide_text = false;
         std::vector<char> buffer;
         short indicator = 0;
     };
@@ -95,6 +110,7 @@ private:
 
     FirebirdStatement &stmt_;
     NoneEncoding none_encoding_;
+    bool fixed_layout_ = false;
     std::vector<Slot> slots_;
     vector<Value> row_;
 };

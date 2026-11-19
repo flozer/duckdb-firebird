@@ -277,6 +277,18 @@ its read-only transaction.
   `LogicalInsert::column_index_map`; DuckDB 2.0 passes every column, and
   the named ones are those whose `bound_defaults` entry the binder left
   in place.
+- **Batches** (`FirebirdBatchWriter`, `firebird_batch.cpp`): with
+  `firebird_write_batch_size` > 0 on a Firebird 4+ server, the prepared
+  statement's `IStatement` and the transaction's `ITransaction` are
+  reached from the ISC handles (`fb_get_statement_interface`,
+  `fb_get_transaction_interface`, optional in the loader), and rows go
+  through `IBatch`: the encoder (with one fixed message layout for all
+  rows) fills the input XSQLDA, each row is copied into a batch message,
+  and the batch is executed every N rows, at `commit_every` boundaries
+  and before the 16 MB buffer (`TAG_BUFFER_BYTES_SIZE`) could overflow.
+  The OO API headers (`firebird/Interface.h`, `IdlFbInterfaces.h`) are
+  vendored with `ibase.h`. A build against other headers (`FB_SDK_ROOT`)
+  needs a Firebird 4+ SDK; CMake stops with a message for an older one.
 - **A result read halfway keeps the write.** DuckDB commits a streamed
   result only once it is fully read. On DuckDB 1.5 the bind sets
   `QueryResultOutputType::FORCE_MATERIALIZED`; DuckDB 2.0 has no such

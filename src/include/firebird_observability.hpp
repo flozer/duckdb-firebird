@@ -141,8 +141,9 @@ public:
     void SetWriteResult(const std::string &write_mode, int64_t rows_written, int64_t rows_affected);
     // A write whose rows were not kept after it recorded itself (its
     // commit failed): the record numbered seq, wherever it is now (the
-    // current record, the ring buffer, or both), gets the error and
-    // rows_written = 0. A record already gone is left alone.
+    // current record, the ring buffer, or both), gets the error,
+    // rows_written = 0, and rows_affected = 0 when counted. A record
+    // already gone is left alone.
     void FailWrite(uint64_t seq, const std::string &msg);
 
 private:

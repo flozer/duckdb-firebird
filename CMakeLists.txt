@@ -61,6 +61,7 @@ set(EXTENSION_SOURCES
     src/firebird_execute.cpp
     src/firebird_param_encoder.cpp
     src/firebird_insert.cpp
+    src/firebird_batch.cpp
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
@@ -79,7 +80,8 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 # Header resolution order:
 #   1. FB_SDK_ROOT (cmake or env var) - point at an unpacked Firebird
 #      install. Developers can opt into the upstream FB5 SDK headers
-#      this way.
+#      this way. It must be Firebird 4 or later: the batched writes use
+#      fb_get_statement_interface and the OO API (IBatch).
 #   2. Vendored copy under `third_party/firebird/include/` - the
 #      default. Always present; required for the community CI path.
 #
@@ -104,6 +106,21 @@ if(FB_SDK_ROOT)
             "FB_SDK_ROOT=${FB_SDK_ROOT} did not yield ibase.h; "
             "falling back to vendored third_party/firebird headers.")
     else()
+        # Firebird 4 declares it in ibase.h; since Firebird 5, ibase.h only
+        # includes firebird/ibase.h, which declares it.
+        set(FB_HAS_STATEMENT_INTERFACE "")
+        foreach(FB_HEADER "${FB_INCLUDE_DIR}/ibase.h" "${FB_INCLUDE_DIR}/firebird/ibase.h")
+            if(EXISTS "${FB_HEADER}" AND NOT FB_HAS_STATEMENT_INTERFACE)
+                file(STRINGS "${FB_HEADER}" FB_HAS_STATEMENT_INTERFACE
+                     REGEX "ISC_EXPORT fb_get_statement_interface")
+            endif()
+        endforeach()
+        if(NOT FB_HAS_STATEMENT_INTERFACE)
+            message(FATAL_ERROR
+                "FB_SDK_ROOT=${FB_SDK_ROOT}: ibase.h has no fb_get_statement_interface, so it is older "
+                "than Firebird 4. The extension needs Firebird 4+ client headers; leave FB_SDK_ROOT "
+                "unset to use the vendored Firebird 5.0.3 headers.")
+        endif()
         message(STATUS "libfbclient headers via FB_SDK_ROOT=${FB_SDK_ROOT}")
         message(STATUS "  ibase.h:    ${FB_INCLUDE_DIR}")
     endif()

@@ -44,6 +44,13 @@ struct FirebirdClientApi {
     // Writes a BLOB parameter value.
     decltype(&::isc_create_blob2)            isc_create_blob2;
     decltype(&::isc_put_segment)             isc_put_segment;
+    // Optional (Firebird 4+ batched writes through IBatch): null when the
+    // client library doesn't export them; writes then run one row at a
+    // time. fb_get_master_interface is typed as void* here so this header
+    // doesn't need the OO API headers.
+    void *(*fb_get_master_interface)();
+    decltype(&::fb_get_statement_interface)  fb_get_statement_interface;
+    decltype(&::fb_get_transaction_interface) fb_get_transaction_interface;
 };
 
 // Resolve the Firebird client library (once per process) and return

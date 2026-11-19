@@ -526,6 +526,7 @@ SELECT * FROM firebird_execute('fb',
 | `source` | VARCHAR | Optional. A DuckDB query; the statement runs once per row, with column i as parameter i |
 | `commit_every` | BIGINT | Optional, with `source`. Commit every N rows; 0 (default) = with the DuckDB transaction |
 | `count_rows` | BOOLEAN | Optional. `false` skips the record counts (`rows_affected` NULL). Default `true` |
+| `batch_size` | BIGINT | Optional, with `source`. Rows per batch on Firebird 4+; overrides `firebird_write_batch_size` |
 
 Returns one row:
 
@@ -620,6 +621,23 @@ Returns one row:
 - **Errors.** The first failing row stops the call. The message names the
   source row and what is kept: nothing (the transaction is rolled back),
   or source rows 1 to K that `commit_every` committed.
+- **Batches (Firebird 4+).** With `SET firebird_write_batch_size = N`
+  (or `batch_size := N` on the call), the rows go N at a time through
+  Firebird's batch interface (`IBatch`) instead of one round trip each.
+  `INSERT`, `UPDATE` and `DELETE` batch on Firebird 4+, `EXECUTE
+  PROCEDURE` and `EXECUTE BLOCK` on Firebird 5+ (a Firebird 4 server fails
+  the second `EXECUTE BLOCK` message of a batch). Other statements,
+  Firebird 3, a client library older than Firebird 4 (it lacks
+  `fb_get_statement_interface`), and statements with BLOB parameters run
+  one row at a time; `write_mode` in the query log says which mode ran. A batch is sent every N rows, at every `commit_every` boundary, and
+  whenever the next row might not fit its 16 MB buffer, so wide rows get
+  smaller batches, never a "batch too big" error. The first failing row
+  stops the call and is named as in the per-row mode: a row the client
+  can't encode sends the rows before it first. A batch that fails as a
+  whole (a lost connection) names its range of source rows. `rows_affected`
+  sums the record counts for plain `INSERT`/`UPDATE`/`DELETE`; for
+  `EXECUTE BLOCK` and `EXECUTE PROCEDURE` it is `NULL`, because Firebird
+  reports 0 for each such message.
 - With `source`, a statement that returns rows is refused, and a
   statement with `?` placeholders needs a `source`.
 - **Session statements are refused:** `SET ROLE`, `SET TRUSTED ROLE`,
@@ -680,7 +698,7 @@ Returns one row:
   disable_optimizer`) DuckDB 2.0 refuses every autocommit call.
 - **Telemetry.** Each call leaves one `firebird_last_query()` /
   `firebird_query_log()` record: the statement in `remote_sql`,
-  `operation = 'execute'`, `write_mode = 'row'`, `rows_written`
+  `operation = 'execute'`, `write_mode` (`row` or `batch`), `rows_written`
   (executions) and `rows_affected`; on failure, the error.
 
 ### `firebird_clear_cache(alias)`
@@ -731,6 +749,8 @@ COPY fb.main.CUSTOMER FROM 'customers.csv' (HEADER);
 - **Errors.** The first failing row stops the INSERT with "row N failed:"
   and Firebird's error; the DuckDB transaction rolls back, and with it
   every row of the INSERT.
+- **Batches.** With `SET firebird_write_batch_size = N`, a Firebird 4+
+  server gets the rows N at a time, as for `firebird_execute`.
 - **Fed by `firebird_execute`.** An `INSERT ... SELECT ... FROM
   firebird_execute(...)` on the same ATTACH shares one write transaction,
   committed when the statement ends, when the call's rows go straight into
@@ -747,14 +767,15 @@ COPY fb.main.CUSTOMER FROM 'customers.csv' (HEADER);
 - **Telemetry.** One record per INSERT, made when it ends (so it follows
   the record of a Firebird scan in its source): `operation = 'insert'`,
   `table_name`, the prepared statement in `remote_sql`, `write_mode`
-  (`row`), `rows_written`, `firebird_time_us` (the encoding and Firebird
-  calls), `total_time_us` and `error_message`; `rows_affected` is `NULL`
+  (`row` or `batch`), `rows_written`, `firebird_time_us` (the encoding and
+  Firebird calls), `total_time_us` and `error_message`. `rows_affected`
+  holds the record counts in batch mode; one row at a time it is `NULL`
   (counting would cost one round trip per row). On an error no row is
-  kept, and `rows_written` is 0. A statement that fails outside the INSERT
-  (in its source, or interrupted) still leaves the INSERT's record, with
-  "did not complete"; a commit that fails sets the record's
-  `error_message` ("the Firebird commit failed: ...") and `rows_written`
-  to 0.
+  kept: `rows_written` is 0, and so is `rows_affected` in batch mode. A
+  statement that fails outside the INSERT (in its source, or interrupted)
+  still leaves the INSERT's record, with "did not complete"; a commit that
+  fails sets the record's `error_message` ("the Firebird commit failed:
+  ...") and its counts to 0.
 
 ### `firebird_attach_sql(connection_string [, schema])`
 
@@ -1221,7 +1242,7 @@ Useful fields include:
 - connection reuse details
 - what the record is (`operation`: `scan`, `query` for `firebird_query`,
   `execute` for `firebird_execute`, `insert` for an INSERT into an ATTACH
-  table) and, for writes, `write_mode` (`row`),
+  table) and, for writes, `write_mode` (`row` or `batch`),
   `rows_written` (executions) and `rows_affected` (Firebird's record
   counts; `NULL` when not counted). The three write columns are `NULL` for
   reads.
@@ -1661,6 +1682,13 @@ releases a DuckDB transaction's snapshot when this many seconds pass from
 the end of a statement to the next scan of the ATTACH in the transaction;
 that scan then fails. See
 [One snapshot per DuckDB transaction](#one-snapshot-per-duckdb-transaction-transaction_snapshot).
+
+### `SET firebird_write_batch_size = N`
+
+Rows per batch for Firebird writes (`firebird_execute` with `source`, and
+`INSERT INTO` an ATTACH table) on Firebird 4+ servers. Default 0: one
+execution per row. `firebird_execute(..., batch_size := N)` overrides it
+for one call. See the batches note under `firebird_execute`.
 
 ### `SET firebird_write_lock_timeout = SECONDS`
 

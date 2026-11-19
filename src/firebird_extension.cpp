@@ -338,6 +338,23 @@ static void LoadInternal(ExtensionLoader &loader) {
         LogicalType::BIGINT,
         Value::BIGINT(-1));
 
+    // Rows per batch for Firebird 4+ writes (IBatch), checked when it is set.
+    // (A value given when the database is opened skips the check: INSERT then
+    // runs per row and firebird_execute fails at bind.)
+    config.AddExtensionOption(
+        "firebird_write_batch_size",
+        "Rows per batch for Firebird writes (firebird_execute with source, INSERT into an ATTACH opened "
+        "with READ_WRITE) on Firebird 4+ servers (IBatch). 0 (default) = one execution per row. "
+        "INSERT/UPDATE/DELETE batch on Firebird 4+, EXECUTE PROCEDURE / EXECUTE BLOCK on Firebird 5+; "
+        "statements with BLOB parameters always run per row.",
+        LogicalType::BIGINT,
+        Value::BIGINT(0),
+        [](ClientContext &, SetScope, Value &parameter) {
+            if (parameter.IsNull() || parameter.GetValue<int64_t>() < 0) {
+                throw BinderException("firebird_write_batch_size must be >= 0 (0 = one execution per row), got %s",
+                                      parameter.IsNull() ? std::string("NULL") : parameter.ToString());
+            }
+        });
     // How long a Firebird write waits for a lock held by another
     // transaction before it fails.
     config.AddExtensionOption(

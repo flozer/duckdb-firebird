@@ -780,6 +780,7 @@ SELECT * FROM firebird_execute('fb',
 | `source` | VARCHAR | Opcional. Uma query DuckDB; o comando roda uma vez por linha, com a coluna i como parametro i |
 | `commit_every` | BIGINT | Opcional, com `source`. Confirma a cada N linhas; 0 (padrao) = com a transacao DuckDB |
 | `count_rows` | BOOLEAN | Opcional. `false` dispensa as contagens de registros (`rows_affected` NULL). Padrao `true` |
+| `batch_size` | BIGINT | Opcional, com `source`. Linhas por lote no Firebird 4+; sobrepoe `firebird_write_batch_size` |
 
 Retorna uma linha:
 
@@ -878,6 +879,25 @@ Retorna uma linha:
 - **Erros.** A primeira linha que falha para a chamada. A mensagem cita a
   linha da source e o que fica: nada (a transacao e desfeita), ou as
   linhas 1 a K que o `commit_every` confirmou.
+- **Lotes (Firebird 4+).** Com `SET firebird_write_batch_size = N` (ou
+  `batch_size := N` na chamada), as linhas vao de N em N pela interface de
+  lotes do Firebird (`IBatch`), em vez de uma ida e volta por linha.
+  `INSERT`, `UPDATE` e `DELETE` usam lotes no Firebird 4+, `EXECUTE
+  PROCEDURE` e `EXECUTE BLOCK` no Firebird 5+ (um servidor Firebird 4
+  falha a segunda mensagem `EXECUTE BLOCK` de um lote). Outros comandos,
+  o Firebird 3, uma biblioteca cliente anterior ao Firebird 4 (sem
+  `fb_get_statement_interface`) e comandos com parametros BLOB rodam uma
+  linha por vez; `write_mode` no log de queries diz qual modo rodou. Um lote e enviado a cada N linhas, em cada limite de
+  `commit_every`, e sempre que a proxima linha pode nao caber no buffer de
+  16 MB, entao linhas largas geram lotes menores, nunca um erro "batch too
+  big". A primeira linha que falha para a chamada e e citada como no modo
+  linha a linha: uma linha que o cliente nao consegue codificar envia
+  antes as linhas anteriores. Um lote que falha por inteiro (uma conexao
+  perdida) cita sua faixa de linhas da origem. `rows_affected` soma as
+  contagens de registros de
+  `INSERT`/`UPDATE`/`DELETE` simples; para `EXECUTE BLOCK` e
+  `EXECUTE PROCEDURE` e `NULL`, porque o Firebird informa 0 para cada
+  mensagem dessas.
 - Com `source`, um comando que retorna linhas e recusado, e um comando com
   `?` precisa de `source`.
 - **Comandos de sessao sao recusados:** `SET ROLE`, `SET TRUSTED ROLE`,
@@ -939,7 +959,7 @@ Retorna uma linha:
   autocommit.
 - **Telemetria.** Cada chamada deixa um registro em
   `firebird_last_query()` / `firebird_query_log()`: o comando em
-  `remote_sql`, `operation = 'execute'`, `write_mode = 'row'`,
+  `remote_sql`, `operation = 'execute'`, `write_mode` (`row` ou `batch`),
   `rows_written` (execucoes) e `rows_affected`; em caso de falha, o erro.
 
 ### `firebird_clear_cache(alias)`
@@ -992,6 +1012,8 @@ COPY fb.main.CUSTOMER FROM 'customers.csv' (HEADER);
 - **Erros.** A primeira linha que falha para o INSERT com "row N failed:"
   e o erro do Firebird; a transacao DuckDB e desfeita, e com ela todas as
   linhas do INSERT.
+- **Lotes.** Com `SET firebird_write_batch_size = N`, um servidor
+  Firebird 4+ recebe as linhas de N em N, como no `firebird_execute`.
 - **Alimentado por `firebird_execute`.** Um `INSERT ... SELECT ... FROM
   firebird_execute(...)` no mesmo ATTACH compartilha uma transacao de
   escrita, confirmada quando o comando termina, quando as linhas da chamada
@@ -1007,14 +1029,15 @@ COPY fb.main.CUSTOMER FROM 'customers.csv' (HEADER);
 - **Telemetria.** Um registro por INSERT, feito quando ele termina (entao
   vem depois do registro de um scan Firebird na origem): `operation =
   'insert'`, `table_name`, o comando preparado em `remote_sql`,
-  `write_mode` (`row`), `rows_written`, `firebird_time_us` (a codificacao
-  e as chamadas ao Firebird), `total_time_us` e `error_message`;
-  `rows_affected` e `NULL` (contar custaria uma ida e volta por linha).
-  Num erro nenhuma linha fica, e `rows_written` e 0. Um comando que falha
-  fora do INSERT (na origem, ou interrompido) ainda deixa o registro do
-  INSERT, com "did not complete"; um commit que falha poe o erro no
-  `error_message` do registro ("the Firebird commit failed: ...") e
-  `rows_written` em 0.
+  `write_mode` (`row` ou `batch`), `rows_written`, `firebird_time_us` (a
+  codificacao e as chamadas ao Firebird), `total_time_us` e
+  `error_message`. `rows_affected` traz as contagens de registros no modo
+  lote; linha a linha e `NULL` (contar custaria uma ida e volta por linha).
+  Num erro nenhuma linha fica: `rows_written` e 0, e `rows_affected`
+  tambem no modo lote. Um comando que falha fora do INSERT (na origem, ou
+  interrompido) ainda deixa o registro do INSERT, com "did not complete";
+  um commit que falha poe o erro no `error_message` do registro ("the
+  Firebird commit failed: ...") e as contagens em 0.
 
 ### `firebird_attach_sql(connection_string [, schema])`
 
@@ -1741,7 +1764,7 @@ Saida compartilhada com `firebird_query_log()`:
   `execute` (`firebird_execute`) ou `insert` (INSERT em tabela de um
   ATTACH).
 - `write_mode`, `rows_written`, `rows_affected`: so para escritas; `NULL`
-  em leituras. `write_mode` e `row`; `rows_written` sao as execucoes;
+  em leituras. `write_mode` e `row` ou `batch`; `rows_written` sao as execucoes;
   `rows_affected` sao as contagens de registros do Firebird (`NULL` quando
   nao contadas).
 - `captured_at`: timestamp de captura.
@@ -2503,6 +2526,13 @@ servidor libera o snapshot de uma transacao DuckDB quando passam esses
 segundos entre o fim de um statement e o proximo scan do `ATTACH` na
 transacao; esse scan entao falha. Veja "Um snapshot por transacao DuckDB
 (`transaction_snapshot`)".
+
+### `SET firebird_write_batch_size = N`
+
+Linhas por lote nas escritas Firebird (`firebird_execute` com `source`, e
+`INSERT INTO` numa tabela de ATTACH) em servidores Firebird 4+. Padrao 0:
+uma execucao por linha. `firebird_execute(..., batch_size := N)` sobrepoe
+o valor numa chamada. Veja a nota sobre lotes em `firebird_execute`.
 
 ### `SET firebird_write_lock_timeout = SEGUNDOS`
 

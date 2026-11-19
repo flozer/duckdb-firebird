@@ -57,9 +57,9 @@ connection.
 | `snapshot_mode` | VARCHAR | How the scan's partitions relate transactionally: `serial` (one partition), `shared` (all partitions read one Firebird snapshot; Firebird 4+), `independent` (each partition used its own read-committed transaction: Firebird 3, or the shared snapshot could not be established), `transaction` (the scan read the snapshot of its DuckDB transaction: ATTACH with the opt-in transaction snapshot, Firebird 4+). See below. |
 | `partition_method` | VARCHAR | How the table was split: `none` (one partition), `pk` (primary-key ranges) or `dbkey` (`RDB$DB_KEY` ranges, `partition_by = 'dbkey'`). |
 | `operation` | VARCHAR | What the record is: `scan` (`firebird_scan` or a table of an `ATTACH`), `query` (`firebird_query`), `execute` (`firebird_execute`) or `insert` (`INSERT INTO` a table of an `ATTACH` opened with `READ_WRITE`). |
-| `write_mode` | VARCHAR | For writes: `row` (one execution per row). `NULL` for reads. |
+| `write_mode` | VARCHAR | For writes: `row` (one execution per row) or `batch` (Firebird 4+ batched execution). `NULL` for reads. |
 | `rows_written` | BIGINT | For writes: executions sent to Firebird. `NULL` for reads. |
-| `rows_affected` | BIGINT | For writes: Firebird's record counts. `NULL` for reads and when not counted (`count_rows := false`, a statement that returns rows, an INSERT). |
+| `rows_affected` | BIGINT | For writes: Firebird's record counts. `NULL` for reads and when not counted (`count_rows := false`, a statement that returns rows, a batched `EXECUTE BLOCK`, a per-row INSERT). |
 
 `limit_pushed` / `offset_pushed` / `not_pushed_reasons` are the Phase 4 #3
 pushdown-explainability columns. They make it explicit what paging reached

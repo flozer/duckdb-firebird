@@ -47,8 +47,8 @@ void Put(std::vector<char> &buffer, const T &value, size_t offset = 0) {
 } // namespace
 
 FirebirdParamEncoder::FirebirdParamEncoder(FirebirdStatement &stmt, const vector<LogicalType> &source_types,
-                                           NoneEncoding none_encoding)
-    : stmt_(stmt), none_encoding_(none_encoding) {
+                                           NoneEncoding none_encoding, bool fixed_layout)
+    : stmt_(stmt), none_encoding_(none_encoding), fixed_layout_(fixed_layout) {
     const auto &params = stmt_.DescribeInput();
     if (params.size() != source_types.size()) {
         throw InvalidInputException("the statement has %llu parameter(s) (?) but %llu value(s) were given",
@@ -141,15 +141,21 @@ void FirebirdParamEncoder::Setup(Slot &slot) {
         }
     }
 
-    if (slot.wire == Wire::WIDE && !target_text && FirebirdClientMajor() >= 4 &&
-        stmt_.Connection().EngineMajor() >= 4) {
-        // Firebird 4+ client and server: INT128 with the DECIMAL's own scale,
-        // which the server rounds to the target as it does the literal. WIDE
-        // would send a value whose digits don't fit in 64 bits as text, and
-        // the server overflows converting text with more digits than the
-        // target holds (1.12345678901234567891 into NUMERIC(18,4)). Firebird
-        // 3 has no INT128 and refuses that literal too; a Firebird 3 client
-        // can't send SQL_INT128 even to a Firebird 4 server.
+    if (fixed_layout_ && slot.wire == Wire::WIDE && target_text) {
+        // One layout for every row (batches, Firebird 4+). Into text, the
+        // text the per-row mode stores: 1.5, not 1.5000000000.
+        slot.wire = Wire::TEXT;
+        slot.wide_text = true;
+    } else if (slot.wire == Wire::WIDE && !target_text &&
+               (fixed_layout_ || (FirebirdClientMajor() >= 4 && stmt_.Connection().EngineMajor() >= 4))) {
+        // INT128 with the DECIMAL's own scale: one layout for every row
+        // (batches), and one row at a time with a Firebird 4+ client and
+        // server, where the server rounds it to the target as it does the
+        // literal. WIDE would send a value whose digits don't fit in 64 bits
+        // as text, and the server overflows converting text with more digits
+        // than the target holds (1.12345678901234567891 into NUMERIC(18,4)).
+        // Firebird 3 has no INT128 and refuses that literal too; a Firebird 3
+        // client can't send SQL_INT128 even to a Firebird 4 server.
         slot.wire = Wire::INT128;
         slot.sqlscale = src.id() == LogicalTypeId::DECIMAL
                             ? static_cast<int16_t>(-DecimalType::GetScale(src))
@@ -231,9 +237,31 @@ void FirebirdParamEncoder::Setup(Slot &slot) {
     slot.buffer.assign(size, 0);
 }
 
+// A wide DECIMAL / HUGEINT as an unscaled value and scale, trailing zero
+// decimals dropped (they carry no value).
+static void WideDigits(const LogicalType &source, const Value &value, hugeint_t &h, uint8_t &scale) {
+    scale = 0;
+    if (source.id() == LogicalTypeId::DECIMAL) {
+        h = value.GetValueUnsafe<hugeint_t>();
+        scale = DecimalType::GetScale(source);
+    } else {
+        h = value.DefaultCastAs(LogicalType::HUGEINT).GetValue<hugeint_t>();
+    }
+    while (scale > 0 && h % hugeint_t(10) == hugeint_t(0)) {
+        h /= hugeint_t(10);
+        --scale;
+    }
+}
+
 std::string FirebirdParamEncoder::TextBytes(idx_t index, const Slot &slot, const Value &value) {
     if (slot.source.id() == LogicalTypeId::BLOB) {
         return StringValue::Get(value);  // raw bytes
+    }
+    if (slot.wide_text) {
+        hugeint_t h;
+        uint8_t scale;
+        WideDigits(slot.source, value, h, scale);
+        return Decimal::ToString(h, 38, scale);
     }
     std::string text = slot.source.id() == LogicalTypeId::VARCHAR
                            ? StringValue::Get(value)
@@ -355,18 +383,8 @@ void FirebirdParamEncoder::EncodeValue(idx_t index, Slot &slot, const Value &val
     }
     case Wire::WIDE: {
         hugeint_t h;
-        uint8_t scale = 0;
-        if (slot.source.id() == LogicalTypeId::DECIMAL) {
-            h = value.GetValueUnsafe<hugeint_t>();
-            scale = DecimalType::GetScale(slot.source);
-        } else {
-            h = value.DefaultCastAs(LogicalType::HUGEINT).GetValue<hugeint_t>();
-        }
-        // Trailing zero decimals carry no value.
-        while (scale > 0 && h % hugeint_t(10) == hugeint_t(0)) {
-            h /= hugeint_t(10);
-            --scale;
-        }
+        uint8_t scale;
+        WideDigits(slot.source, value, h, scale);
         int64_t small;
         if (Hugeint::TryCast(h, small)) {
             x.sqltype = SQL_INT64 | 1;
@@ -488,6 +506,15 @@ void FirebirdParamEncoder::EncodeValue(idx_t index, Slot &slot, const Value &val
     }
 }
 
+vector<FirebirdParamEncoder::Layout> FirebirdParamEncoder::GetLayout() const {
+    vector<Layout> out;
+    out.reserve(slots_.size());
+    for (auto &slot : slots_) {
+        out.push_back(Layout {slot.sqltype, slot.sqllen, slot.sqlscale, slot.sqlsubtype, slot.wire == Wire::BLOB});
+    }
+    return out;
+}
+
 void FirebirdParamEncoder::Encode(const vector<Value> &values) {
     if (values.size() != slots_.size()) {
         throw InvalidInputException("expected %llu parameter value(s), got %llu",
@@ -499,15 +526,15 @@ void FirebirdParamEncoder::Encode(const vector<Value> &values) {
     }
 }
 
-void FirebirdParamEncoder::Encode(DataChunk &chunk, idx_t row) {
-    for (idx_t i = 0; i < slots_.size(); ++i) {
-        EncodeValue(i, slots_[i], chunk.GetValue(i, row));
-    }
-}
-
 void FirebirdParamEncoder::Encode(DataChunk &chunk, idx_t row, const vector<idx_t> &columns) {
     for (idx_t i = 0; i < slots_.size(); ++i) {
         EncodeValue(i, slots_[i], chunk.GetValue(columns[i], row));
+    }
+}
+
+void FirebirdParamEncoder::Encode(DataChunk &chunk, idx_t row) {
+    for (idx_t i = 0; i < slots_.size(); ++i) {
+        EncodeValue(i, slots_[i], chunk.GetValue(i, row));
     }
 }
 
