@@ -59,7 +59,7 @@ connection.
 | `operation` | VARCHAR | What the record is: `scan` (`firebird_scan` or a table of an `ATTACH`), `query` (`firebird_query`) or `execute` (`firebird_execute`). |
 | `write_mode` | VARCHAR | For writes: `row` (one execution per row). `NULL` for reads. |
 | `rows_written` | BIGINT | For writes: executions sent to Firebird. `NULL` for reads. |
-| `rows_affected` | BIGINT | For writes: Firebird's record counts. `NULL` for reads and when not counted (a statement that returns rows). |
+| `rows_affected` | BIGINT | For writes: Firebird's record counts. `NULL` for reads and when not counted (`count_rows := false`, a statement that returns rows). |
 
 `limit_pushed` / `offset_pushed` / `not_pushed_reasons` are the Phase 4 #3
 pushdown-explainability columns. They make it explicit what paging reached

@@ -500,7 +500,8 @@ Both arguments may be any constant expression, for example
 
 Runs one Firebird statement (DML, DDL, `EXECUTE PROCEDURE`,
 `EXECUTE BLOCK`) on an ATTACH opened with `READ_WRITE`, inside the DuckDB
-transaction's Firebird write transaction.
+transaction's Firebird write transaction: once, or once per row of a
+DuckDB query (`source`), with that row's values as its parameters.
 
 ```sql
 ATTACH 'database=C:/data/erp.fdb;user=APP_WRITER;password=secret'
@@ -508,19 +509,29 @@ ATTACH 'database=C:/data/erp.fdb;user=APP_WRITER;password=secret'
 
 SELECT * FROM firebird_execute('fb', 'UPDATE CUSTOMER SET ACTIVE = TRUE WHERE ID = 1');
 SELECT * FROM firebird_execute('fb', 'EXECUTE PROCEDURE SP_CLOSE_DAY(CURRENT_DATE)');
+
+-- One execution per row of a DuckDB query: an upsert from a staging table.
+SELECT * FROM firebird_execute('fb',
+    $$EXECUTE BLOCK (ID INTEGER = ?, NAME VARCHAR(40) = ?, CITY VARCHAR(30) = ?) AS
+      BEGIN UPDATE OR INSERT INTO CUSTOMER (ID, NAME, CITY) VALUES (:ID, :NAME, :CITY) MATCHING (ID); END$$,
+    source := 'SELECT id, name, city FROM staging_customers',
+    commit_every := 10000);
 ```
 
 | Argument | Type | Description |
 |---|---|---|
 | `alias` | VARCHAR | Name of a `TYPE firebird` ATTACH opened with `READ_WRITE` |
 | `sql` | VARCHAR | One Firebird statement, as Firebird runs it |
+| `source` | VARCHAR | Optional. A DuckDB query; the statement runs once per row, with column i as parameter i |
+| `commit_every` | BIGINT | Optional, with `source`. Commit every N rows; 0 (default) = with the DuckDB transaction |
+| `count_rows` | BOOLEAN | Optional. `false` skips the record counts (`rows_affected` NULL). Default `true` |
 
 Returns one row:
 
 | Column | Type | Description |
 |---|---|---|
-| `rows_affected` | BIGINT | Rows inserted + updated + deleted, as Firebird reports them; 0 for DDL; `NULL` for a statement that returns rows |
-| `executions` | BIGINT | 1 |
+| `rows_affected` | BIGINT | Rows inserted + updated + deleted, as Firebird reports them; 0 for DDL; `NULL` for a statement that returns rows, and with `count_rows := false` |
+| `executions` | BIGINT | Executions: 1, or the source rows run |
 
 - **Opt-in.** Writing needs DuckDB's own `READ_WRITE` attach option.
   Without it, and on a `READ_ONLY` ATTACH, the call fails at bind and names
@@ -559,8 +570,54 @@ Returns one row:
   `EXECUTE BLOCK` with `SUSPEND`) run and their rows are read and
   discarded, so a selectable procedure's writes happen, as in isql.
   `rows_affected` is `NULL`. Use `firebird_query` to read rows.
-- **No parameters.** A statement with `?` placeholders is refused: write
-  the values into `sql`.
+- **Parameters from a DuckDB query (`source`).** With
+  `source := '<duckdb query>'`, the statement is prepared once and run
+  once per row of the query, with column i of the row as parameter i (the
+  `?` placeholders, in text order). The column count must match the
+  parameter count; both are checked at bind. The query runs on its own
+  DuckDB connection: it sees the database's tables and attached catalogs,
+  but not the calling connection's TEMP tables, uncommitted changes or
+  session state (`USE`, `search_path`, variables, `SET` values; name
+  tables with their catalog, or use `SET GLOBAL`). Its
+  rows are read as a stream, a chunk (2,048 rows) at a time, and DuckDB
+  computes only a chunk or two ahead of the writes. So memory stays
+  small, and if the query fails half-way, the rows `commit_every`
+  committed before the failure stay (the error says which). Its column
+  types are checked when the call runs: if another connection changed them
+  since the bind, the call fails before writing.
+- **Exact values.** Each value travels in a Firebird type that represents
+  it exactly, and the server converts it to the parameter's type with its
+  own rules, so rounding, overflow and truncation are what the same
+  literal in the SQL text gets. Integers go as BIGINT, a `DECIMAL(p,s)`
+  as a BIGINT with scale s (1.5 lands in a `NUMERIC(9,3)` as 1.500), a
+  128-bit value, or a DECIMAL whose digits don't fit in 64 bits, as
+  `INT128` with its scale when the client library and the server are both
+  Firebird 4+; otherwise as text, which fails past 18 digits (on a
+  Firebird 3 server, like the same literal; through a Firebird 3 client to
+  a Firebird 4+ server, the literal still rounds);
+  FLOAT, DOUBLE, BOOLEAN, DATE, TIME and TIMESTAMP in their own types;
+  time zones as UTC (Firebird keeps 1/10000 s), so a `TIMESTAMPTZ` stored
+  in a column without a time zone keeps its UTC time (cast it in the
+  source, `ts AT TIME ZONE '...'`, for a local time). Text, and values with no
+  native form, go as VARCHAR in the parameter's character set
+  (`none_encoding` bytes for `CHARACTER SET NONE`); a value longer than
+  the parameter, or a character its encoding can't hold, is an error,
+  never silent truncation. Values for BLOB parameters become BLOBs of any
+  size. Every row sets every parameter again, so a value after a NULL is
+  never sent as NULL. Dates outside 0001-01-01 to 9999-12-31 (BC dates,
+  years past 9999) and `TIME '24:00:00'` are an error: Firebird can't
+  hold them. (In a scan's filter, such a constant stays a DuckDB filter.)
+- **`commit_every := N`** commits every N rows; those rows stay committed
+  if a later row fails. 0 (default) commits with the DuckDB transaction.
+  It needs autocommit: inside `BEGIN ... COMMIT` the call fails, because
+  its commits would also commit the transaction's earlier writes.
+- **`count_rows := false`** skips reading the record counts after each
+  row (one round trip per row) and returns `rows_affected` NULL.
+- **Errors.** The first failing row stops the call. The message names the
+  source row and what is kept: nothing (the transaction is rolled back),
+  or source rows 1 to K that `commit_every` committed.
+- With `source`, a statement that returns rows is refused, and a
+  statement with `?` placeholders needs a `source`.
 - **Session statements are refused:** `SET ROLE`, `SET TRUSTED ROLE`,
   `SET BIND`, `SET DECFLOAT`, `SET TIME ZONE`, `SET SESSION ...`,
   `SET STATEMENT TIMEOUT`, `SET OPTIMIZE`, `ALTER SESSION`. The write
@@ -616,8 +673,8 @@ Returns one row:
   disable_optimizer`) DuckDB 2.0 refuses every autocommit call.
 - **Telemetry.** Each call leaves one `firebird_last_query()` /
   `firebird_query_log()` record: the statement in `remote_sql`,
-  `operation = 'execute'`, `write_mode = 'row'`, `rows_written` (1) and
-  `rows_affected`; on failure, the error.
+  `operation = 'execute'`, `write_mode = 'row'`, `rows_written`
+  (executions) and `rows_affected`; on failure, the error.
 
 ### `firebird_clear_cache(alias)`
 

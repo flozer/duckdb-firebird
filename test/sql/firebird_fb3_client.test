@@ -1,0 +1,67 @@
+# name: test/sql/firebird_fb3_client.test
+# description: writes through a Firebird 3 client to a Firebird 4+ server
+# group: [firebird]
+#
+# Run only by the matrix step "Firebird 3 client against a Firebird 4+
+# server", which loads the Firebird 3 libfbclient and sets
+# FIREBIRD_FB3_CLIENT_RW_DB to the leg's write database
+# (scripts/fixture_rw.sql). Every other step pairs a client with a server
+# of its own version.
+
+require firebird
+
+require-env FIREBIRD_FB3_CLIENT_RW_DB
+
+statement ok
+ATTACH '${FIREBIRD_FB3_CLIENT_RW_DB}' AS rw (TYPE firebird, READ_WRITE);
+
+# The pairing this file exists for, checked so that a client that stayed 4+
+# can't make the rest pass vacuously.
+query TT
+SELECT client_version LIKE '3.%', TRY_CAST(split_part(engine_version, '.', 1) AS INTEGER) >= 4
+FROM firebird_health('rw');
+----
+true	true
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET WHERE ID >= 9300 AND ID < 9400');
+
+# DECIMALs whose digits fit 64 bits go as BIGINT with their scale, and the
+# server converts them.
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM18_4) VALUES (?, ?)',
+    source := $$SELECT * FROM (VALUES (9300, 1.5::DECIMAL(38,10)),
+                                      (9301, -123456789.1234::DECIMAL(38,10))) t$$);
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM18_4) VALUES (?, ?)',
+    source := 'SELECT 9302, 12345678901234.5678::DECIMAL(18,4)');
+
+query II
+SELECT ID, C_NUM18_4 FROM rw.main.RW_TARGET WHERE ID BETWEEN 9300 AND 9302 ORDER BY ID;
+----
+9300	1.5000
+9301	-123456789.1234
+9302	12345678901234.5678
+
+# A DECIMAL whose digits don't fit 64 bits: a Firebird 3 client can't send
+# INT128, so it goes as text, which the server can't fit into NUMERIC(18,4)
+# (from a Firebird 4+ client it goes as INT128 with its scale and rounds,
+# see firebird_execute_source_fb4.test). Nothing is written.
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM18_4) VALUES (?, ?)',
+    source := $$SELECT 9303, 1.12345678901234567891::DECIMAL(38,20)$$);
+----
+numeric value is out of range
+
+# The same value as a literal in the SQL text still rounds: the server parses it.
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM18_4) VALUES (9304, 1.12345678901234567891)');
+
+query II
+SELECT ID, C_NUM18_4 FROM rw.main.RW_TARGET WHERE ID BETWEEN 9303 AND 9304 ORDER BY ID;
+----
+9304	1.1235
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET WHERE ID >= 9300 AND ID < 9400');

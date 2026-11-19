@@ -754,7 +754,8 @@ Os dois argumentos podem ser qualquer expressao constante, por exemplo
 
 Executa um comando Firebird (DML, DDL, `EXECUTE PROCEDURE`,
 `EXECUTE BLOCK`) num ATTACH aberto com `READ_WRITE`, dentro da transacao de
-escrita Firebird da transacao DuckDB.
+escrita Firebird da transacao DuckDB: uma vez, ou uma vez por linha de uma
+query DuckDB (`source`), com os valores da linha como parametros.
 
 ```sql
 ATTACH 'database=C:/data/erp.fdb;user=APP_WRITER;password=secret'
@@ -762,19 +763,29 @@ ATTACH 'database=C:/data/erp.fdb;user=APP_WRITER;password=secret'
 
 SELECT * FROM firebird_execute('fb', 'UPDATE CUSTOMER SET ACTIVE = TRUE WHERE ID = 1');
 SELECT * FROM firebird_execute('fb', 'EXECUTE PROCEDURE SP_CLOSE_DAY(CURRENT_DATE)');
+
+-- Uma execucao por linha de uma query DuckDB: um upsert a partir de staging.
+SELECT * FROM firebird_execute('fb',
+    $$EXECUTE BLOCK (ID INTEGER = ?, NAME VARCHAR(40) = ?, CITY VARCHAR(30) = ?) AS
+      BEGIN UPDATE OR INSERT INTO CUSTOMER (ID, NAME, CITY) VALUES (:ID, :NAME, :CITY) MATCHING (ID); END$$,
+    source := 'SELECT id, name, city FROM staging_customers',
+    commit_every := 10000);
 ```
 
 | Argumento | Tipo | Descricao |
 |---|---|---|
 | `alias` | VARCHAR | Nome de um ATTACH `TYPE firebird` aberto com `READ_WRITE` |
 | `sql` | VARCHAR | Um comando Firebird, como o Firebird o executa |
+| `source` | VARCHAR | Opcional. Uma query DuckDB; o comando roda uma vez por linha, com a coluna i como parametro i |
+| `commit_every` | BIGINT | Opcional, com `source`. Confirma a cada N linhas; 0 (padrao) = com a transacao DuckDB |
+| `count_rows` | BOOLEAN | Opcional. `false` dispensa as contagens de registros (`rows_affected` NULL). Padrao `true` |
 
 Retorna uma linha:
 
 | Coluna | Tipo | Descricao |
 |---|---|---|
-| `rows_affected` | BIGINT | Linhas inseridas + atualizadas + excluidas, como o Firebird informa; 0 para DDL; `NULL` para um comando que retorna linhas |
-| `executions` | BIGINT | 1 |
+| `rows_affected` | BIGINT | Linhas inseridas + atualizadas + excluidas, como o Firebird informa; 0 para DDL; `NULL` para um comando que retorna linhas, e com `count_rows := false` |
+| `executions` | BIGINT | Execucoes: 1, ou as linhas da source executadas |
 
 - **Opt-in.** Escrever exige a opcao `READ_WRITE` do proprio ATTACH do
   DuckDB. Sem ela, e num ATTACH `READ_ONLY`, a chamada falha no bind e
@@ -815,8 +826,56 @@ Retorna uma linha:
   lidas e descartadas, para que as escritas de uma procedure selecionavel
   acontecam, como no isql. `rows_affected` e `NULL`. Para ler linhas, use
   `firebird_query`.
-- **Sem parametros.** Um comando com `?` e recusado: escreva os valores no
-  `sql`.
+- **Parametros de uma query DuckDB (`source`).** Com
+  `source := '<query duckdb>'`, o comando e preparado uma vez e executado
+  uma vez por linha da query, com a coluna i da linha como parametro i (os
+  `?`, na ordem do texto). O numero de colunas deve ser igual ao de
+  parametros; os dois sao conferidos no bind. A query roda numa conexao
+  DuckDB propria: ve as tabelas do banco e os catalogos anexados, mas nao
+  as tabelas TEMP, as mudancas nao confirmadas nem o estado de sessao da
+  conexao que chama (`USE`, `search_path`, variaveis, valores de `SET`;
+  qualifique as tabelas com o catalogo, ou use `SET GLOBAL`).
+  Suas linhas sao lidas em stream, um chunk (2.048 linhas) por vez, e o
+  DuckDB calcula so um ou dois chunks a frente das gravacoes. Entao a
+  memoria fica pequena, e se a query falha no meio, as linhas que
+  `commit_every` confirmou antes da falha ficam (o erro diz quais). Os
+  tipos das colunas sao conferidos quando a chamada roda: se outra conexao
+  os mudou depois do bind, a chamada falha antes de gravar.
+- **Valores exatos.** Cada valor viaja num tipo Firebird que o representa
+  exatamente, e o servidor o converte para o tipo do parametro com suas
+  proprias regras: arredondamento, overflow e truncamento sao os mesmos
+  do literal no texto SQL. Inteiros vao como BIGINT, um `DECIMAL(p,s)`
+  como BIGINT com escala s (1.5 entra num `NUMERIC(9,3)` como 1.500), um
+  valor de 128 bits, ou um DECIMAL cujos digitos nao cabem em 64 bits,
+  como `INT128` com sua escala quando a biblioteca cliente e o servidor
+  sao ambos Firebird 4+; senao como texto, que falha acima de 18 digitos
+  (num servidor Firebird 3, como o mesmo literal; por um cliente Firebird
+  3 num servidor Firebird 4+, o literal ainda arredonda); FLOAT, DOUBLE,
+  BOOLEAN, DATE, TIME e TIMESTAMP nos proprios
+  tipos; fusos horarios como UTC (o Firebird guarda 1/10000 s), entao um
+  `TIMESTAMPTZ` gravado numa coluna sem fuso fica com a hora UTC (converta
+  na origem, `ts AT TIME ZONE '...'`, para a hora local). Texto, e
+  valores sem forma nativa, vao como VARCHAR no character set do
+  parametro (bytes de `none_encoding` para `CHARACTER SET NONE`); um valor
+  maior que o parametro, ou um caractere que a codificacao nao comporta, e
+  erro, nunca truncamento silencioso. Valores para parametros BLOB viram
+  BLOBs de qualquer tamanho. Cada linha define todos os parametros de
+  novo, entao um valor depois de um NULL nunca e enviado como NULL. Datas
+  fora de 0001-01-01 a 9999-12-31 (datas AC, anos depois de 9999) e
+  `TIME '24:00:00'` sao erro: o Firebird nao as guarda. (No filtro de um
+  scan, uma constante assim fica como filtro do DuckDB.)
+- **`commit_every := N`** confirma a cada N linhas; essas linhas ficam
+  confirmadas se uma linha seguinte falhar. 0 (padrao) confirma com a
+  transacao DuckDB. Exige autocommit: dentro de `BEGIN ... COMMIT` a
+  chamada falha, porque seus commits confirmariam tambem as escritas
+  anteriores da transacao.
+- **`count_rows := false`** deixa de ler as contagens de registros apos
+  cada linha (uma ida e volta por linha) e retorna `rows_affected` NULL.
+- **Erros.** A primeira linha que falha para a chamada. A mensagem cita a
+  linha da source e o que fica: nada (a transacao e desfeita), ou as
+  linhas 1 a K que o `commit_every` confirmou.
+- Com `source`, um comando que retorna linhas e recusado, e um comando com
+  `?` precisa de `source`.
 - **Comandos de sessao sao recusados:** `SET ROLE`, `SET TRUSTED ROLE`,
   `SET BIND`, `SET DECFLOAT`, `SET TIME ZONE`, `SET SESSION ...`,
   `SET STATEMENT TIMEOUT`, `SET OPTIMIZE`, `ALTER SESSION`. A conexao de
@@ -875,7 +934,7 @@ Retorna uma linha:
 - **Telemetria.** Cada chamada deixa um registro em
   `firebird_last_query()` / `firebird_query_log()`: o comando em
   `remote_sql`, `operation = 'execute'`, `write_mode = 'row'`,
-  `rows_written` (1) e `rows_affected`; em caso de falha, o erro.
+  `rows_written` (execucoes) e `rows_affected`; em caso de falha, o erro.
 
 ### `firebird_clear_cache(alias)`
 

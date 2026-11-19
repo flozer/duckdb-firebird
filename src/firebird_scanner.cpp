@@ -25,6 +25,7 @@
 #include "firebird_client.hpp"
 #include "firebird_cancel.hpp"
 #include "firebird_observability.hpp"
+#include "firebird_param_encoder.hpp"
 #include "firebird_query.hpp"
 #include "firebird_types.hpp"
 #include "firebird_view_analysis.hpp" // LookupObjectType, ViewAnalysis, AnalyzeViewSource
@@ -2306,6 +2307,11 @@ static bool TryEncodeNoneLiteral(const std::string &utf8, NoneEncoding mode,
         out_bytes.push_back(static_cast<char>(out));
     }
     return true;
+}
+
+bool FirebirdEncodeNoneText(const std::string &utf8, NoneEncoding mode,
+                            std::string &out_bytes) {
+    return TryEncodeNoneLiteral(utf8, mode, out_bytes);
 }
 
 // True when `none_pushdown` opt-in applies for this bind: the caller asked

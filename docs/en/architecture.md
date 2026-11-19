@@ -252,10 +252,23 @@ its read-only transaction.
   `RollbackTransaction`. Autocommit gives one Firebird transaction per
   statement; `BEGIN ... COMMIT` gives one for all its writes.
 - **`firebird_execute`** (`firebird_execute.cpp`) prepares the statement
-  on the write connection, refuses transaction control and `?` parameters,
-  runs it (reading and discarding the rows of a statement that returns
-  rows) and reads the record counts with `isc_dsql_sql_info`
-  (`isc_info_sql_records`).
+  on the write connection, refuses transaction control, runs it (reading
+  and discarding the rows of a statement that returns rows) and reads the
+  record counts with `isc_dsql_sql_info` (`isc_info_sql_records`). With
+  `source`, it runs the DuckDB query on its own `Connection`, reads it as
+  a stream (`SendQuery` on DuckDB 1.5, `Submit` and `QueryResultStream`
+  on 2.0) with that connection's streaming buffer set to 1 KB, so DuckDB
+  computes a chunk or two ahead of the writes, and executes the prepared
+  statement once per row.
+- **Parameters** (`FirebirdParamEncoder`, `firebird_param_encoder.cpp`):
+  `isc_dsql_describe_bind` gives the parameters; each DuckDB value is put
+  in the input XSQLDA in a type that represents it exactly (integers as
+  `SQL_INT64`, `DECIMAL(p,s)` as `SQL_INT64` with `sqlscale = -s`,
+  `SQL_INT128` on Firebird 4+, text as `SQL_VARYING` in the parameter's
+  character set, BLOBs created with `isc_create_blob2`), and the server
+  converts it to the declared type. Every execution resets type, length,
+  data pointer and NULL indicator of every parameter. The scan's
+  pushed-down filter values go through the same encoder.
 - **A result read halfway keeps the write.** DuckDB commits a streamed
   result only once it is fully read. On DuckDB 1.5 the bind sets
   `QueryResultOutputType::FORCE_MATERIALIZED`; DuckDB 2.0 has no such

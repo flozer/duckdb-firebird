@@ -1,0 +1,92 @@
+# name: test/sql/firebird_execute_source_fb4.test
+# description: firebird_execute with source := ... and the Firebird 4+ types
+# group: [firebird]
+#
+# Needs scripts/fixture_rw.sql and scripts/fixture_rw4.sql in the database
+# named by FIREBIRD_RW4_DB (Firebird 4/5 only).
+
+require firebird
+
+require-env FIREBIRD_RW4_DB
+
+statement ok
+ATTACH '${FIREBIRD_RW4_DB}' AS ro (TYPE firebird);
+
+statement ok
+ATTACH '${FIREBIRD_RW4_DB}' AS rw (TYPE firebird, READ_WRITE);
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET4');
+
+# INT128, NUMERIC(38,6), DECFLOAT(16/34) (read as text, written as text),
+# TIMESTAMP / TIME WITH TIME ZONE
+query II
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET4 VALUES (?, ?, ?, ?, ?, ?, ?)',
+    source := 'SELECT * FROM ro.main.RW_TYPES4');
+----
+3	3
+
+query I
+SELECT count(*) FROM (SELECT * FROM rw.main.RW_TARGET4 EXCEPT ALL SELECT * FROM rw.main.RW_TYPES4);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT * FROM rw.main.RW_TYPES4 EXCEPT ALL SELECT * FROM rw.main.RW_TARGET4);
+----
+0
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET4');
+
+# Wide DECIMALs (digits past 64 bits) into NUMERIC(18,4): what the same
+# literal gets. They go as INT128 with their scale, and the server rounds.
+# (One type for the three values: mixed DECIMAL scales past 38 digits would
+# make the VALUES column a DOUBLE.)
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET WHERE ID >= 9100');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'EXECUTE BLOCK AS BEGIN
+    INSERT INTO RW_TARGET (ID, C_NUM18_4) VALUES (9100, 1.12345678901234567891);
+    INSERT INTO RW_TARGET (ID, C_NUM18_4) VALUES (9101, 123456789.12345678901234);
+    INSERT INTO RW_TARGET (ID, C_NUM18_4) VALUES (9102, -1.00004999999999999999);
+    END');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM18_4) VALUES (?, ?)',
+    source := $$SELECT * FROM (VALUES (9200, 1.12345678901234567891::DECIMAL(38,20)),
+                                      (9201, 123456789.12345678901234::DECIMAL(38,20)),
+                                      (9202, -1.00004999999999999999::DECIMAL(38,20))) t$$);
+
+query II
+SELECT ID % 100, C_NUM18_4 FROM rw.main.RW_TARGET WHERE ID >= 9100 ORDER BY ID % 100, ID;
+----
+0	1.1235
+0	1.1235
+1	123456789.1235
+1	123456789.1235
+2	-1.0000
+2	-1.0000
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET WHERE ID >= 9100');
+
+# DuckDB types into the Firebird 4 types
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET4 VALUES (?, ?, ?, ?, ?, ?, ?)',
+    source := $$SELECT 10,
+        170141183460469231731687303715884105727::HUGEINT,
+        -12345678901234567890123456789012.123456::DECIMAL(38,6),
+        1.5::DECIMAL(9,3),
+        '1.234567890123456789012345678901234E+100',
+        TIMESTAMPTZ '2026-11-18 13:45:30.1234+00',
+        '13:45:30.1234+02'::TIMETZ$$);
+
+query IIIIII
+SELECT C_INT128, C_NUM38_6, C_DEC16, C_DEC34, C_TSTZ, C_TTZ FROM rw.main.RW_TARGET4 WHERE ID = 10;
+----
+170141183460469231731687303715884105727	-12345678901234567890123456789012.123456	1.500	1.234567890123456789012345678901234E+100	2026-11-18 13:45:30.1234+00	11:45:30.1234+00
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET4');

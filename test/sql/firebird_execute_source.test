@@ -1,0 +1,510 @@
+# name: test/sql/firebird_execute_source.test
+# description: firebird_execute(alias, sql, source := ..., commit_every := ...) - parameter values
+# group: [firebird]
+#
+# Needs scripts/fixture_rw.sql in the database named by FIREBIRD_RW_DB.
+# Every assertion reads back the STORED values, not just row counts.
+
+require firebird
+
+require-env FIREBIRD_RW_DB
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS ro (TYPE firebird);
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS rw (TYPE firebird, READ_WRITE);
+
+statement ok
+SET firebird_write_lock_timeout = 1;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM CUSTOMER');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG');
+
+# --- Every Firebird 3 type family round-trips exactly ------------------------
+# (NUMERIC(18,4) and BIGINT extremes, negative scaled values, dates before
+# 1900, empty strings, CHARACTER SET NONE bytes, text and binary BLOBs, NULLs)
+
+query II
+SELECT * FROM firebird_execute('rw',
+    'INSERT INTO RW_TARGET VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    source := 'SELECT * FROM ro.main.RW_TYPES');
+----
+4	4
+
+query I
+SELECT count(*) FROM (SELECT * FROM rw.main.RW_TARGET EXCEPT ALL SELECT * FROM rw.main.RW_TYPES);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT * FROM rw.main.RW_TYPES EXCEPT ALL SELECT * FROM rw.main.RW_TARGET);
+----
+0
+
+# The stored bytes of the NONE column are WIN1252 ('Ação' = 41 E7 E3 6F,
+# 4 bytes), not UTF-8 (6 bytes).
+query I
+SELECT N FROM firebird_query('ro', 'SELECT OCTET_LENGTH(C_VARCHAR_NONE) AS N FROM RW_TARGET WHERE ID = 1');
+----
+4
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+# --- Sticky NULLs: NULL, value, NULL, value on the same parameter ------------
+
+query II
+SELECT * FROM firebird_execute('rw',
+    'INSERT INTO RW_TARGET (ID, C_NUM9_3, C_BIGINT, C_INTEGER, C_DOUBLE, C_VARCHAR, C_DATE, C_BOOL, C_BLOB_TEXT)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    source := 'SELECT * FROM (VALUES
+        (10, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+        (11, 1.5::DECIMAL(9,3), 9007199254740993, 7, 2.25, ''x'', DATE ''1850-06-01'', true, ''t1''),
+        (12, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+        (13, -2.125::DECIMAL(9,3), -1, 0, -0.5, '''', DATE ''2026-11-18'', false, ''''),
+        (14, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)) t');
+----
+5	5
+
+query IIIIIIIII
+SELECT ID, C_NUM9_3, C_BIGINT, C_INTEGER, C_DOUBLE, C_VARCHAR, C_DATE, C_BOOL, C_BLOB_TEXT
+  FROM rw.main.RW_TARGET ORDER BY ID;
+----
+10	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+11	1.500	9007199254740993	7	2.25	x	1850-06-01	true	t1
+12	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+13	-2.125	-1	0	-0.5	(empty)	2026-11-18	false	(empty)
+14	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+# --- NUMERIC(9,3) gets the exact value whatever the source type ---------------
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM9_3) VALUES (?, ?)',
+    source := 'SELECT 20, 1.5::DECIMAL(2,1)');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM9_3) VALUES (?, ?)',
+    source := 'SELECT 21, 1.5::DECIMAL(18,6)');
+
+# A wide DECIMAL (128-bit) for a NUMERIC(9,3) parameter
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM9_3) VALUES (?, ?)',
+    source := 'SELECT 22, 1.5::DECIMAL(38,10)');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM9_3) VALUES (?, ?)',
+    source := 'SELECT 23, 1.5::DOUBLE UNION ALL SELECT 24, 1::INTEGER');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM9_3) VALUES (?, ?)',
+    source := 'SELECT 25, ''1.5''');
+
+query II
+SELECT ID, C_NUM9_3 FROM rw.main.RW_TARGET WHERE ID BETWEEN 20 AND 25 ORDER BY ID;
+----
+20	1.500
+21	1.500
+22	1.500
+23	1.500
+24	1.000
+25	1.500
+
+# More digits than the column: the parameter gets what the same literal gets.
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM9_3) VALUES (30, 1.2345675)');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM9_3) VALUES (?, ?)',
+    source := 'SELECT 31, 1.2345675::DECIMAL(18,7)');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM9_3) VALUES (32, -1.2345675)');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM9_3) VALUES (?, ?)',
+    source := 'SELECT 33, -1.2345675::DECIMAL(18,7)');
+
+query I
+SELECT count(DISTINCT C_NUM9_3) FROM rw.main.RW_TARGET WHERE ID IN (30, 31);
+----
+1
+
+query I
+SELECT count(DISTINCT C_NUM9_3) FROM rw.main.RW_TARGET WHERE ID IN (32, 33);
+----
+1
+
+# NUMERIC(18,4) limits and negative scaled values through parameters
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM18_4, C_NUM4_2, C_DEC9_2) VALUES (?, ?, ?, ?)',
+    source := 'SELECT * FROM (VALUES
+        (40, 922337203685477.5807::DECIMAL(19,4), -99.99::DECIMAL(4,2), -0.01::DECIMAL(9,2)),
+        (41, -922337203685477.5808::DECIMAL(19,4), 0.01::DECIMAL(4,2), 9999999.99::DECIMAL(9,2))) t');
+
+query IIII
+SELECT ID, C_NUM18_4, C_NUM4_2, C_DEC9_2 FROM rw.main.RW_TARGET WHERE ID IN (40, 41) ORDER BY ID;
+----
+40	922337203685477.5807	-99.99	-0.01
+41	-922337203685477.5808	0.01	9999999.99
+
+# Out of range: Firebird's error, naming the source row; nothing kept.
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM9_3) VALUES (?, ?)',
+    source := 'SELECT * FROM (VALUES (50, 1.0), (51, 123456789.5)) t');
+----
+source row 2 failed
+
+query I
+SELECT count(*) FROM rw.main.RW_TARGET WHERE ID IN (50, 51);
+----
+0
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+# --- Text and BLOBs of 64 KB and more ---------------------------------------------
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_BLOB_TEXT, C_BLOB_BIN) VALUES (?, ?, ?)',
+    source := 'SELECT 60, repeat(''Ação '', 20000), (repeat(''ab'', 40000) || ''z'')::BLOB');
+
+query III
+SELECT strlen(C_BLOB_TEXT), C_BLOB_TEXT = repeat('Ação ', 20000), octet_length(C_BLOB_BIN)
+  FROM rw.main.RW_TARGET WHERE ID = 60;
+----
+140000	true	80001
+
+query I
+SELECT C_BLOB_BIN = (repeat('ab', 40000) || 'z')::BLOB FROM rw.main.RW_TARGET WHERE ID = 60;
+----
+true
+
+# A VARCHAR longer than the column: Firebird's truncation error, not silent truncation.
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_VARCHAR) VALUES (?, ?)',
+    source := 'SELECT 61, repeat(''x'', 41)');
+----
+source row 1 failed
+
+# A character WIN1252 can't hold, for a CHARACTER SET NONE column
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_VARCHAR_NONE) VALUES (?, ?)',
+    source := 'SELECT 62, ''日本''');
+----
+CHARACTER SET NONE
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+# --- The upsert example, verbatim ----------------------------------------------
+
+statement ok
+CREATE TABLE staging_customers AS
+SELECT * FROM (VALUES (1, 'Ana', 'Recife'), (2, 'Bo', NULL), (3, 'Cy', 'Natal')) t(id, name, city);
+
+query II
+CALL firebird_execute('rw', $$EXECUTE BLOCK (ID INTEGER = ?, NAME VARCHAR(40) = ?, CITY VARCHAR(30) = ?) AS BEGIN UPDATE OR INSERT INTO CUSTOMER (ID, NAME, CITY) VALUES (:ID, :NAME, :CITY) MATCHING (ID); END$$, source := 'SELECT id, name, city FROM staging_customers', commit_every := 10000);
+----
+3	3
+
+statement ok
+UPDATE staging_customers SET city = 'Olinda' WHERE id = 2;
+
+statement ok
+CALL firebird_execute('rw', $$EXECUTE BLOCK (ID INTEGER = ?, NAME VARCHAR(40) = ?, CITY VARCHAR(30) = ?) AS BEGIN UPDATE OR INSERT INTO CUSTOMER (ID, NAME, CITY) VALUES (:ID, :NAME, :CITY) MATCHING (ID); END$$, source := 'SELECT id, name, city FROM staging_customers', commit_every := 10000);
+
+query III
+SELECT ID, NAME, CITY FROM rw.main.CUSTOMER ORDER BY ID;
+----
+1	Ana	Recife
+2	Bo	Olinda
+3	Cy	Natal
+
+# --- An error in row N: everything rolls back, or back to the last commit ------
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (?)',
+    source := 'SELECT * FROM (VALUES (70), (71), (72), (70), (73)) t');
+----
+source row 4 failed
+
+query I
+SELECT count(*) FROM rw.main.RW_TARGET;
+----
+0
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (?)',
+    source := 'SELECT * FROM (VALUES (70), (71), (72), (70), (73)) t', commit_every := 2);
+----
+Source rows 1 to 2 were committed
+
+query I
+SELECT list(ID ORDER BY ID) FROM rw.main.RW_TARGET;
+----
+[70, 71]
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+# --- A source reading the table it writes -----------------------------------------
+# The source runs on its own connection: it reads what is committed when its
+# cursor reads, not the uncommitted rows of this statement.
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (?, ?)',
+    source := 'SELECT * FROM (VALUES (1, ''a''), (2, ''b''), (3, ''c'')) t');
+
+query II
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (?, ?)',
+    source := 'SELECT ID + 100, NOTE FROM ro.main.RW_LOG');
+----
+3	3
+
+query II
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (?, ?)',
+    source := 'SELECT ID + 1000, NOTE FROM ro.main.RW_LOG WHERE ID < 100', commit_every := 1);
+----
+3	3
+
+query I
+SELECT count(*) FROM rw.main.RW_LOG;
+----
+9
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG');
+
+# --- Binding checks ------------------------------------------------------------------
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_INTEGER) VALUES (?, ?)', source := 'SELECT 1');
+----
+the statement has 2 parameter(s) (?) but the source query returns 1 column(s)
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (?)');
+----
+pass their values with source
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (?)', source := 'SELECT no_such_column');
+----
+the source query does not prepare
+
+statement error
+SELECT * FROM firebird_execute('ro', 'INSERT INTO RW_TARGET (ID) VALUES (?)', source := 'SELECT 1');
+----
+READ_WRITE
+
+# count_rows := false skips the per-row count round trip
+query II
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (?)',
+    source := 'SELECT * FROM range(80, 85)', count_rows := false);
+----
+NULL	5
+
+query IIII
+SELECT operation, write_mode, rows_written, rows_affected FROM firebird_last_query();
+----
+execute	row	5	NULL
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET WHERE ID = ?', source := 'SELECT * FROM range(80, 83)');
+
+query III
+SELECT write_mode, rows_written, rows_affected FROM firebird_last_query();
+----
+row	3	3
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+# An empty source executes nothing
+query II
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (?)', source := 'SELECT 1 WHERE false');
+----
+0	0
+
+# --- The source is read as a stream ------------------------------------------------
+# Rows are written as the source produces them, a chunk (2,048 rows) at a
+# time, while DuckDB computes only a chunk or two ahead. The source fails at
+# row 20,001, in its tenth chunk, with one thread: the rows commit_every
+# committed before the failure stay, and the error says so. A source run to
+# completion first (or far ahead of the writes, as with DuckDB's default
+# streaming buffer) fails before any row is written.
+
+statement ok
+SET threads = 1;
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (?)',
+    source := 'SELECT CASE WHEN i < 20000 THEN i ELSE error(''source stopped at '' || i) END FROM range(30000) t(i)',
+    commit_every := 500);
+----
+<REGEX>:.*the source query failed after [0-9]+ row\(s\): .*source stopped at 20000.* Source rows 1 to [0-9]+ were committed \(commit_every\).*
+
+statement ok
+RESET threads;
+
+# Rows 0 .. n-1 for some n: at least the first chunk, a multiple of 500, and
+# short of the failing row.
+query I
+SELECT count(*) >= 2000 AND count(*) < 20000 AND count(*) % 500 = 0
+       AND min(ID) = 0 AND max(ID) = count(*) - 1
+FROM rw.main.RW_TARGET;
+----
+true
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+# --- commit_every needs autocommit ----------------------------------------------
+# Inside BEGIN its commits would also commit the earlier writes, and the
+# ROLLBACK could not undo them.
+
+statement ok
+BEGIN;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (-1)');
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (?)', source := 'SELECT 1', commit_every := 1);
+----
+commit_every needs autocommit
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM firebird_query('rw', 'SELECT ID FROM RW_TARGET');
+----
+0
+
+# --- WIN1252 columns in a UTF8 database ------------------------------------------
+# A parameter is transliterated like the literal: 4 WIN1252 bytes, equal to
+# the literal on the server, in the VARCHAR and in the text BLOB.
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_CS1252 (ID, V, B) VALUES (1, ''Ação'', ''Ação'')');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_CS1252 (ID, V, B) VALUES (?, ?, ?)',
+    source := $$SELECT 2, 'Ação', 'Ação'$$);
+
+query IIIIII
+SELECT * FROM firebird_query('rw', $$SELECT ID, OCTET_LENGTH(V), OCTET_LENGTH(B), IIF(V = 'Ação', 1, 0),
+    IIF(CAST(B AS VARCHAR(20) CHARACTER SET WIN1252) = 'Ação', 1, 0), V FROM RW_CS1252 ORDER BY ID$$);
+----
+1	4	4	1	1	Ação
+2	4	4	1	1	Ação
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_CS1252');
+
+# --- A prepared call whose source table changes type -----------------------------
+# The call writes to the ATTACH, which reports no catalog version, so DuckDB
+# binds the prepared statement again on every execution: the source is read
+# with its new types (5 stays 5, not 0.05). A change made by another
+# connection between the bind and the execution of one statement is caught by
+# the types check when the call runs, before any write (not reproducible here).
+
+statement ok
+CREATE TABLE src_types (id INTEGER, v DECIMAL(9,2));
+
+statement ok
+INSERT INTO src_types VALUES (90, 5);
+
+statement ok
+PREPARE p_src AS SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM9_3) VALUES (?, ?)',
+    source := 'SELECT id, v FROM src_types');
+
+statement ok
+ALTER TABLE src_types ALTER v TYPE INTEGER;
+
+statement ok
+EXECUTE p_src;
+
+query II
+SELECT * FROM firebird_query('rw', 'SELECT ID, C_NUM9_3 FROM RW_TARGET WHERE ID = 90');
+----
+90	5.000
+
+statement ok
+DEALLOCATE p_src;
+
+statement ok
+DROP TABLE src_types;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
+
+# --- Dates and times outside Firebird's range: an error, nothing written ----------
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_DATE) VALUES (?, ?)',
+    source := 'SELECT 91, make_date(10000, 1, 1)');
+----
+is outside Firebird's dates (0001-01-01 to 9999-12-31)
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_DATE) VALUES (?, ?)',
+    source := $$SELECT 92, DATE '0044-03-15 (BC)'$$);
+----
+is outside Firebird's dates (0001-01-01 to 9999-12-31)
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_TS) VALUES (?, ?)',
+    source := 'SELECT 93, make_timestamp(10000, 1, 1, 0, 0, 0)');
+----
+is outside Firebird's dates (0001-01-01 to 9999-12-31)
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_TIME) VALUES (?, ?)',
+    source := $$SELECT 94, TIME '24:00:00'$$);
+----
+TIME '24:00:00' is outside Firebird's times
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_TIME) VALUES (?, ?)',
+    source := $$SELECT 98, '24:00:00+00'::TIMETZ$$);
+----
+<REGEX>:.*(TIME '24:00:00' is outside Firebird's times|Conversion Error).*
+
+# A statement that fails to prepare at bind quotes the SQL: its literals are
+# hidden there too, as the statement mentions PASSWORD.
+statement error
+SELECT * FROM firebird_execute('rw', 'EXECUTE BLOCK (X INTEGER = ?) AS DECLARE N INTEGER; BEGIN EXECUTE STATEMENT ''SELECT 1 FROM RDB$DATABASE'' ON EXTERNAL ''localhost:/no/such.fdb'' AS USER ''SYSDBA'' PASSWORD ''s3cret-bind'' INTO :NO_SUCH_VARIABLE; END',
+    source := 'SELECT 1');
+----
+<!REGEX>:(?s).*s3cret.*
+
+query I
+SELECT count(*) FROM firebird_query('rw', 'SELECT ID FROM RW_TARGET');
+----
+0
+
+# The limits themselves are Firebird dates.
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_DATE) VALUES (?, ?)',
+    source := $$SELECT * FROM (VALUES (95, DATE '0001-01-01'), (96, DATE '9999-12-31')) t$$);
+
+query II
+SELECT * FROM firebird_query('rw', 'SELECT ID, C_DATE FROM RW_TARGET ORDER BY ID');
+----
+95	0001-01-01
+96	9999-12-31
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');

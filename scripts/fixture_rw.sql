@@ -7,6 +7,9 @@
  *              typical values, a row of extremes and an all-NULL row.
  *              Text is written as hex literals so the stored bytes do not
  *              depend on isql's connection character set.
+ *   RW_TARGET: the same columns as RW_TYPES, empty: parameter round trips.
+ *   CUSTOMER : an upsert target (EXECUTE BLOCK ... UPDATE OR INSERT).
+ *   RW_CS1252: WIN1252 VARCHAR and text BLOB in the UTF8 database.
  *   SP_SEQ   : selectable procedure returning N rows.
  *   RW_LOG / SP_WRITE: a log table, and a selectable procedure that writes.
  */
@@ -51,6 +54,43 @@ INSERT INTO RW_TYPES VALUES (
 INSERT INTO RW_TYPES (ID) VALUES (3);
 
 INSERT INTO RW_TYPES (ID, C_BIGINT, C_NUM18_4) VALUES (4, 9223372036854775807, 922337203685477.5807);
+
+/* Write targets: the same columns as RW_TYPES, empty. */
+CREATE TABLE RW_TARGET (
+    ID             INTEGER NOT NULL PRIMARY KEY,
+    C_SMALLINT     SMALLINT,
+    C_INTEGER      INTEGER,
+    C_BIGINT       BIGINT,
+    C_NUM4_2       NUMERIC(4, 2),
+    C_DEC9_2       DECIMAL(9, 2),
+    C_NUM9_3       NUMERIC(9, 3),
+    C_NUM18_4      NUMERIC(18, 4),
+    C_FLOAT        FLOAT,
+    C_DOUBLE       DOUBLE PRECISION,
+    C_DATE         DATE,
+    C_TIME         TIME,
+    C_TS           TIMESTAMP,
+    C_CHAR         CHAR(10),
+    C_VARCHAR      VARCHAR(40),
+    C_VARCHAR_NONE VARCHAR(20) CHARACTER SET NONE,
+    C_BOOL         BOOLEAN,
+    C_BLOB_TEXT    BLOB SUB_TYPE TEXT,
+    C_BLOB_BIN     BLOB SUB_TYPE BINARY
+);
+
+CREATE TABLE CUSTOMER (
+    ID   INTEGER NOT NULL PRIMARY KEY,
+    NAME VARCHAR(40),
+    CITY VARCHAR(30)
+);
+
+/* WIN1252 columns in this UTF8 database: values are stored as WIN1252 bytes
+ * ('Ação' is 4 bytes, not 6). */
+CREATE TABLE RW_CS1252 (
+    ID INTEGER NOT NULL PRIMARY KEY,
+    V  VARCHAR(10) CHARACTER SET WIN1252,
+    B  BLOB SUB_TYPE TEXT CHARACTER SET WIN1252
+);
 
 CREATE TABLE RW_LOG (
     ID INTEGER NOT NULL,

@@ -1,5 +1,6 @@
 #include "firebird_client.hpp"
 #include "firebird_observability.hpp"
+#include "firebird_param_encoder.hpp"
 #include "firebird_client_loader.hpp"
 
 #include <cctype>
@@ -38,6 +39,7 @@
 #define isc_dsql_free_statement      (::duckdb::fbapi().isc_dsql_free_statement)
 #define isc_open_blob2               (::duckdb::fbapi().isc_open_blob2)
 #define isc_close_blob               (::duckdb::fbapi().isc_close_blob)
+#define isc_cancel_blob              (::duckdb::fbapi().isc_cancel_blob)
 #define isc_get_segment              (::duckdb::fbapi().isc_get_segment)
 #define isc_sqlcode                  (::duckdb::fbapi().isc_sqlcode)
 #define fb_interpret                 (::duckdb::fbapi().fb_interpret)
@@ -46,6 +48,8 @@
 #define isc_dsql_sql_info            (::duckdb::fbapi().isc_dsql_sql_info)
 #define fb_cancel_operation          (::duckdb::fbapi().fb_cancel_operation)
 #define isc_commit_transaction       (::duckdb::fbapi().isc_commit_transaction)
+#define isc_create_blob2             (::duckdb::fbapi().isc_create_blob2)
+#define isc_put_segment              (::duckdb::fbapi().isc_put_segment)
 
 namespace duckdb {
 
@@ -359,6 +363,15 @@ std::string FirebirdClientVersion() {
         return raw;
     }
     return major_minor + "." + impl[2] + "." + impl[3];
+}
+
+int FirebirdClientMajor() {
+    static const int major = [] {
+        const auto version = FirebirdClientVersion();
+        return version.empty() || !std::isdigit(static_cast<unsigned char>(version[0])) ? 0
+                                                                                       : std::atoi(version.c_str());
+    }();
+    return major;
 }
 
 int64_t FirebirdConnection::MaxInlineBlobSize() {
@@ -1051,183 +1064,6 @@ static XSQLDA *AllocXSQLDA(int n) {
 
 // --- FirebirdStatement -------------------------------------------------------
 
-// Firebird epoch (Modified Julian Date) is 1858-11-17. DuckDB stores
-// dates as days since 1970-01-01 (DATE_EPOCH = 40587 in MJD).
-static constexpr int32_t MJD_EPOCH_TO_UNIX_EPOCH_DAYS = 40587;
-
-void FirebirdStatement::BindInputParameters(const std::vector<Value> &params,
-                                            const std::string &sql_for_error) {
-    ISC_STATUS status[20] = {};
-
-    in_sqlda_ = AllocXSQLDA(static_cast<int>(params.size()));
-    isc_dsql_describe_bind(status, &stmt_, 1, in_sqlda_);
-    conn_.CheckStatus(status, "isc_dsql_describe_bind:\n" + sql_for_error);
-
-    if (in_sqlda_->sqld > in_sqlda_->sqln) {
-        int n = in_sqlda_->sqld;
-        std::free(in_sqlda_);
-        in_sqlda_ = nullptr;  // Release() must not free it again if the next line throws
-        in_sqlda_ = AllocXSQLDA(n);
-        std::memset(status, 0, sizeof(status));
-        isc_dsql_describe_bind(status, &stmt_, 1, in_sqlda_);
-        conn_.CheckStatus(status, "isc_dsql_describe_bind (re):\n" + sql_for_error);
-    }
-
-    if (static_cast<size_t>(in_sqlda_->sqld) != params.size()) {
-        throw IOException(
-            "firebird: parameter count mismatch — SQL has " +
-            std::to_string(in_sqlda_->sqld) + " placeholder(s), caller passed " +
-            std::to_string(params.size()) + ".\n" + sql_for_error);
-    }
-
-    const int n = in_sqlda_->sqld;
-    in_buffers_.resize(n);
-    in_indicators_.assign(n, 0);
-
-    for (int i = 0; i < n; ++i) {
-        XSQLVAR &v = in_sqlda_->sqlvar[i];
-        const Value &val = params[i];
-
-        // Strip the nullable bit and remember it; we always allow NULL
-        // bound parameters via the indicator slot.
-        const auto base_sqltype = v.sqltype & ~1;
-        v.sqltype = base_sqltype | 1;
-        v.sqlind  = &in_indicators_[i];
-
-        if (val.IsNull()) {
-            // libfbclient still needs a valid sqldata pointer + buffer
-            // even for NULL — allocate a 1-byte zero and flag via the
-            // indicator.
-            in_buffers_[i].assign(1, 0);
-            v.sqldata = in_buffers_[i].data();
-            in_indicators_[i] = -1;
-            continue;
-        }
-        in_indicators_[i] = 0;
-
-        switch (base_sqltype) {
-        case SQL_TEXT:
-        case SQL_VARYING: {
-            // Coerce to string regardless of the DuckDB source type
-            // (covers the case where DuckDB passes us an INTEGER
-            // literal that bound to a VARCHAR column).
-            auto s = val.ToString();
-            if (base_sqltype == SQL_VARYING) {
-                // VARYING expects a 2-byte length prefix + payload.
-                in_buffers_[i].assign(s.size() + sizeof(ISC_USHORT), 0);
-                ISC_USHORT len = static_cast<ISC_USHORT>(s.size());
-                std::memcpy(in_buffers_[i].data(), &len, sizeof(len));
-                std::memcpy(in_buffers_[i].data() + sizeof(len), s.data(), s.size());
-                v.sqllen = static_cast<short>(s.size());
-            } else {
-                // CHAR(N): pad with spaces up to declared length.
-                size_t cap = std::max<size_t>(v.sqllen, s.size());
-                in_buffers_[i].assign(cap, ' ');
-                std::memcpy(in_buffers_[i].data(), s.data(), s.size());
-                v.sqllen = static_cast<short>(cap);
-            }
-            v.sqldata = in_buffers_[i].data();
-            break;
-        }
-        case SQL_SHORT: {
-            in_buffers_[i].assign(sizeof(int16_t), 0);
-            int16_t iv = static_cast<int16_t>(val.GetValue<int64_t>());
-            std::memcpy(in_buffers_[i].data(), &iv, sizeof(iv));
-            v.sqldata = in_buffers_[i].data();
-            break;
-        }
-        case SQL_LONG: {
-            in_buffers_[i].assign(sizeof(int32_t), 0);
-            int32_t iv = static_cast<int32_t>(val.GetValue<int64_t>());
-            std::memcpy(in_buffers_[i].data(), &iv, sizeof(iv));
-            v.sqldata = in_buffers_[i].data();
-            break;
-        }
-        case SQL_INT64: {
-            in_buffers_[i].assign(sizeof(int64_t), 0);
-            int64_t iv = val.GetValue<int64_t>();
-            std::memcpy(in_buffers_[i].data(), &iv, sizeof(iv));
-            v.sqldata = in_buffers_[i].data();
-            break;
-        }
-        case SQL_FLOAT: {
-            in_buffers_[i].assign(sizeof(float), 0);
-            float fv = static_cast<float>(val.GetValue<double>());
-            std::memcpy(in_buffers_[i].data(), &fv, sizeof(fv));
-            v.sqldata = in_buffers_[i].data();
-            break;
-        }
-        case SQL_DOUBLE:
-        case SQL_D_FLOAT: {
-            in_buffers_[i].assign(sizeof(double), 0);
-            double dv = val.GetValue<double>();
-            std::memcpy(in_buffers_[i].data(), &dv, sizeof(dv));
-            v.sqldata = in_buffers_[i].data();
-            break;
-        }
-        case SQL_BOOLEAN: {
-            in_buffers_[i].assign(sizeof(ISC_UCHAR), 0);
-            ISC_UCHAR bv = val.GetValue<bool>() ? 1 : 0;
-            std::memcpy(in_buffers_[i].data(), &bv, sizeof(bv));
-            v.sqldata = in_buffers_[i].data();
-            break;
-        }
-        case SQL_TYPE_DATE: {
-            in_buffers_[i].assign(sizeof(ISC_DATE), 0);
-            date_t d = val.GetValue<date_t>();
-            ISC_DATE fb_date =
-                static_cast<ISC_DATE>(d.days + MJD_EPOCH_TO_UNIX_EPOCH_DAYS);
-            std::memcpy(in_buffers_[i].data(), &fb_date, sizeof(fb_date));
-            v.sqldata = in_buffers_[i].data();
-            break;
-        }
-        case SQL_TYPE_TIME: {
-            in_buffers_[i].assign(sizeof(ISC_TIME), 0);
-            // DuckDB TIME is microseconds since midnight; Firebird TIME is
-            // 1/10000 second (100 microseconds) since midnight.
-            dtime_t t = val.GetValue<dtime_t>();
-#ifdef FIREBIRD_DUCKDB_V2
-            ISC_TIME fb_time = static_cast<ISC_TIME>(t.value / 100);  // v2.0: dtime_t::value
-#else
-            ISC_TIME fb_time = static_cast<ISC_TIME>(t.micros / 100);
-#endif
-            std::memcpy(in_buffers_[i].data(), &fb_time, sizeof(fb_time));
-            v.sqldata = in_buffers_[i].data();
-            break;
-        }
-        case SQL_TIMESTAMP: {
-            in_buffers_[i].assign(sizeof(ISC_TIMESTAMP), 0);
-            timestamp_t ts = val.GetValue<timestamp_t>();
-            date_t d;
-            dtime_t t;
-            Timestamp::Convert(ts, d, t);
-            ISC_TIMESTAMP fb_ts;
-            fb_ts.timestamp_date =
-                static_cast<ISC_DATE>(d.days + MJD_EPOCH_TO_UNIX_EPOCH_DAYS);
-            fb_ts.timestamp_time =
-#ifdef FIREBIRD_DUCKDB_V2
-                static_cast<ISC_TIME>(t.value / 100);  // v2.0: dtime_t::value
-#else
-                static_cast<ISC_TIME>(t.micros / 100);
-#endif
-            std::memcpy(in_buffers_[i].data(), &fb_ts, sizeof(fb_ts));
-            v.sqldata = in_buffers_[i].data();
-            break;
-        }
-        default:
-            // Type the server expects can't be encoded by this build
-            // (FB4 INT128 / DECFLOAT / TZ on the bind path are not yet
-            // supported here). Caller should treat as residual.
-            throw IOException(
-                "firebird: cannot bind parameter " + std::to_string(i) +
-                " — server requires sqltype=" + std::to_string(base_sqltype) +
-                " which is not yet supported as an input parameter. The "
-                "caller's planner should leave this filter as a residual "
-                "DuckDB predicate.\n" + sql_for_error);
-        }
-    }
-}
-
 void FirebirdStatement::Prepare(const std::string &sql) {
     ISC_STATUS status[20] = {};
 
@@ -1284,7 +1120,17 @@ FirebirdStatement::FirebirdStatement(FirebirdConnection &conn,
             return;
         }
 
-        BindInputParameters(params, sql);
+        // Each value travels in a type that represents it exactly (a
+        // DECIMAL as a scaled integer with its own scale); the server
+        // converts it to the parameter's type. The encoder's buffers must
+        // live until the execution below.
+        vector<LogicalType> types;
+        types.reserve(params.size());
+        for (auto &p : params) {
+            types.push_back(p.type());
+        }
+        FirebirdParamEncoder encoder(*this, types, NoneEncoding::STRICT);
+        encoder.Encode(vector<Value>(params.begin(), params.end()));
 
         ISC_STATUS status[20] = {};
         isc_dsql_execute(status, &conn_.tr(), &stmt_, 1, in_sqlda_);
@@ -1518,6 +1364,60 @@ const std::vector<FirebirdColumnDesc> &FirebirdStatement::DescribeInput() {
     }
     input_described_ = true;
     return in_params_;
+}
+
+void FirebirdStatement::ExecuteWithInput(const std::string &sql_for_error) {
+    ISC_STATUS status[20] = {};
+    isc_dsql_execute(status, &conn_.tr(), &stmt_, 1, in_sqlda_);
+    conn_.CheckStatus(status, "isc_dsql_execute:\n" + sql_for_error);
+}
+
+#ifndef isc_bpb_version1
+#define isc_bpb_version1 1
+#endif
+#ifndef isc_bpb_source_type
+#define isc_bpb_source_type 1
+#endif
+#ifndef isc_bpb_target_type
+#define isc_bpb_target_type 2
+#endif
+#ifndef isc_bpb_source_interp
+#define isc_bpb_source_interp 4
+#endif
+#ifndef isc_bpb_target_interp
+#define isc_bpb_target_interp 5
+#endif
+
+ISC_QUAD FirebirdConnection::CreateBlob(const std::string &bytes, int16_t subtype, int16_t charset) {
+    // Source and target are the same: the server stores the bytes as sent
+    // (no blob filter, no transliteration).
+    std::vector<char> bpb = {isc_bpb_version1,
+                             isc_bpb_source_type, 1, static_cast<char>(subtype),
+                             isc_bpb_target_type, 1, static_cast<char>(subtype)};
+    if (subtype == 1 && charset >= 0) {
+        bpb.insert(bpb.end(), {isc_bpb_source_interp, 1, static_cast<char>(charset),
+                               isc_bpb_target_interp, 1, static_cast<char>(charset)});
+    }
+    ISC_QUAD id = {};
+    isc_blob_handle blob = 0;
+    ISC_STATUS status[20] = {};
+    isc_create_blob2(status, &db_, &tr_, &blob, &id, static_cast<short>(bpb.size()), bpb.data());
+    CheckStatus(status, "isc_create_blob2");
+    constexpr size_t kSegment = 32768;
+    for (size_t pos = 0; pos < bytes.size(); pos += kSegment) {
+        const size_t len = std::min(kSegment, bytes.size() - pos);
+        isc_put_segment(status, &blob, static_cast<unsigned short>(len), bytes.data() + pos);
+        if (NoteStatus(status)) {
+            // Cancel, not close: a closed half-written BLOB would be a
+            // valid BLOB id holding part of the value.
+            ISC_STATUS cancel_status[20] = {};
+            isc_cancel_blob(cancel_status, &blob);
+            CheckStatus(status, "isc_put_segment");
+        }
+    }
+    isc_close_blob(status, &blob);
+    CheckStatus(status, "isc_close_blob");
+    return id;
 }
 
 int64_t FirebirdStatement::RecordsAffected() {

@@ -1,4 +1,6 @@
-// firebird_execute(alias, sql): runs one statement on an ATTACH opened with
+// firebird_execute(alias, sql [, source := '<duckdb query>',
+//                  commit_every := N, count_rows := true]):
+// runs a statement that returns no rows on an ATTACH opened with
 // (TYPE firebird, READ_WRITE), inside the DuckDB transaction's Firebird
 // write transaction.
 //
@@ -7,10 +9,17 @@
 // committed or rolled back with the DuckDB transaction: one Firebird
 // transaction per statement in autocommit, one per BEGIN ... COMMIT.
 //
+// With `source`, the statement is prepared once and executed once per row
+// of the DuckDB query, with the row's columns as its `?` parameters (column
+// i -> parameter i), encoded by FirebirdParamEncoder. commit_every = N
+// commits every N executions (those rows stay committed if a later row
+// fails); 0 (default) commits with the DuckDB transaction.
+//
 // Returns one row: rows_affected (inserted + updated + deleted, as Firebird
-// reports them; NULL for a statement that returns rows) and executions.
+// reports them; NULL with count_rows := false) and executions.
 
 #include <algorithm>
+#include <cctype>
 #include <cctype>
 #include <chrono>
 
@@ -20,6 +29,10 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/connection.hpp"
+#ifdef FIREBIRD_DUCKDB_V2
+#include "duckdb/main/query_result_stream.hpp"
+#endif
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
 #ifdef FIREBIRD_DUCKDB_V2
@@ -31,6 +44,7 @@
 
 #include "firebird_client.hpp"
 #include "firebird_observability.hpp"
+#include "firebird_param_encoder.hpp"
 #include "firebird_query_function.hpp"
 
 namespace duckdb {
@@ -51,6 +65,11 @@ struct FirebirdExecuteBindData : public TableFunctionData {
     // DuckDB 2.0: the call is the whole statement (the plan is the call, or
     // a choice of its columns). Set by the optimizer hook, MarkWholeStatement.
     bool whole_statement = false;
+    bool has_source = false;
+    std::string source;
+    vector<LogicalType> source_types;
+    int64_t commit_every = 0;
+    bool count_rows = true;
 };
 
 struct FirebirdExecuteGlobalState : public GlobalTableFunctionState {
@@ -264,12 +283,18 @@ std::string RedactMessage(const std::string &message, const FirebirdExecuteBindD
 }
 
 // Transaction control belongs to DuckDB. A statement that returns rows
-// (SELECT, a selectable procedure, EXECUTE BLOCK with SUSPEND) is accepted:
-// it runs, its rows are read and discarded (so a selectable procedure's side
-// effects happen, as in isql), and rows_affected is NULL. Returns whether
-// the statement returns rows.
-bool CheckStatementType(FirebirdStatement &stmt) {
+// (SELECT, a selectable procedure, EXECUTE BLOCK with SUSPEND) is accepted
+// only without a source: it runs, its rows are read and discarded (so a
+// selectable procedure's side effects happen, as in isql), and
+// rows_affected is NULL. Returns whether the statement returns rows.
+bool CheckStatementType(FirebirdStatement &stmt, bool allow_rows) {
     const int type = stmt.StatementType();
+    const bool returns_rows = type == isc_info_sql_stmt_select || type == isc_info_sql_stmt_select_for_upd;
+    if (returns_rows && !allow_rows) {
+        throw InvalidInputException("%s: with source, the statement must not return rows (this one does); "
+                                    "use firebird_query() to read",
+                                    kFunctionName);
+    }
     if (type == isc_info_sql_stmt_start_trans || type == isc_info_sql_stmt_commit ||
         type == isc_info_sql_stmt_rollback) {
         throw InvalidInputException("%s: transactions follow the DuckDB transaction; use BEGIN, COMMIT "
@@ -277,7 +302,7 @@ bool CheckStatementType(FirebirdStatement &stmt) {
                                     "ROLLBACK in the statement",
                                     kFunctionName);
     }
-    return type == isc_info_sql_stmt_select || type == isc_info_sql_stmt_select_for_upd;
+    return returns_rows;
 }
 
 unique_ptr<FunctionData> FirebirdExecuteBind(ClientContext &context, TableFunctionBindInput &input,
@@ -294,6 +319,29 @@ unique_ptr<FunctionData> FirebirdExecuteBind(ClientContext &context, TableFuncti
     bind->alias = input.inputs[0].ToString();
     bind->sql = input.inputs[1].ToString();
     bind->logged_sql = RedactPasswords(bind->sql, bind->secrets);
+    for (auto &kv : input.named_parameters) {
+#ifdef FIREBIRD_DUCKDB_V2
+        if (kv.second.IsNull()) {
+            continue;  // v2.0 fills omitted keyword-only parameters with NULL
+        }
+#endif
+        if (kv.first == "source") {
+            if (kv.second.IsNull()) {
+                throw BinderException("%s: source must not be NULL", kFunctionName);
+            }
+            bind->has_source = true;
+            bind->source = kv.second.ToString();
+        } else if (kv.first == "commit_every") {
+            bind->commit_every = kv.second.IsNull() ? 0 : kv.second.GetValue<int64_t>();
+            if (bind->commit_every < 0) {
+                throw BinderException("%s: commit_every must be >= 0 (0 = commit with the DuckDB "
+                                      "transaction)",
+                                      kFunctionName);
+            }
+        } else if (kv.first == "count_rows") {
+            bind->count_rows = kv.second.IsNull() || kv.second.GetValue<bool>();
+        }
+    }
     bind->attach = GetFirebirdAttachHandle(context, bind->alias, kFunctionName);
     // Run the whole statement before the client sees its result, as DuckDB
     // does for INSERT. A streamed result commits only once it is fully read:
@@ -316,6 +364,9 @@ unique_ptr<FunctionData> FirebirdExecuteBind(ClientContext &context, TableFuncti
     }
     CheckWritable(bind->attach, bind->alias);
     CheckSessionStatement(bind->sql);
+    if (bind->commit_every > 0 && !bind->has_source) {
+        throw BinderException("%s: commit_every needs source := '<query>'", kFunctionName);
+    }
 
     Value timeout;
     if (context.TryGetCurrentSetting("firebird_write_lock_timeout", timeout) && !timeout.IsNull()) {
@@ -324,6 +375,42 @@ unique_ptr<FunctionData> FirebirdExecuteBind(ClientContext &context, TableFuncti
     if (bind->lock_timeout_s < 0 || bind->lock_timeout_s > 32767) {
         throw BinderException("firebird_write_lock_timeout must be 0 (no wait) to 32767 seconds, got %lld",
                               static_cast<long long>(bind->lock_timeout_s));
+    }
+
+    if (bind->has_source) {
+        // The source's columns, without running it.
+        Connection con(*context.db);
+        auto prepared = con.Prepare(bind->source);
+        if (prepared->HasError()) {
+            throw BinderException("%s: the source query does not prepare: %s", kFunctionName,
+                                  prepared->GetError());
+        }
+        bind->source_types = prepared->GetTypes();
+        // The statement's parameters, on a read connection (prepare only).
+        idx_t param_count = 0;
+        {
+            auto conn = bind->attach.pool->Acquire();
+            try {
+                FirebirdStatement stmt(*conn, bind->sql, FirebirdStatement::PrepareOnlyTag {});
+                CheckStatementType(stmt, false);
+                param_count = stmt.DescribeInput().size();
+            } catch (std::exception &ex) {
+                bind->attach.pool->Release(std::move(conn));
+                // A prepare error quotes the statement: hide its literals too.
+                if (bind->logged_sql != bind->sql) {
+                    ErrorData error(ex);
+                    ErrorData(error.Type(), RedactMessage(error.RawMessage(), *bind)).Throw();
+                }
+                throw;
+            }
+            bind->attach.pool->Release(std::move(conn));
+        }
+        if (param_count != bind->source_types.size()) {
+            throw BinderException("%s: the statement has %llu parameter(s) (?) but the source query "
+                                  "returns %llu column(s); they are matched by position",
+                                  kFunctionName, static_cast<unsigned long long>(param_count),
+                                  static_cast<unsigned long long>(bind->source_types.size()));
+        }
     }
 
     return_types = {LogicalType::BIGINT, LogicalType::BIGINT};
@@ -362,6 +449,15 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
     }
 #endif
 
+    // commit_every commits the transaction's write connection, so inside
+    // BEGIN ... COMMIT it would also commit the earlier writes of the DuckDB
+    // transaction, which a ROLLBACK could then no longer undo.
+    if (bind.commit_every > 0 && !context.transaction.IsAutoCommit()) {
+        throw InvalidInputException("%s: commit_every needs autocommit; inside BEGIN ... COMMIT its commits would "
+                                    "also commit the transaction's earlier writes",
+                                    kFunctionName);
+    }
+
     // A DuckDB transaction writes to one attached database at most; this
     // also makes a READ ONLY DuckDB transaction refuse the write.
     auto &db = bind.attach.catalog->GetAttached();
@@ -371,7 +467,7 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
 
     int64_t rows_affected = 0;
     int64_t executions = 0;
-    bool rows_unknown = false;
+    bool rows_unknown = !bind.count_rows;
     RecordFirebirdWrite(context, bind.logged_sql, "execute", "", -1);
     auto obs = GetObservabilityState(context);
     const auto t0 = std::chrono::steady_clock::now();
@@ -381,12 +477,12 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
         // pipelines, and they wait for each other here. Held through the
         // commit below.
         auto writes = LockFirebirdWrites(context, *bind.attach.catalog);
-        // The statement is freed at the end of this block, before the commit
+        // Each branch frees its statement at its end, before the commit
         // below hands its connection back to the write pool (which may close it).
-        {
+        if (!bind.has_source) {
             auto &conn = GetFirebirdWriteConnection(context, *bind.attach.catalog, bind.lock_timeout_s);
             FirebirdStatement stmt(conn, bind.sql, FirebirdStatement::PrepareOnlyTag {});
-            const bool returns_rows = CheckStatementType(stmt);
+            const bool returns_rows = CheckStatementType(stmt, true);
             const bool is_ddl = stmt.StatementType() == isc_info_sql_stmt_ddl;
             if (is_ddl) {
                 // Idle connections of this ATTACH would hold the tables they
@@ -395,8 +491,8 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
             }
             const auto params = stmt.DescribeInput().size();
             if (params > 0) {
-                throw InvalidInputException("%s: the statement has %llu parameter(s) (?); firebird_execute "
-                                            "takes no parameter values",
+                throw InvalidInputException("%s: the statement has %llu parameter(s) (?); pass their values with "
+                                            "source := '<query>'",
                                             kFunctionName, static_cast<unsigned long long>(params));
             }
             if (returns_rows) {
@@ -406,13 +502,129 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
                 rows_unknown = true;
             } else {
                 stmt.ExecuteNoCursor(bind.sql);
-                rows_affected = stmt.RecordsAffected();
+                if (bind.count_rows) {
+                    rows_affected = stmt.RecordsAffected();
+                }
                 if (is_ddl) {
                     // The ATTACH reloads its tables once this commits.
                     NoteFirebirdDdl(context, *bind.attach.catalog);
                 }
             }
             executions = 1;
+        } else {
+            auto &conn = GetFirebirdWriteConnection(context, *bind.attach.catalog, bind.lock_timeout_s);
+            FirebirdStatement stmt(conn, bind.sql, FirebirdStatement::PrepareOnlyTag {});
+            CheckStatementType(stmt, false);
+            FirebirdParamEncoder encoder(stmt, bind.source_types, bind.attach.none_encoding);
+
+            // The source is read as a stream, a chunk at a time: its connection
+            // buffers a chunk or two ahead of the writes (DuckDB's default read-ahead is
+            // about 1 MB on 1.5 and 10 MB on 2.0, often 100,000 rows). Writing to
+            // Firebird is the slow side, so a longer read-ahead gains nothing; it
+            // would only hold more memory, and a source that fails within it
+            // would fail before the rows ahead of the failure are written.
+            Connection con(*context.db);
+#ifdef FIREBIRD_DUCKDB_V2
+            auto read_ahead = con.Query("SET max_streaming_buffer_size = '1KB'");
+#else
+            auto read_ahead = con.Query("SET streaming_buffer_size = '1KB'");
+#endif
+            if (read_ahead->HasError()) {
+                throw InternalException("%s: could not limit the source's read-ahead: %s", kFunctionName,
+                                        read_ahead->GetError());
+            }
+#ifdef FIREBIRD_DUCKDB_V2
+            auto submitted = con.Submit(bind.source);
+            if (submitted->HasError()) {
+                throw InvalidInputException("%s: the source query failed: %s", kFunctionName, submitted->GetError());
+            }
+            QueryResultStream<> source(std::move(submitted));
+#else
+            auto result = con.SendQuery(bind.source);
+            if (result->HasError()) {
+                throw InvalidInputException("%s: the source query failed: %s", kFunctionName, result->GetError());
+            }
+            auto &source = *result;
+#endif
+            int64_t committed = 0;
+            auto kept = [&]() -> std::string {
+                return committed > 0 ? " Source rows 1 to " + std::to_string(committed) +
+                                           " were committed (commit_every); the later ones are rolled back."
+                                     : " Nothing of this call is kept: the transaction is rolled back.";
+            };
+            auto fail = [&](int64_t row, const std::string &message) {
+                throw InvalidInputException("%s: source row %lld failed: %s%s", kFunctionName,
+                                            static_cast<long long>(row), message, kept());
+            };
+            bool types_checked = false;
+            while (true) {
+                auto chunk = source.Fetch();
+                if (!chunk || chunk->size() == 0) {
+                    break;
+                }
+                if (!types_checked) {
+                    // The encoder reads each value as the type found at bind.
+                    // DuckDB doesn't bind a prepared statement again when a
+                    // table the source reads changes (it isn't a dependency
+                    // of this statement), so a column now of another type
+                    // would be misread (5 read as 0.05).
+                    const auto &now = chunk->GetTypes();
+                    if (now.size() != bind.source_types.size()) {
+                        throw InvalidInputException("%s: the source query returned %llu column(s) when the call was "
+                                                    "bound and returns %llu now; prepare the statement again.%s",
+                                                    kFunctionName,
+                                                    static_cast<unsigned long long>(bind.source_types.size()),
+                                                    static_cast<unsigned long long>(now.size()), kept());
+                    }
+                    for (idx_t c = 0; c < now.size(); ++c) {
+                        if (now[c] != bind.source_types[c]) {
+                            throw InvalidInputException(
+                                "%s: source column %llu was %s when the call was bound and is %s now; "
+                                "prepare the statement again.%s",
+                                kFunctionName, static_cast<unsigned long long>(c + 1),
+                                bind.source_types[c].ToString(), now[c].ToString(), kept());
+                        }
+                    }
+                    types_checked = true;
+                }
+                for (idx_t r = 0; r < chunk->size(); ++r) {
+                    try {
+                        encoder.Encode(*chunk, r);
+                        stmt.ExecuteWithInput(bind.sql);
+                        if (bind.count_rows) {
+                            rows_affected += stmt.RecordsAffected();
+                        }
+                    } catch (std::exception &ex) {
+                        fail(executions + 1, ErrorData(ex).RawMessage());
+                    }
+                    ++executions;
+                    if (bind.commit_every > 0 && executions % bind.commit_every == 0) {
+                        // A failed commit keeps only what earlier boundaries
+                        // committed; once it succeeds, these rows are kept too,
+                        // even if the next write transaction fails to start.
+                        try {
+                            conn.CommitWrite();
+                        } catch (std::exception &ex) {
+                            throw InvalidInputException("%s: the commit after source row %lld failed: %s%s",
+                                                        kFunctionName, static_cast<long long>(executions),
+                                                        ErrorData(ex).RawMessage(), kept());
+                        }
+                        committed = executions;
+                        try {
+                            conn.StartWriteTransaction(bind.lock_timeout_s);
+                        } catch (std::exception &ex) {
+                            throw InvalidInputException("%s: the write transaction after source row %lld "
+                                                        "could not start: %s%s",
+                                                        kFunctionName, static_cast<long long>(executions),
+                                                        ErrorData(ex).RawMessage(), kept());
+                        }
+                    }
+                }
+            }
+            if (source.HasError()) {
+                throw InvalidInputException("%s: the source query failed after %lld row(s): %s%s", kFunctionName,
+                                            static_cast<long long>(executions), source.GetError(), kept());
+            }
         }
 #ifdef FIREBIRD_DUCKDB_V2
         // DuckDB 2.0 runs this statement's result lazily and rolls the
@@ -514,11 +726,17 @@ TableFunction GetFirebirdExecuteFunction() {
     TableFunction fn(kFunctionName,
                      FunctionSignature()
                          .AddPositionalOnly("alias", LogicalType::VARCHAR)
-                         .AddPositionalOnly("sql", LogicalType::VARCHAR),
+                         .AddPositionalOnly("sql", LogicalType::VARCHAR)
+                         .AddKeywordOnly("source", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+                         .AddKeywordOnly("commit_every", LogicalType::BIGINT, Value(LogicalType::BIGINT))
+                         .AddKeywordOnly("count_rows", LogicalType::BOOLEAN, Value(LogicalType::BOOLEAN)),
                      FirebirdExecuteFunction, FirebirdExecuteBind, FirebirdExecuteInitGlobal);
 #else
     TableFunction fn(kFunctionName, {LogicalType::VARCHAR, LogicalType::VARCHAR}, FirebirdExecuteFunction,
                      FirebirdExecuteBind, FirebirdExecuteInitGlobal);
+    fn.named_parameters["source"] = LogicalType::VARCHAR;
+    fn.named_parameters["commit_every"] = LogicalType::BIGINT;
+    fn.named_parameters["count_rows"] = LogicalType::BOOLEAN;
 #endif
     fn.projection_pushdown = false;
     return fn;
