@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- `firebird_query(alias, sql)`: runs one Firebird `SELECT` on an ATTACH
+  exactly as written (selectable procedures, CTEs, `FIRST`/`SKIP`, Firebird
+  functions) and returns its rows, typed as a scan types the same Firebird
+  types. Non-SELECT statements fail at bind; it runs in a read-only
+  transaction (or the DuckDB transaction's snapshot with
+  `firebird_transaction_snapshot`), leaves a `firebird_last_query()` /
+  `firebird_query_log()` record, and appears in
+  `firebird_explain_pushdown()` as `scan_strategy = 'passthrough'`.
+
 ### Changed
 
 - CI and the release assets build DuckDB v2.0.1 instead of v2.0.0.
