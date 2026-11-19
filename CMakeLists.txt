@@ -56,6 +56,7 @@ set(EXTENSION_SOURCES
     src/firebird_view_analysis.cpp
     src/firebird_metadata_functions.cpp
     src/firebird_explain_pushdown.cpp
+    src/firebird_query_function.cpp
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

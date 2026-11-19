@@ -159,6 +159,17 @@ jobs:
             | docker exec -i fb bash -c "isql -u SYSDBA -p masterkey"
           docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_numerics.sql /var/lib/firebird/data/numerics.fdb
 
+          # firebird_query fixture: its own database. The FB4+ types load
+          # into the same database on FB4/FB5.
+          docker cp scripts/fixture_query.sql fb:/tmp/fixture_query.sql
+          printf "%s\n" "CREATE DATABASE '/var/lib/firebird/data/query.fdb' DEFAULT CHARACTER SET UTF8;" \
+            | docker exec -i fb bash -c "isql -u SYSDBA -p masterkey"
+          docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_query.sql /var/lib/firebird/data/query.fdb
+          if [ "${{ matrix.fb_major }}" != "3" ]; then
+            docker cp scripts/fixture_query4.sql fb:/tmp/fixture_query4.sql
+            docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_query4.sql /var/lib/firebird/data/query.fdb
+          fi
+
           # DataTypeCompatibility fixture (FB4+): its own database, opened
           # through a databases.conf alias with DataTypeCompatibility = 2.5,
           # so the server describes INT128 / DECFLOAT / WITH TIME ZONE /
@@ -199,6 +210,7 @@ jobs:
           echo "FIREBIRD_NONE_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/none.fdb?charset=NONE" >> $GITHUB_ENV
           echo "FIREBIRD_PARTITIONS_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/partitions.fdb?charset=UTF8" >> $GITHUB_ENV
           echo "FIREBIRD_NUMERICS_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/numerics.fdb?charset=UTF8" >> $GITHUB_ENV
+          echo "FIREBIRD_QUERY_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/query.fdb?charset=UTF8" >> $GITHUB_ENV
           # DECVALS still loads into biz4.fdb above (issue #48). Exporting
           # the env HERE (instead of only in the FB4+ smoke step) lets the
           # main suite step run firebird_decfloat.test on FB4/FB5 legs;
@@ -208,6 +220,7 @@ jobs:
             echo "FIREBIRD_DECFLOAT_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/biz4.fdb?charset=UTF8" >> $GITHUB_ENV
             # An alias needs the key=value form (the URL form keeps a leading '/').
             echo "FIREBIRD_TYPE_COMPAT_DB=user=SYSDBA;password=masterkey;database=localhost/3050:compat25;charset=UTF8" >> $GITHUB_ENV
+            echo "FIREBIRD_QUERY4_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/query.fdb?charset=UTF8" >> $GITHUB_ENV
           fi
 
       - name: Extract matching libfbclient from the fb${{ matrix.fb_major }} container
@@ -394,6 +407,9 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_type_compat.test
           # Connection errors never echo the password (needs only the client library).
           ./build/release/test/unittest test/sql/firebird_secrets.test
+          # firebird_query (FB4+ types through FIREBIRD_QUERY4_DB, FB4/FB5).
+          ./build/release/test/unittest test/sql/firebird_query.test
+          ./build/release/test/unittest test/sql/firebird_query_fb4.test
 
       - name: Firebird 4 client against the Firebird 5 server (inline_blobs_unavailable)
         # One Firebird 5 leg is enough: the inline-blob decision in

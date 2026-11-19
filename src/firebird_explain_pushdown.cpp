@@ -12,6 +12,7 @@
 
 #include "firebird_explain_pushdown.hpp"
 #include "firebird_scanner.hpp"
+#include "firebird_query_function.hpp"
 #include "firebird_query.hpp"
 #include "firebird_observability.hpp" // MakeTelemetrySafeUtf8
 #include "firebird_view_analysis.hpp" // LookupObjectType, ViewAnalysis, AnalyzeViewSource
@@ -94,6 +95,9 @@ struct ExplainRow {
     bool         charset_pushdown_blocked = false;
     bool         planned_partitions_valid = false;
     int64_t      planned_partitions       = 0;
+    // firebird_query(alias, sql): its SQL goes to Firebird as written, so
+    // there is no table and nothing DuckDB plans into it.
+    bool         passthrough = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -560,6 +564,24 @@ static void WalkPlan(LogicalOperator &op,
 
             rows.push_back(std::move(r));
         }
+#ifdef FIREBIRD_DUCKDB_V2
+        if (get.function.GetName() == "firebird_query" && get.bind_data) {
+#else
+        if (get.function.name == "firebird_query" && get.bind_data) {
+#endif
+            // Not planned by DuckDB: no projection, filter or paging is
+            // pushed into it, and it is never partitioned. DuckDB applies
+            // any filter written around it after the rows arrive.
+            ExplainRow r;
+            r.scan_ordinal = next_ordinal++;
+            r.passthrough = true;
+            DescribeFirebirdQueryBind(*get.bind_data, r.remote_sql, r.projected_columns);
+            r.pk_range_reason = "firebird_query sends its SQL as written";
+            r.scan_strategy = "passthrough";
+            r.planned_partitions_valid = true;
+            r.planned_partitions = 1;
+            rows.push_back(std::move(r));
+        }
     }
     for (auto &child : op.children) {
         WalkPlan(*child, rows, next_ordinal);
@@ -622,7 +644,7 @@ static void ExplainPushdownFunction(ClientContext &,
     while (row < target && g.cursor < g.rows.size()) {
         const auto &r = g.rows[g.cursor++];
         output.data[0].SetValue(row, Value::BIGINT(r.scan_ordinal));
-        output.data[1].SetValue(row, Value(r.table_name));
+        output.data[1].SetValue(row, r.passthrough ? Value(LogicalType::VARCHAR) : Value(r.table_name));
         output.data[2].SetValue(row, Value(r.remote_sql));
         output.data[3].SetValue(row, make_varchar_list(r.projected_columns));
         output.data[4].SetValue(row, make_varchar_list(r.pushed_filters));

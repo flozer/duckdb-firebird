@@ -8,6 +8,7 @@
 #include "firebird_health.hpp"
 #include "firebird_index_profile.hpp"
 #include "firebird_profile_table.hpp"
+#include "firebird_query_function.hpp"
 #include "firebird_scanner.hpp"
 #include "firebird_storage.hpp"
 
@@ -64,6 +65,12 @@ static void LoadInternal(ExtensionLoader &loader) {
         "CHARACTER SET NONE decoding.",
         "SELECT * FROM firebird_scan('database=C:/data/erp.fdb user=APP_READONLY password=secret', 'CUSTOMER');",
         {"firebird", "scan"}));
+    loader.RegisterFunction(DescribedTableFunction(
+        GetFirebirdQueryFunction(), {"alias", "sql"},
+        "Runs one SELECT on an attached Firebird database exactly as written (Firebird "
+        "SQL, no pushdown, no partitions) in a read-only transaction and returns its rows.",
+        "SELECT * FROM firebird_query('fb', 'SELECT DEPT_NO, COUNT(*) FROM EMPLOYEE GROUP BY 1');",
+        {"firebird", "query"}));
     loader.RegisterFunction(DescribedTableFunction(
         GetFirebirdTablesFunction(), {"connection_string"},
         "Lists the Firebird tables visible to a connection, without attaching the database.",
