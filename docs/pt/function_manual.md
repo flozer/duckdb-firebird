@@ -509,6 +509,16 @@ Precedencia: opcao explicita do ATTACH / parametro nomeado do
 `firebird_scan` > string de conexao > default. `numeric_widen_int64`
 permanece disponivel apenas como opcao do ATTACH / parametro nomeado.
 
+A forma chave=valor tambem pode ser separada por espacos em vez de `;`
+(`database=C:/dados/empresa.fdb user=APP_READONLY password=secret`), desde
+que todo token seja uma chave conhecida (`database`, `user`, `password`,
+`charset`, `role`, `dialect`, `none_encoding`, `none_pushdown`). Use `;`
+quando um valor tiver espacos. Erros de conexao e o caminho exibido por
+`duckdb_databases()` nunca mostram a senha. O proprio DuckDB cita o inicio
+do comando que falhou em alguns erros (`LINE 1: ...`); uma string de
+conexao escrita literalmente ali ainda pode aparecer. Passe-a por uma
+variavel (`getvariable('cs')`) para evita-lo.
+
 Internamente, o storage extension do DuckDB resolve scans de tabelas remotas e
 reusa a mesma infraestrutura do `firebird_scan`: schema remoto, pushdown,
 prepared statements, particionamento e conversao de tipos.

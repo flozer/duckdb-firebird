@@ -392,6 +392,8 @@ jobs:
           # DataTypeCompatibility guard: FB4/FB5 legs (FIREBIRD_TYPE_COMPAT_DB
           # exported above); self-skips on FB3.
           ./build/release/test/unittest test/sql/firebird_type_compat.test
+          # Connection errors never echo the password (needs only the client library).
+          ./build/release/test/unittest test/sql/firebird_secrets.test
 
       - name: Firebird 4 client against the Firebird 5 server (inline_blobs_unavailable)
         # One Firebird 5 leg is enough: the inline-blob decision in

@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- Connection strings in the space-separated key=value form used by the
+  function examples (`'database=... user=... password=...'`) were not
+  parsed: with no `;` the whole string was taken as a bare database path,
+  so the attach failed and its error message showed the password. They
+  now parse like the `;` form when every token is a known key. Attach
+  errors, and the database path shown by `duckdb_databases()`, are now
+  redacted: `password=` values, `scheme://user:pass@` user info, and any
+  literal occurrence of the password.
 - CI: the Linux workflows never saved their ccache cache. They cached
   `~/.ccache`, but ccache 4.x keeps its files in `~/.cache/ccache` unless
   `~/.ccache` already exists, so every run ended with "Path Validation

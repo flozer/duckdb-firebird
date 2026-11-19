@@ -296,6 +296,16 @@ Precedence: explicit ATTACH option / `firebird_scan` named parameter >
 connection string > default. `numeric_widen_int64` remains an ATTACH
 option / named parameter only.
 
+The key=value form may also be separated by spaces instead of `;`
+(`database=C:/data/erp.fdb user=APP_READONLY password=secret`), as long as
+every token is a known key (`database`, `user`, `password`, `charset`,
+`role`, `dialect`, `none_encoding`, `none_pushdown`). Use `;` when a value
+contains spaces. Connection errors and the path shown by
+`duckdb_databases()` never show the password. DuckDB itself quotes the
+start of a failing statement in some errors (`LINE 1: ...`), so a
+connection string written as a literal there can still appear; pass it
+through a variable (`getvariable('cs')`) to keep it out.
+
 Prefer `ATTACH` for analytics sessions that query multiple Firebird tables.
 It enables catalog discovery, normal SQL references, and connection-pool
 reuse.

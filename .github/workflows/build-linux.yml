@@ -152,6 +152,8 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_transaction_snapshot.test
           ./build/release/test/unittest test/sql/firebird_session_stability.test
           ./build/release/test/unittest test/sql/firebird_bytes_estimate.test
+          # Connection errors never echo the password (needs only the client library).
+          ./build/release/test/unittest test/sql/firebird_secrets.test
 
       - name: Upload extension artifact (linux_amd64)
         uses: actions/upload-artifact@v7
