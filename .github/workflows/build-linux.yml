@@ -5,7 +5,7 @@ name: Build + Test Linux x64
 # test/sql/firebird_scan.test against an actual EMPLOYEE database, so
 # regressions in type mapping, pushdown, or BLOB handling fail fast.
 #
-# Runs the matrix against BOTH shipped DuckDB lines (v1.5.6 and v2.0.0),
+# Runs the matrix against BOTH shipped DuckDB lines (v1.5.6 and v2.0.1),
 # so the FIREBIRD_DUCKDB_V2 dual path is compiled and tested on every PR,
 # not only at release. The v2.0 leg pins extension-ci-tools to its v2.0
 # branch and lets the make path auto-detect the gate from DUCKDB_VERSION
@@ -39,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        duckdb: ["v1.5.6", "v2.0.0"]
+        duckdb: ["v1.5.6", "v2.0.1"]
     env:
       DUCKDB_VERSION: ${{ matrix.duckdb }}
 
@@ -109,7 +109,7 @@ jobs:
           echo "ISC_PASSWORD=$ISC_PASSWORD"            >> $GITHUB_ENV
 
       - name: Pin extension-ci-tools to the v2.0 branch
-        if: matrix.duckdb == 'v2.0.0'
+        if: matrix.duckdb == 'v2.0.1'
         run: |
           git -C extension-ci-tools fetch origin v2.0-cyanoptera
           git -C extension-ci-tools checkout FETCH_HEAD
@@ -148,7 +148,7 @@ jobs:
           # Against this job's Debian Firebird 3 server only the FB3
           # fallback of the transaction snapshot runs here, on both DuckDB
           # versions. The FB4/FB5 path runs in build-linux-fb-matrix.yml:
-          # on FB4 and FB5 with DuckDB v1.5.6, and on FB5 with v2.0.0.
+          # on FB4 and FB5 with DuckDB v1.5.6, and on FB5 with v2.0.1.
           ./build/release/test/unittest test/sql/firebird_transaction_snapshot.test
           ./build/release/test/unittest test/sql/firebird_session_stability.test
           ./build/release/test/unittest test/sql/firebird_bytes_estimate.test

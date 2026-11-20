@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- CI and the release assets build DuckDB v2.0.1 instead of v2.0.0.
+  DuckDB loads a C++ extension only into the exact version it was built
+  for, so the v2.0.0 asset does not load in v2.0.1, and v2.0.1 fixes
+  v2.0.0 bugs (wrong results, lost rows after a restart, deadlocks).
+
 ### Fixed
 
 - Connection strings in the space-separated key=value form used by the

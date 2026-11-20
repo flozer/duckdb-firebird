@@ -17,18 +17,18 @@
 # dependent tests are reported ENV-MISSING (not a compatibility failure).
 #
 # Usage:  pwsh -File scripts/build_matrix.ps1
-#         pwsh -c "& ./scripts/build_matrix.ps1 -Tags v1.5.6,v2.0.0"
+#         pwsh -c "& ./scripts/build_matrix.ps1 -Tags v1.5.6,v2.0.1"
 #         (use -c "& ..." for a custom -Tags list; `-File -Tags a,b` passes one
 #          string, not an array.)
 #
 # Exit code: non-zero if the baseline fails to build or any leg fails tests.
 
-param([string[]]$Tags = @('v1.5.6', 'v2.0.0'))
+param([string[]]$Tags = @('v1.5.6', 'v2.0.1'))
 
 $ErrorActionPreference = 'Continue'
 $root = 'd:/Dados/duckdb-firebird'
 # Restore target = the submodule gitlink recorded on the CURRENT branch
-# (resolved dynamically: main carries v1.5.6, the compat branch v2.0.0).
+# (resolved dynamically: main carries v1.5.6, the compat branch v2.0.1).
 $pin = (git ls-tree HEAD duckdb | ForEach-Object { ($_ -split "\s+")[2] })
 $baseline = 'v1.5.6'
 

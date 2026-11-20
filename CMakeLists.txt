@@ -27,7 +27,7 @@ include_directories(src/include)
 #   * direct DuckDB CMake include (local builds): DUCKDB_MAJOR_VERSION is
 #     a numeric variable set by DuckDB's own CMakeLists;
 #   * extension-ci-tools make path (CI release assets): only the STRING
-#     DUCKDB_VERSION ("v2.0.0") is propagated from the workflow env.
+#     DUCKDB_VERSION ("v2.0.1") is propagated from the workflow env.
 if(DEFINED DUCKDB_MAJOR_VERSION AND DUCKDB_MAJOR_VERSION GREATER_EQUAL 2)
   set(FIREBIRD_DUCKDB_V2 1)
 elseif(DEFINED DUCKDB_VERSION AND DUCKDB_VERSION MATCHES "^v[2-9]\.")
