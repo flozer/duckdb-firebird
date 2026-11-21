@@ -43,6 +43,7 @@
 #define isc_database_info            (::duckdb::fbapi().isc_database_info)
 #define isc_get_client_version       (::duckdb::fbapi().isc_get_client_version)
 #define isc_dsql_sql_info            (::duckdb::fbapi().isc_dsql_sql_info)
+#define fb_cancel_operation          (::duckdb::fbapi().fb_cancel_operation)
 
 namespace duckdb {
 
@@ -865,6 +866,12 @@ void FirebirdConnection::RestoreDefaultTransaction() {
     }
     in_snapshot_ = false;
     StartReadOnlyTransaction();
+}
+
+void FirebirdConnection::CancelOperation(bool abort) {
+    broken_.store(true, std::memory_order_relaxed);
+    ISC_STATUS status[20] = {};
+    fb_cancel_operation(status, &db_, abort ? fb_cancel_abort : fb_cancel_raise);
 }
 
 std::unique_ptr<FirebirdStatement> FirebirdConnection::OpenCursor(const std::string &sql) {

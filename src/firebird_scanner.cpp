@@ -23,6 +23,7 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 
 #include "firebird_client.hpp"
+#include "firebird_cancel.hpp"
 #include "firebird_observability.hpp"
 #include "firebird_query.hpp"
 #include "firebird_types.hpp"
@@ -1462,6 +1463,10 @@ static void FirebirdScanFunction(ClientContext &ctx,
     // (FirebirdAppendValue) is local CPU work and stays outside the
     // FB-time tally.
     int64_t fetch_us = 0;
+    // A DuckDB interrupt cancels the Firebird request this chunk waits on
+    // (a cursor open that sorts, a long fetch). The connection stays the
+    // same for the whole call.
+    FirebirdCancelGuard cancel(ctx, local.conn.get());
     try {
         while (row < target) {
             if (!local.cursor) {
@@ -1535,6 +1540,7 @@ static void FirebirdScanFunction(ClientContext &ctx,
     } catch (const std::exception &e) {
         GetObservabilityState(ctx)->SetError(
             std::string("Fetch: ") + e.what());
+        ThrowIfFirebirdCancelled(cancel);
         throw;
     }
     local.fetch_chunk.SetCardinality(row);

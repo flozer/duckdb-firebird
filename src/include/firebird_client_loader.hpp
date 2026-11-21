@@ -36,6 +36,7 @@ struct FirebirdClientApi {
     decltype(&::isc_get_client_version)      isc_get_client_version;
     // Statement type of a prepared statement (firebird_query).
     decltype(&::isc_dsql_sql_info)           isc_dsql_sql_info;
+    decltype(&::fb_cancel_operation)         fb_cancel_operation;
 };
 
 // Resolve the Firebird client library (once per process) and return

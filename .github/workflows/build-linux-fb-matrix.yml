@@ -411,6 +411,17 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_query.test
           ./build/release/test/unittest test/sql/firebird_query_fb4.test
 
+      - name: An interrupt cancels the running Firebird request (Python)
+        # sqllogictest can't interrupt a running statement; this needs a
+        # client that calls interrupt() while a query waits on Firebird.
+        # Uses the Python package of the leg's DuckDB version.
+        run: |
+          python3 -m venv /tmp/pycancel
+          /tmp/pycancel/bin/pip install --quiet "duckdb==${DUCKDB_VERSION#v}"
+          timeout 180 /tmp/pycancel/bin/python scripts/check_cancel.py \
+            "$GITHUB_WORKSPACE/build/release/extension/firebird/firebird.duckdb_extension" \
+            "$FIREBIRD_QUERY_DB"
+
       - name: Firebird 4 client against the Firebird 5 server (inline_blobs_unavailable)
         # One Firebird 5 leg is enough: the inline-blob decision in
         # firebird_health.cpp and the client loader have no DuckDB-version

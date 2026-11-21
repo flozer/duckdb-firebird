@@ -4,6 +4,11 @@
 
 ### Added
 
+- Interrupting a DuckDB query cancels the Firebird request it waits on
+  (`fb_cancel_operation`): a scan or `firebird_query` blocked on a long
+  cursor open or fetch ends within a fraction of a second with DuckDB's
+  "Interrupted!" error, instead of waiting for the server. The connection
+  it ran on is dropped from the pool.
 - `firebird_query(alias, sql)`: runs one Firebird `SELECT` on an ATTACH
   exactly as written (selectable procedures, CTEs, `FIRST`/`SKIP`, Firebird
   functions) and returns its rows, typed as a scan types the same Firebird

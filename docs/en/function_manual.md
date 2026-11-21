@@ -17,6 +17,14 @@ The extension loads the Firebird client library (`libfbclient`) at runtime.
 Install the Firebird client/runtime matching your platform before loading the
 extension.
 
+**Interrupting a query.** Interrupting a DuckDB query (Ctrl+C in the CLI,
+`interrupt()` in a client) also cancels the Firebird request it is waiting
+on: a cursor open that sorts, or a fetch of a row the server is still
+computing. Scans and `firebird_query` end within a fraction of a second
+(about a second at most, when the server doesn't answer the cancel) with
+DuckDB's "Interrupted!" error, instead of waiting for the server to
+finish. The connection the request ran on is dropped from the pool.
+
 ## Level 1 - Direct reads
 
 ### `firebird_scan(connection_string, table_name)`

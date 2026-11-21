@@ -133,4 +133,9 @@ END^
 
 SET TERM ; ^
 
+/* A view whose only row takes hours to compute (a four-way cross join of
+ * RDB$FIELDS): scripts/check_cancel.py interrupts a scan of it. */
+CREATE VIEW V_SLOW (N) AS
+    SELECT COUNT(*) FROM RDB$FIELDS A, RDB$FIELDS B, RDB$FIELDS C, RDB$FIELDS D;
+
 COMMIT;
