@@ -31,9 +31,12 @@ the server didn't answer the cancel. A Firebird error that isn't the
 cancel's (including "operation was cancelled" from a DBA's
 `DELETE FROM MON$STATEMENTS`) keeps its own message, and so does a query
 that failed: DuckDB then interrupts its other parts itself, and their
-cancel doesn't replace the error that stopped the query. An interrupt doesn't
-reach opening a connection or loading an ATTACH's table metadata: those
-wait for the server.
+cancel doesn't replace the error that stopped the query. Writes too: an
+interrupted `firebird_execute` (one long statement, or a `source` loop) or
+`INSERT INTO fb.main.T` stops the same way, and its write transaction rolls
+back with the DuckDB statement (rows an earlier `commit_every` committed
+stay). An interrupt doesn't reach opening a connection or loading an
+ATTACH's table metadata: those wait for the server.
 
 ## Level 1 - Direct reads
 

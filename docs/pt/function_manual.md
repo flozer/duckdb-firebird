@@ -32,7 +32,10 @@ cancelamento (inclusive o "operation was cancelled" de um
 contexto de "fetch failed" dos scans nao e acrescentado a uma interrupcao.
 Uma query que falhou tambem guarda o erro: o DuckDB entao interrompe sozinho
 as outras partes dela, e o cancelamento delas nao substitui o erro que parou
-a query.
+a query. Escritas tambem: um `firebird_execute` interrompido (um comando
+longo, ou um laco de `source`) ou um `INSERT INTO fb.main.T` para do mesmo
+jeito, e sua transacao de escrita e desfeita com o comando DuckDB (linhas
+que um `commit_every` anterior confirmou ficam).
 A interrupcao nao alcanca a abertura de uma conexao nem a carga dos metadados
 das tabelas de um ATTACH: essas esperam o servidor.
 

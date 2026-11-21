@@ -212,8 +212,13 @@ costs one mutex round trip per chunk, not per row.
 Guarded: a scan's chunks, `firebird_query`'s open and fetches, and a
 scan's setup (the catalog round trips of `firebird_scan()`'s bind, the
 shared-snapshot coordinator, the DB_KEY geometry, the fallback PK probe,
-a worker joining the snapshot, the start of the transaction snapshot).
-Not guarded, so an interrupt waits for the call to return: opening a
+a worker joining the snapshot, the start of the transaction snapshot),
+and writes: `firebird_execute` for the call (released before its early
+autocommit commit, which may give the connection back) and the INSERT sink
+per chunk and in Finalize. `firebird_execute` also checks the interrupt
+flag between the chunks of its `source` query, which runs on its own
+DuckDB connection the interrupt doesn't reach. A cancelled write's
+transaction rolls back with the DuckDB statement. Not guarded, so an interrupt waits for the call to return: opening a
 connection (an attach has no handle to cancel yet), loading an ATTACH's
 table metadata, and the round trips that keep a transaction snapshot
 alive. For tests, `DUCKDB_FIREBIRD_TEST_CANCEL_ABORT=1` in the environment

@@ -21,7 +21,7 @@ Rule:
 | Writes: `INSERT INTO fb.main.T` on a `READ_WRITE` ATTACH (the refusals: `RETURNING`, `DEFAULT VALUES`, `ON CONFLICT`, `INSERT OR REPLACE`, `MERGE`, no `READ_WRITE`, `READ_ONLY`; `COPY ... FROM`; `DEFAULT` in `VALUES` becoming NULL; `operation = 'insert'` in the telemetry; batches with `SET firebird_write_batch_size`, `write_mode = 'batch'` and Firebird's record counts in `rows_affected`) | `docs/en/function_manual.md` | `docs/pt/function_manual.md` | Paired |
 | `firebird_clear_cache(alias)` | `docs/en/function_manual.md` | `docs/pt/function_manual.md` | Paired |
 | Firebird users and grants (read-only user, separate write user) | `docs/en/usage_guide.md` | `docs/pt/usage_guide.md` | Paired |
-| Interrupting a query | `docs/en/function_manual.md`, `docs/en/observability.md` ("Interrupted queries") | `docs/pt/function_manual.md` ("Interromper uma query") | Paired; PT keeps its observability part in the same section, as for the rest of observability |
+| Interrupting a query (reads and writes) | `docs/en/function_manual.md`, `docs/en/observability.md` ("Interrupted queries") | `docs/pt/function_manual.md` ("Interromper uma query") | Paired; PT keeps its observability part in the same section, as for the rest of observability |
 | Roadmap | `docs/en/roadmap.md` | `docs/pt/roadmap.md` | Paired for current strategy; EN keeps full historical detail |
 | Linux guide | `docs/en/guide_linux.md` | `docs/pt/guide_linux.md` | Paired (v1.0.0) |
 | Windows guide | `docs/en/guide_windows.md` | `docs/pt/guide_windows.md` | Paired (v1.0.0) |

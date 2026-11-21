@@ -19,6 +19,7 @@
 #include "duckdb/planner/operator/logical_insert.hpp"
 
 #include "firebird_batch.hpp"
+#include "firebird_cancel.hpp"
 #include "firebird_client.hpp"
 #include "firebird_observability.hpp"
 #include "firebird_param_encoder.hpp"
@@ -159,6 +160,9 @@ public:
             Prepare(context.client, state);
         }
         const auto t0 = std::chrono::steady_clock::now();
+        // A DuckDB interrupt cancels the Firebird request this chunk waits on;
+        // Fail turns the error it causes into the interrupt.
+        FirebirdCancelGuard cancel(context.client, &state.res->stmt->Connection());
         for (idx_t r = 0; r < chunk.size(); ++r) {
             try {
                 state.res->encoder->Encode(chunk, r, input_columns_);
@@ -170,7 +174,7 @@ public:
             } catch (std::exception &ex) {
                 // The rows before it go first, so a failure among them is
                 // named, as one row at a time would; not on a connection the
-                // error showed is gone.
+                // error showed is gone (a cancelled one is marked broken).
                 const std::string error = ErrorData(ex).RawMessage();
                 if (!state.res->stmt->Connection().IsBroken()) {
                     Flush(context.client, state, t0);
@@ -195,7 +199,12 @@ public:
         auto &state = input.global_state.Cast<FirebirdInsertGlobalState>();
         auto writes = LockFirebirdWrites(context, catalog_);
         const auto t0 = std::chrono::steady_clock::now();
-        Flush(context, state, t0);
+        // Only a batch has rows left to send. An INSERT that got no row never
+        // prepared: it has no statement nor connection.
+        if (state.res->batch) {
+            FirebirdCancelGuard cancel(context, &state.res->stmt->Connection());
+            Flush(context, state, t0);
+        }
         AddTime(state, t0);
         const auto record_seq = Report(context, state, "");
         // The statement goes before the connection does (the transaction
@@ -234,10 +243,21 @@ public:
         return seq;
     }
 
-    // The entry stays open, so the write connection stays pinned until the
+    // Every failure of the INSERT ends here. One caused by a cancel the
+    // watcher sent (the per-row call's InterruptException, a batch's
+    // "operation was cancelled" or lost connection) is the interrupt:
+    // DuckDB's InterruptException, and its message in error_message. The
+    // entry stays open, so the write connection stays pinned until the
     // transaction ends: the INSERT's rows can't commit with anything else.
     [[noreturn]] void Fail(ClientContext &context, const FirebirdInsertGlobalState &state,
                            const std::string &msg) const {
+        // Before the statement is prepared (a failure in the sink's setup)
+        // there is no connection call a cancel could have ended.
+        if (state.res && state.res->stmt && state.res->stmt->Connection().CancelAnswered()) {
+            Report(context, state, FirebirdInterruptMessage(state.res->stmt->Connection()));
+            NoteFirebirdInsertReported(context, catalog_, state.open_id);
+            throw InterruptException();
+        }
         Report(context, state, msg);
         NoteFirebirdInsertReported(context, catalog_, state.open_id);
         throw InvalidInputException(msg);

@@ -470,6 +470,9 @@ jobs:
           timeout 180 /tmp/pycancel/bin/python scripts/check_cancel.py \
             "$GITHUB_WORKSPACE/build/release/extension/firebird/firebird.duckdb_extension" \
             "$FIREBIRD_QUERY_DB"
+          timeout 180 /tmp/pycancel/bin/python scripts/check_cancel_writes.py \
+            "$GITHUB_WORKSPACE/build/release/extension/firebird/firebird.duckdb_extension" \
+            "$FIREBIRD_RW_DB"
 
       - name: Firebird 4 client against the Firebird 5 server (inline_blobs_unavailable)
         # One Firebird 5 leg is enough: the inline-blob decision in
