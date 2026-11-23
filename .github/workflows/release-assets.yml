@@ -232,7 +232,7 @@ jobs:
 
       - name: Build
         env:
-          DUCKDB_VERSION: v2.0.0
+          DUCKDB_VERSION: v2.0.1
         run: scripts/build_linux_local.sh --clean
 
       - name: Package
@@ -331,7 +331,7 @@ jobs:
 
       - name: Pin DuckDB version
         shell: bash
-        run: DUCKDB_GIT_VERSION=v2.0.0 make set_duckdb_version
+        run: DUCKDB_GIT_VERSION=v2.0.1 make set_duckdb_version
 
       - name: Build
         shell: bash

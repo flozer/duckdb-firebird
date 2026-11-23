@@ -15,7 +15,7 @@ name: Build + Test Linux x64 (FB 3/4/5 matrix)
 # extension code, purely this workflow using one fixed client library for
 # every server version.
 #
-# The three legs build DuckDB v1.5.6. A fourth leg builds DuckDB v2.0.0
+# The three legs build DuckDB v1.5.6. A fourth leg builds DuckDB v2.0.1
 # against Firebird 5, so the FIREBIRD_DUCKDB_V2 path also runs the FB4+-only
 # tests and scripts (build-linux.yml runs both DuckDB lines, but against a
 # Firebird 3 server only). One deliberate exception to the matching client:
@@ -59,8 +59,8 @@ jobs:
             duckdb: v1.5.6
           - fb_major: 5
             fb_image: firebirdsql/firebird:5-noble
-            duckdb: v2.0.0
-            name_suffix: " (DuckDB v2.0.0)"
+            duckdb: v2.0.1
+            name_suffix: " (DuckDB v2.0.1)"
     env:
       DUCKDB_VERSION: ${{ matrix.duckdb }}
 
@@ -293,7 +293,7 @@ jobs:
           ./mkblob_fixture localhost/3050:/var/lib/firebird/data/test.fdb SYSDBA masterkey 1
 
       - name: Pin extension-ci-tools to the v2.0 branch
-        if: matrix.duckdb == 'v2.0.0'
+        if: matrix.duckdb == 'v2.0.1'
         run: |
           # Same recipe as build-linux.yml's v2.0 leg.
           git -C extension-ci-tools fetch origin v2.0-cyanoptera
@@ -312,7 +312,7 @@ jobs:
           ccache --show-stats
 
       - name: CLI with the extension loaded (DuckDB v2.0)
-        if: matrix.duckdb == 'v2.0.0'
+        if: matrix.duckdb == 'v2.0.1'
         run: |
           # On v2.0 the build links the extension into neither binary
           # ("Extensions built but not linked: [firebird]"): unittest loads
@@ -553,7 +553,7 @@ jobs:
 
       - name: Upload extension artifact (linux_amd64) - fb${{ matrix.fb_major }}
         # One leg only: two uploads under the same name would conflict.
-        # build-linux.yml uploads the v2.0.0 build.
+        # build-linux.yml uploads the v2.0.1 build.
         if: matrix.fb_major == '5' && matrix.duckdb == 'v1.5.6'
         uses: actions/upload-artifact@v7
         with:
