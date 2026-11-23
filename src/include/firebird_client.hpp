@@ -204,6 +204,20 @@ public:
         columns_[col].character_set_id = cs_id;
     }
 
+    // Statement type of a prepared statement (isc_info_sql_stmt_select,
+    // isc_info_sql_stmt_exec_procedure, ...), or -1 when the server did not
+    // answer.
+    int StatementType();
+
+    // Before the first Fetch(): receive column `col` as VARCHAR(len); the
+    // server converts the value (used for DECFLOAT, which has no decoder
+    // here). The column then reads as text without a character set.
+    void CoerceOutputToText(idx_t col, int16_t len);
+
+    // Executes a statement constructed with PrepareOnlyTag, opening its
+    // cursor; rows are then read with Fetch().
+    void ExecuteCursor(const std::string &sql_for_error);
+
     // Returns false when no more rows are available.
     bool Fetch();
 

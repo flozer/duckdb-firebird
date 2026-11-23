@@ -16,6 +16,7 @@ Rule:
 |---|---|---|---|
 | Usage guide | `docs/en/usage_guide.md` | `docs/pt/usage_guide.md` | Paired |
 | Function manual | `docs/en/function_manual.md` | `docs/pt/function_manual.md` | Paired |
+| `firebird_query(alias, sql)` | `docs/en/function_manual.md` | `docs/pt/function_manual.md` | Paired, including where read-only stops |
 | Roadmap | `docs/en/roadmap.md` | `docs/pt/roadmap.md` | Paired for current strategy; EN keeps full historical detail |
 | Linux guide | `docs/en/guide_linux.md` | `docs/pt/guide_linux.md` | Paired (v1.0.0) |
 | Windows guide | `docs/en/guide_windows.md` | `docs/pt/guide_windows.md` | Paired (v1.0.0) |
