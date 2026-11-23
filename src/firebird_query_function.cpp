@@ -65,8 +65,7 @@ std::unique_ptr<FirebirdStatement> PrepareSelect(FirebirdConnection &conn, const
     if (type != isc_info_sql_stmt_select && type != isc_info_sql_stmt_select_for_upd) {
         throw BinderException(
             "%s: only SELECT statements are accepted (a selectable procedure, a CTE or an "
-            "EXECUTE BLOCK with SUSPEND are SELECTs too); this statement's type is %d. Use "
-            "firebird_execute() for other statements.",
+            "EXECUTE BLOCK with SUSPEND are SELECTs too); this statement's type is %d.",
             kFunctionName, type);
     }
     return stmt;
