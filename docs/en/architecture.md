@@ -185,20 +185,39 @@ the long-running scan profile used by the peregrine extractor
 Cancellation: DuckDB checks its interrupt flag between chunks, but one
 Firebird call (`isc_dsql_execute` of a sorting query, `isc_dsql_fetch` of
 an aggregate) can block in the client library for minutes. While a scan
-chunk or a `firebird_query` call talks to Firebird, a `FirebirdCancelGuard`
-registers its connection with one shared watcher thread
-(`firebird_cancel.cpp`), which checks the query's interrupt flag every
-100 ms and, once it is set, calls `fb_cancel_operation(fb_cancel_raise)`
-on that attachment. The blocked call fails with "operation was
-cancelled", the caller raises DuckDB's `InterruptException`, and the
-connection is marked broken so the pool drops it. A raise can go
-unanswered (a call that sends one short request after another was seen
-waiting on the server's reply for good, about once in 50 interrupts, on
-Firebird 3, 4 and 5), so a guard still registered 1 s after the raise gets
-`fb_cancel_abort`: the client closes the attachment's network connection,
-the blocked call fails whatever the server does, and the server rolls the
-transaction back. Registering costs one mutex round trip per chunk, not
-per row.
+chunk, a `firebird_query` call or a scan's setup talks to Firebird, a
+`FirebirdCancelGuard` registers its connection with one shared watcher
+thread (`firebird_cancel.cpp`), which checks the query's interrupt flag
+every 100 ms and, once it is set, calls
+`fb_cancel_operation(fb_cancel_raise)` on that attachment. The blocked call
+fails with "operation was cancelled". `FirebirdConnection::CheckStatus`
+throws that error as DuckDB's `InterruptException` only after a cancel the
+watcher sent; any other error, or the same error from a DBA's
+`DELETE FROM MON$STATEMENTS`, keeps its own message. The connection is
+marked broken, so the pool drops it. A raise can go unanswered (a call
+that sends one short request after another was seen waiting on the
+server's reply for good, on Firebird 3, 4 and 5), so a guard still
+registered 1 s after the raise gets `fb_cancel_abort`: the client closes
+the attachment's network connection, the blocked call fails whatever the
+server does, and the server rolls the transaction back.
+
+Each cancel runs on a short-lived thread of its own, so one that blocks
+holds up neither the watcher nor another connection's cancel. In the
+client library a raise sends one small packet under the port's write
+lock, so it blocks only when the network send does; an abort closes the
+socket. The library runs the cancels of one attachment one at a time, so
+a raise that blocks also delays that attachment's abort. Registering
+costs one mutex round trip per chunk, not per row.
+
+Guarded: a scan's chunks, `firebird_query`'s open and fetches, and a
+scan's setup (the catalog round trips of `firebird_scan()`'s bind, the
+shared-snapshot coordinator, the DB_KEY geometry, the fallback PK probe,
+a worker joining the snapshot, the start of the transaction snapshot).
+Not guarded, so an interrupt waits for the call to return: opening a
+connection (an attach has no handle to cancel yet), loading an ATTACH's
+table metadata, and the round trips that keep a transaction snapshot
+alive. For tests, `DUCKDB_FIREBIRD_TEST_CANCEL_ABORT=1` in the environment
+makes the first cancel the abort (`scripts/check_cancel.py`).
 
 XSQLDA buffers are owned by `FirebirdStatement` and reused across every
 `isc_dsql_fetch`. BLOBs go through a separate `isc_open_blob2` /

@@ -696,6 +696,9 @@ static unique_ptr<FunctionData> FirebirdScanBind(ClientContext &context,
     }
 
     FirebirdConnection conn(bind->conn_info);
+    // A DuckDB interrupt cancels these catalog round trips (the PK probe's
+    // MIN/MAX can be slow) as it does a scan's fetch.
+    FirebirdCancelGuard cancel(context, &conn);
     bind->db_charset_none = DatabaseCharsetIsNone(conn);
     LoadTableSchema(conn, bind->table_name,
                     bind->column_names, bind->column_types, bind->column_descs,
@@ -819,7 +822,8 @@ idx_t PickPartitionCount(int64_t min_v, int64_t max_v) {
 // Uses its own attachment, not the ATTACH pool, so pool statistics keep
 // counting worker connections only. Any failure leaves snapshot_number
 // at 0, which means "independent transactions", today's behavior.
-static void StartSharedSnapshot(const FirebirdBindData &bind,
+static void StartSharedSnapshot(ClientContext &context,
+                                const FirebirdBindData &bind,
                                 FirebirdGlobalState &gstate) {
     if (gstate.snapshot_attempted) {
         return;
@@ -827,15 +831,23 @@ static void StartSharedSnapshot(const FirebirdBindData &bind,
     gstate.snapshot_attempted = true;
     try {
         auto conn = make_uniq<FirebirdConnection>(bind.conn_info);
-        if (!conn->TryStartSnapshotTransaction()) {
-            return;
+        int64_t number = 0;
+        {
+            FirebirdCancelGuard cancel(context, conn.get());
+            if (!conn->TryStartSnapshotTransaction()) {
+                ThrowIfFirebirdCancelled(cancel);
+                return;
+            }
+            number = conn->SnapshotNumber();
+            ThrowIfFirebirdCancelled(cancel);
         }
-        int64_t number = conn->SnapshotNumber();
         if (number <= 0) {
             return;  // Firebird 3: no snapshot numbers to share
         }
         gstate.snapshot_number = number;
         gstate.snapshot_conn = std::move(conn);
+    } catch (const InterruptException &) {
+        throw;
     } catch (...) {
         // Fall back to independent transactions. A real connectivity
         // problem resurfaces, with its own message, when the workers
@@ -872,13 +884,15 @@ static void StartSharedSnapshot(const FirebirdBindData &bind,
 // inside that one snapshot. Returns false (caller falls back) when there
 // is no shared snapshot (Firebird 3, or it could not be started), for
 // views and non-persistent relations, or if anything cannot be read.
-static bool BuildDbKeyPartitions(const FirebirdBindData &bind,
+static bool BuildDbKeyPartitions(ClientContext &context,
+                                 const FirebirdBindData &bind,
                                  FirebirdGlobalState &gstate, idx_t n) {
     try {
         FirebirdConnection *conn = gstate.snapshot_conn.get();
         if (!conn || gstate.snapshot_number <= 0) {
             return false;
         }
+        FirebirdCancelGuard cancel(context, conn);
         int64_t relation_id = -1;
         int64_t pointer_pages = 0;
         std::string engine;
@@ -910,6 +924,7 @@ static bool BuildDbKeyPartitions(const FirebirdBindData &bind,
             return false;
         }
         const int64_t page_size = conn->PageSize();
+        ThrowIfFirebirdCancelled(cancel);
         if (relation_id < 0 || pointer_pages <= 0 || page_size < 1024) {
             return false;
         }
@@ -939,6 +954,9 @@ static bool BuildDbKeyPartitions(const FirebirdBindData &bind,
             gstate.partitions.push_back(std::move(spec));
         }
         return true;
+    } catch (const InterruptException &) {
+        gstate.partitions.clear();
+        throw;
     } catch (...) {
         gstate.partitions.clear();
         return false;
@@ -979,8 +997,8 @@ static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
     // meet today. The guard keeps it that way.
     if (bind.partition_by_dbkey && bind.partitions_override > 1 && !bind.is_view &&
         !gstate->tx_snapshot) {
-        StartSharedSnapshot(bind, *gstate);
-        dbkey_done = BuildDbKeyPartitions(bind, *gstate, bind.partitions_override);
+        StartSharedSnapshot(context, bind, *gstate);
+        dbkey_done = BuildDbKeyPartitions(context, bind, *gstate, bind.partitions_override);
         if (dbkey_done) {
             gstate->max_threads = gstate->partitions.size();
             gstate->partition_method = "dbkey";
@@ -1000,6 +1018,7 @@ static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
             own = make_uniq<FirebirdConnection>(bind.conn_info);
             conn = own.get();
         }
+        FirebirdCancelGuard cancel(context, conn);
         fallback_pk = ProbePrimaryKey(*conn, bind.table_name,
                                       bind.column_names, bind.column_types);
         pk_info = fallback_pk.get();
@@ -1059,7 +1078,7 @@ static unique_ptr<GlobalTableFunctionState> FirebirdScanInitGlobal(
     if (gstate->tx_snapshot) {
         // The transaction's snapshot is already pinned; no per-scan one.
     } else if (gstate->partitions.size() > 1) {
-        StartSharedSnapshot(bind, *gstate);
+        StartSharedSnapshot(context, bind, *gstate);
     } else if (gstate->snapshot_conn) {
         // A dbkey attempt pinned a snapshot but the scan ended up serial.
         gstate->snapshot_conn.reset();
@@ -1101,8 +1120,16 @@ static unique_ptr<LocalTableFunctionState> FirebirdScanInitLocal(
         // on with its own read-committed transaction: its partitions would
         // be read at a different point in time than the others'.
         std::string error;
-        if (!local->conn->TryStartSnapshotTransaction(gstate.snapshot_number,
-                                                      &error)) {
+        bool joined;
+        {
+            FirebirdCancelGuard cancel(ctx.client, local->conn.get());
+            joined = local->conn->TryStartSnapshotTransaction(gstate.snapshot_number,
+                                                              &error);
+            if (!joined) {
+                ThrowIfFirebirdCancelled(cancel);
+            }
+        }
+        if (!joined) {
             // The connection may be unusable: a pooled attachment killed
             // on the server fails the rollback and keeps its old handle.
             // Never put it back in the pool. (This also drops a connection
@@ -1476,6 +1503,8 @@ static void FirebirdScanFunction(ClientContext &ctx,
             const bool got = [&]() {
                 try {
                     return local.cursor->Fetch();
+                } catch (const InterruptException &) {
+                    throw;  // a cancel, not a dropped connection
                 } catch (const std::exception &e) {
                     // G4 error context - the -504 / -902 fetch-death
                     // path. Only the data Fetch() of a scan cursor is
@@ -1537,10 +1566,12 @@ static void FirebirdScanFunction(ClientContext &ctx,
                 ++local.rows_emitted;
             }
         }
+    } catch (const InterruptException &) {
+        GetObservabilityState(ctx)->SetError(FirebirdInterruptMessage(*local.conn));
+        throw;
     } catch (const std::exception &e) {
         GetObservabilityState(ctx)->SetError(
             std::string("Fetch: ") + e.what());
-        ThrowIfFirebirdCancelled(cancel);
         throw;
     }
     local.fetch_chunk.SetCardinality(row);

@@ -240,6 +240,21 @@ attach-DPB keepalive — see the session-options section of
 caveat. Only the scan data-fetch path carries this context; metadata
 cursors and cursor-open failures surface their errors unchanged.
 
+### Interrupted queries
+
+When an interrupt (Ctrl+C, `interrupt()`) cancels the Firebird request a
+scan or `firebird_query` waits on, the query ends with DuckDB's
+`Interrupted!` error, and `error_message` records how:
+
+- `Interrupted: the Firebird request was cancelled (fb_cancel_raise)`;
+- `Interrupted: the Firebird connection was closed (fb_cancel_abort)`, when
+  the server didn't answer the cancel within 1 s.
+
+The fetch-failure context above is not added: the network didn't drop the
+connection. A Firebird error that isn't the cancel's (including "operation
+was cancelled" from a DBA's `DELETE FROM MON$STATEMENTS`) keeps its own
+message. See "Interrupting a query" in `function_manual.md`.
+
 ### `bytes_read_estimate` — definition (G5)
 
 fbclient exposes no wire-traffic meter, so the extension reports an

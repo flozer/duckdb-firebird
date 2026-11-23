@@ -6,7 +6,10 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -24,7 +27,7 @@ struct FirebirdCancelGuard::Entry {
     bool cancelled = false;  // under the watcher's lock
     bool aborted = false;    // under the watcher's lock
     std::chrono::steady_clock::time_point cancelled_at;
-    // Held while the watcher cancels; the guard's destructor takes it after
+    // Held while a cancel runs; the guard's destructor takes it after
     // removing the entry, so no cancel runs once the destructor returns.
     std::mutex cancel_lock;
     bool removed = false;  // under cancel_lock
@@ -35,6 +38,25 @@ namespace {
 constexpr auto kPollInterval = std::chrono::milliseconds(100);
 // A guard still registered this long after the raise gets the abort.
 constexpr auto kAbortAfter = std::chrono::milliseconds(1000);
+
+// Test only: with DUCKDB_FIREBIRD_TEST_CANCEL_ABORT=1 in the environment,
+// the first cancel is the abort, so the CI can exercise that path
+// (scripts/check_cancel.py).
+bool AbortFirst() {
+    const char *v = std::getenv("DUCKDB_FIREBIRD_TEST_CANCEL_ABORT");
+    return v && std::strcmp(v, "1") == 0;
+}
+
+void RunCancel(FirebirdCancelGuard::Entry &entry, bool with_abort) {
+    std::lock_guard<std::mutex> c(entry.cancel_lock);
+    if (entry.removed) {
+        return;
+    }
+    try {
+        entry.conn->CancelOperation(with_abort);
+    } catch (...) {
+    }
+}
 
 class CancelWatcher {
 public:
@@ -57,11 +79,6 @@ public:
         // Wait for a cancel in flight on this connection.
         std::lock_guard<std::mutex> c(entry->cancel_lock);
         entry->removed = true;
-    }
-
-    bool Cancelled(const FirebirdCancelGuard::Entry &entry) {
-        std::lock_guard<std::mutex> g(lock_);
-        return entry.cancelled;
     }
 
     // Never destroyed: the detached thread may still run while static
@@ -89,7 +106,9 @@ private:
                         if (entry->context->IsInterrupted()) {
                             entry->cancelled = true;
                             entry->cancelled_at = now;
-                            due.emplace_back(entry, false);
+                            const bool with_abort = AbortFirst();
+                            entry->aborted = with_abort;
+                            due.emplace_back(entry, with_abort);
                         }
                     } else if (!entry->aborted && now - entry->cancelled_at >= kAbortAfter) {
                         entry->aborted = true;
@@ -97,16 +116,18 @@ private:
                     }
                 }
             }
-            // Outside the watcher's lock: a slow cancel doesn't hold up guards
-            // of other connections.
+            // Each cancel on its own short-lived thread, outside the
+            // watcher's lock: one that blocks holds up neither this loop
+            // (the next connection's raise, any connection's abort) nor
+            // another guard. The thread keeps the entry alive; the guard's
+            // destructor waits for it through cancel_lock.
             for (auto &item : due) {
-                auto &entry = item.first;
-                std::lock_guard<std::mutex> c(entry->cancel_lock);
-                if (!entry->removed) {
-                    try {
-                        entry->conn->CancelOperation(item.second);
-                    } catch (...) {
-                    }
+                auto entry = item.first;
+                const bool with_abort = item.second;
+                try {
+                    std::thread([entry, with_abort] { RunCancel(*entry, with_abort); }).detach();
+                } catch (const std::system_error &) {
+                    RunCancel(*entry, with_abort);  // no thread to be had: cancel here
                 }
             }
             std::unique_lock<std::mutex> g(lock_);
@@ -133,14 +154,20 @@ FirebirdCancelGuard::~FirebirdCancelGuard() {
     CancelWatcher::Get().Remove(entry_);
 }
 
-bool FirebirdCancelGuard::Cancelled() const {
-    return CancelWatcher::Get().Cancelled(*entry_);
+FirebirdConnection *FirebirdCancelGuard::Connection() const {
+    return entry_->conn;
 }
 
 void ThrowIfFirebirdCancelled(const FirebirdCancelGuard &guard) {
-    if (guard.Cancelled()) {
+    if (guard.Connection() && guard.Connection()->CancelAnswered()) {
         throw InterruptException();
     }
+}
+
+std::string FirebirdInterruptMessage(const FirebirdConnection &conn) {
+    return conn.CancelAborted()
+               ? "Interrupted: the Firebird connection was closed (fb_cancel_abort)"
+               :"Interrupted: the Firebird request was cancelled (fb_cancel_raise)";
 }
 
 } // namespace duckdb

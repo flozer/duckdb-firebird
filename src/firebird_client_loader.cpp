@@ -113,10 +113,13 @@ static void BindSymbols(FirebirdClientApi &api,
     BIND(fb_interpret);
     BIND(isc_database_info);
     BIND(isc_dsql_sql_info);
-    BIND(fb_cancel_operation);
     // Optional: only firebird_health().client_version uses it.
     api.isc_get_client_version = reinterpret_cast<decltype(api.isc_get_client_version)>(
         PlatformSym(handle, "isc_get_client_version"));
+    // Optional: without it an interrupted query waits for the server, as
+    // before (FirebirdConnection::CancelOperation checks it).
+    api.fb_cancel_operation = reinterpret_cast<decltype(api.fb_cancel_operation)>(
+        PlatformSym(handle, "fb_cancel_operation"));
 #undef BIND
 }
 

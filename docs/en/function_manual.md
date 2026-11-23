@@ -23,7 +23,15 @@ on: a cursor open that sorts, or a fetch of a row the server is still
 computing. Scans and `firebird_query` end within a fraction of a second
 (about a second at most, when the server doesn't answer the cancel) with
 DuckDB's "Interrupted!" error, instead of waiting for the server to
-finish. The connection the request ran on is dropped from the pool.
+finish. The connection the request ran on is dropped from the pool, and
+`firebird_last_query().error_message` says how the query ended:
+`Interrupted: the Firebird request was cancelled (fb_cancel_raise)`, or
+`Interrupted: the Firebird connection was closed (fb_cancel_abort)` when
+the server didn't answer the cancel. A Firebird error that isn't the
+cancel's (including "operation was cancelled" from a DBA's
+`DELETE FROM MON$STATEMENTS`) keeps its own message. An interrupt doesn't
+reach opening a connection or loading an ATTACH's table metadata: those
+wait for the server.
 
 ## Level 1 - Direct reads
 

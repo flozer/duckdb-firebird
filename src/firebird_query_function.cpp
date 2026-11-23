@@ -179,7 +179,15 @@ unique_ptr<GlobalTableFunctionState> FirebirdQueryInitGlobal(ClientContext &cont
         const int64_t number = ts->Pin(context, idle_timeout_s);
         if (number > 0) {
             std::string error;
-            if (!state->conn->TryStartSnapshotTransaction(number, &error)) {
+            bool joined;
+            {
+                FirebirdCancelGuard cancel(context, state->conn.get());
+                joined = state->conn->TryStartSnapshotTransaction(number, &error);
+                if (!joined) {
+                    ThrowIfFirebirdCancelled(cancel);
+                }
+            }
+            if (!joined) {
                 state->pool->Discard(std::move(state->conn));
                 throw IOException("%s: could not join the snapshot of this DuckDB transaction "
                                   "(number %lld): %s",
@@ -241,9 +249,11 @@ unique_ptr<GlobalTableFunctionState> FirebirdQueryInitGlobal(ClientContext &cont
         }
         stmt->ExecuteCursor(bind.sql);
         state->cursor = std::move(stmt);
+    } catch (const InterruptException &) {
+        obs->SetError(FirebirdInterruptMessage(*cancel.Connection()));
+        throw;
     } catch (std::exception &ex) {
         obs->SetError(ErrorData(ex).RawMessage());
-        ThrowIfFirebirdCancelled(cancel);
         throw;
     }
     const auto t1 = std::chrono::steady_clock::now();
@@ -279,9 +289,11 @@ void FirebirdQueryFunction(ClientContext &context, TableFunctionInput &data, Dat
             }
             ++row;
         }
+    } catch (const InterruptException &) {
+        obs->SetError(FirebirdInterruptMessage(*cancel.Connection()));
+        throw;
     } catch (std::exception &ex) {
         obs->SetError(ErrorData(ex).RawMessage());
-        ThrowIfFirebirdCancelled(cancel);
         throw;
     }
     output.SetCardinality(row);

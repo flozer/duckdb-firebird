@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 
 #include "duckdb.hpp"
 
@@ -18,13 +19,20 @@ class FirebirdConnection;
 // every 100 ms; once the context is interrupted it calls
 // FirebirdConnection::CancelOperation (fb_cancel_operation with
 // fb_cancel_raise). The blocked call then fails with Firebird's "operation
-// was cancelled", and Cancelled() tells the caller to raise DuckDB's
-// InterruptException instead. A raise can go unanswered: a caller sending
-// one short request after another was seen waiting on the server's reply
-// for good after one (about 1 interrupt in 50, on Firebird 3, 4 and 5).
-// So if the guard is still there 1 s after the raise, the watcher aborts
-// the attachment (fb_cancel_abort: the client closes its network
-// connection, the blocked call fails, the server rolls back). The guard's
+// was cancelled", which FirebirdConnection::CheckStatus throws as DuckDB's
+// InterruptException. A raise can go unanswered: a caller sending one short
+// request after another was seen waiting on the server's reply for good
+// after one, on Firebird 3, 4 and 5. So if the guard is still there 1 s
+// after the raise, the watcher aborts the attachment (fb_cancel_abort: the
+// client closes its network connection, the blocked call fails, the server
+// rolls back).
+//
+// Each cancel runs on a short-lived thread of its own, so a cancel that
+// blocks never holds up the watcher or another connection's cancel. (In the
+// client library a raise sends one small packet under the port's write
+// lock, so it blocks only when the network send does; an abort closes the
+// socket. The library runs the cancels of one attachment one at a time, so
+// a raise that blocks also delays that attachment's abort.) The guard's
 // destructor waits for a cancel in flight on its connection, so a guard
 // must not outlive the connection it watches.
 class FirebirdCancelGuard {
@@ -35,8 +43,7 @@ public:
     FirebirdCancelGuard(const FirebirdCancelGuard &) = delete;
     FirebirdCancelGuard &operator=(const FirebirdCancelGuard &) = delete;
 
-    // The watcher cancelled the request: rethrow as InterruptException.
-    bool Cancelled() const;
+    FirebirdConnection *Connection() const;
 
     struct Entry;
 
@@ -44,8 +51,12 @@ private:
     std::shared_ptr<Entry> entry_;
 };
 
-// From a catch block around guarded Firebird calls: an InterruptException
-// when the guard cancelled the request, nothing otherwise.
+// After a guarded call that reports its error without throwing (for
+// example TryStartSnapshotTransaction): DuckDB's InterruptException when
+// the call failed because of the guard's cancel, nothing otherwise.
 void ThrowIfFirebirdCancelled(const FirebirdCancelGuard &guard);
+
+// The query log's error_message for a query that a cancel ended.
+std::string FirebirdInterruptMessage(const FirebirdConnection &conn);
 
 } // namespace duckdb

@@ -478,6 +478,8 @@ public:
     // status through this or NoteStatus, so a broken connection is known as
     // soon as one of them has failed that way. (The destructor's own
     // rollback and detach don't: the connection is going away anyway.)
+    // The error of a cancel sent by CancelOperation is thrown as DuckDB's
+    // InterruptException instead (see CancelAnswered).
     void CheckStatus(const ISC_STATUS *status, const std::string &context);
 
     // True when status is an error; marks the connection broken as above.
@@ -493,8 +495,18 @@ public:
     // client closes the attachment's network connection instead: the running
     // call fails at once, whatever the server does, and the server rolls the
     // transaction back. The connection is marked broken first, so the pool
-    // drops it instead of handing it out again.
+    // drops it instead of handing it out again. Does nothing more when the
+    // client library has no fb_cancel_operation.
     void CancelOperation(bool abort = false);
+
+    // A call on this connection failed with the error of a cancel that
+    // CancelOperation sent: "operation was cancelled" after a raise, or a
+    // lost connection after an abort. Any other error, or the same error
+    // without a cancel sent (a DBA's DELETE FROM MON$STATEMENTS), keeps its
+    // own message. Read on the thread that makes the calls.
+    bool CancelAnswered() const { return cancel_answered_; }
+    // The cancel sent was an abort (the client closed the connection).
+    bool CancelAborted() const { return cancel_sent_.load() == 2; }
 
 private:
     FirebirdConnectionInfo info_;
@@ -503,6 +515,9 @@ private:
     int64_t id_ = 0;
     bool in_snapshot_ = false;
     std::atomic<bool> broken_{false};
+    // 0: no cancel sent; 1: raise; 2: abort. Written by the cancel thread.
+    std::atomic<int> cancel_sent_{0};
+    bool cancel_answered_ = false;
 
     void Attach();
     void StartReadOnlyTransaction();
