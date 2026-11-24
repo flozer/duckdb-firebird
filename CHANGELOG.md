@@ -10,7 +10,9 @@
   of a second with DuckDB's "Interrupted!" error, instead of waiting for
   the server. The connection it ran on is dropped from the pool, and
   `firebird_last_query().error_message` says whether the request was
-  cancelled or its connection closed. A client library without
+  cancelled or its connection closed; a query that failed keeps its own
+  error there, not the interrupt DuckDB then sends to its other parts. A
+  client library without
   `fb_cancel_operation` still loads; its interrupts wait, as before.
 - `firebird_query(alias, sql)`: runs one Firebird `SELECT` on an ATTACH
   exactly as written (selectable procedures, CTEs, `FIRST`/`SKIP`, Firebird

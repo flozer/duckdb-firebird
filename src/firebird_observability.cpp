@@ -110,6 +110,18 @@ void FirebirdObservabilityState::SetError(const std::string &msg) {
     }
 }
 
+void FirebirdObservabilityState::SetErrorIfEmpty(const std::string &msg) {
+    auto sanitized = SanitizeErrorMessage(msg);
+    std::lock_guard<std::mutex> g(lock_);
+    if (!last_.error_message.empty()) {
+        return;
+    }
+    last_.error_message = sanitized;
+    if (!log_.empty() && log_.back().error_message.empty()) {
+        log_.back().error_message = sanitized;
+    }
+}
+
 shared_ptr<FirebirdObservabilityState> GetObservabilityState(ClientContext &ctx) {
     return ctx.registered_state->GetOrCreate<FirebirdObservabilityState>(
         FirebirdObservabilityState::KEY);

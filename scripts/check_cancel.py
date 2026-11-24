@@ -16,6 +16,8 @@ Firebird call. Then it checks how the query ended:
   server doesn't answer within 1 s (rare; reported, and allowed 1.9 s), and
   DUCKDB_FIREBIRD_TEST_CANCEL_ABORT=1 makes the first cancel the abort, so
   the second pass always takes that path.
+A last case fails one pipeline while another waits on the slow call: the
+query must end with that error, and error_message must keep it.
 
 sqllogictest can't interrupt a running statement, so this needs a client.
 
@@ -120,6 +122,55 @@ for mode in ("raise", "abort"):
         after = con.execute("SELECT * FROM firebird_query('fb', 'SELECT 1 FROM RDB$DATABASE')").fetchall()
         check(after == [(1,)], f"{label}: the session works afterwards ({after})")
         con.close()
+
+# An interrupt must not replace the error that stopped the query. DuckDB
+# interrupts a query itself when one of its pipelines fails, so the watcher
+# also cancels the Firebird calls still running in the other pipelines. Here
+# the slow call runs in one pipeline and a call that fails with a division by
+# zero (after counting a few hundred thousand rows) in another. The UNION ALL
+# feeds a COUNT(*), so both run at once: DuckDB 1.5 runs the sides of a
+# UNION ALL that feeds the query result one after the other. firebird_last_query()
+# must keep the division error, not the slow call's "Interrupted: ...".
+os.environ.pop("DUCKDB_FIREBIRD_TEST_CANCEL_ABORT", None)
+label = "an error in another pipeline"
+FAILING = (
+    "SELECT 1 / (COUNT(*) - COUNT(*)) FROM RDB$FIELDS A, RDB$FIELDS B, "
+    "(SELECT FIRST 3 RDB$FIELD_NAME FROM RDB$FIELDS) C"
+)
+con = connect("fb")
+con.execute("SET threads = 4")
+result = {}
+
+
+def run_both():
+    try:
+        con.execute(
+            f"SELECT COUNT(*) FROM (SELECT * FROM firebird_query('fb', '{SLOW}') "
+            f"UNION ALL SELECT * FROM firebird_query('fb', '{FAILING}'))"
+        ).fetchall()
+        result["outcome"] = "finished"
+    except duckdb.InterruptException:
+        result["outcome"] = "interrupted"
+    except Exception as e:  # noqa: BLE001 - the expected outcome; checked below
+        result["outcome"] = f"{type(e).__name__}: {str(e).splitlines()[0][:200]}"
+        result["text"] = str(e)
+
+
+worker = threading.Thread(target=run_both, daemon=True)
+t0 = time.monotonic()
+worker.start()
+worker.join(MAX_S)
+if worker.is_alive():
+    check(False, f"{label}: still running {MAX_S:.0f} s after it started (the slow call wasn't cancelled)")
+else:
+    secs = time.monotonic() - t0
+    check("divide by zero" in result.get("text", "").lower(),
+          f"{label}: the query fails with the division error ({result['outcome']}, {secs:.2f} s)")
+    message = con.execute("SELECT error_message FROM firebird_last_query()").fetchone()[0] or ""
+    check("divide by zero" in message.lower(), f"{label}: error_message is {message[:200]!r}")
+    after = con.execute("SELECT * FROM firebird_query('fb', 'SELECT 1 FROM RDB$DATABASE')").fetchall()
+    check(after == [(1,)], f"{label}: the session works afterwards ({after})")
+    con.close()
 
 # A stuck worker thread would keep the process alive: exit hard.
 os._exit(1 if failed else 0)

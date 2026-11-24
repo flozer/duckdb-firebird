@@ -250,7 +250,7 @@ unique_ptr<GlobalTableFunctionState> FirebirdQueryInitGlobal(ClientContext &cont
         stmt->ExecuteCursor(bind.sql);
         state->cursor = std::move(stmt);
     } catch (const InterruptException &) {
-        obs->SetError(FirebirdInterruptMessage(*cancel.Connection()));
+        obs->SetErrorIfEmpty(FirebirdInterruptMessage(*cancel.Connection()));
         throw;
     } catch (std::exception &ex) {
         obs->SetError(ErrorData(ex).RawMessage());
@@ -290,7 +290,7 @@ void FirebirdQueryFunction(ClientContext &context, TableFunctionInput &data, Dat
             ++row;
         }
     } catch (const InterruptException &) {
-        obs->SetError(FirebirdInterruptMessage(*cancel.Connection()));
+        obs->SetErrorIfEmpty(FirebirdInterruptMessage(*cancel.Connection()));
         throw;
     } catch (std::exception &ex) {
         obs->SetError(ErrorData(ex).RawMessage());

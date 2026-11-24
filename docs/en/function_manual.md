@@ -29,7 +29,9 @@ finish. The connection the request ran on is dropped from the pool, and
 `Interrupted: the Firebird connection was closed (fb_cancel_abort)` when
 the server didn't answer the cancel. A Firebird error that isn't the
 cancel's (including "operation was cancelled" from a DBA's
-`DELETE FROM MON$STATEMENTS`) keeps its own message. An interrupt doesn't
+`DELETE FROM MON$STATEMENTS`) keeps its own message, and so does a query
+that failed: DuckDB then interrupts its other parts itself, and their
+cancel doesn't replace the error that stopped the query. An interrupt doesn't
 reach opening a connection or loading an ATTACH's table metadata: those
 wait for the server.
 

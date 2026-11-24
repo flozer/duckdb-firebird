@@ -1422,6 +1422,9 @@ static bool OpenNextPartitionCursor(ClientContext &ctx,
             local.cursor = query.params.empty()
                 ? local.conn->OpenCursor(query.sql)
                 : local.conn->OpenCursor(query.sql, query.params);
+        } catch (const InterruptException &) {
+            GetObservabilityState(ctx)->SetErrorIfEmpty(FirebirdInterruptMessage(*local.conn));
+            throw;
         } catch (const std::exception &e) {
             GetObservabilityState(ctx)->SetError(
                 std::string("OpenCursor: ") + e.what());
@@ -1567,7 +1570,7 @@ static void FirebirdScanFunction(ClientContext &ctx,
             }
         }
     } catch (const InterruptException &) {
-        GetObservabilityState(ctx)->SetError(FirebirdInterruptMessage(*local.conn));
+        GetObservabilityState(ctx)->SetErrorIfEmpty(FirebirdInterruptMessage(*local.conn));
         throw;
     } catch (const std::exception &e) {
         GetObservabilityState(ctx)->SetError(

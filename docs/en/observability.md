@@ -253,7 +253,11 @@ scan or `firebird_query` waits on, the query ends with DuckDB's
 The fetch-failure context above is not added: the network didn't drop the
 connection. A Firebird error that isn't the cancel's (including "operation
 was cancelled" from a DBA's `DELETE FROM MON$STATEMENTS`) keeps its own
-message. See "Interrupting a query" in `function_manual.md`.
+message. When one part of a query fails (a worker of a parallel scan, one
+side of a `UNION ALL`), DuckDB interrupts the query's other parts, and the
+watcher cancels their Firebird calls too; their "Interrupted: ..." never
+replaces the error already recorded, so `error_message` keeps the failure
+that stopped the query. See "Interrupting a query" in `function_manual.md`.
 
 ### `bytes_read_estimate` — definition (G5)
 

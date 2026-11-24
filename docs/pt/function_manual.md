@@ -30,6 +30,9 @@ servidor nao respondeu ao cancelamento. Um erro Firebird que nao e o do
 cancelamento (inclusive o "operation was cancelled" de um
 `DELETE FROM MON$STATEMENTS` feito por um DBA) guarda a propria mensagem, e o
 contexto de "fetch failed" dos scans nao e acrescentado a uma interrupcao.
+Uma query que falhou tambem guarda o erro: o DuckDB entao interrompe sozinho
+as outras partes dela, e o cancelamento delas nao substitui o erro que parou
+a query.
 A interrupcao nao alcanca a abertura de uma conexao nem a carga dos metadados
 das tabelas de um ATTACH: essas esperam o servidor.
 

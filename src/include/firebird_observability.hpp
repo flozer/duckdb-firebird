@@ -111,6 +111,12 @@ public:
     void AddFirebirdTimeUs(int64_t us);
     void UpdateTotalTimeUs();
     void SetError(const std::string &msg);
+    // For an interrupt: records msg only when the query has no error yet.
+    // DuckDB interrupts a query itself when one of its pipelines fails
+    // (Executor::PushError), so the cancel watcher also cancels the
+    // calls of the other pipelines; their interrupt must not replace the
+    // error that stopped the query.
+    void SetErrorIfEmpty(const std::string &msg);
 
 private:
     mutable std::mutex lock_;
