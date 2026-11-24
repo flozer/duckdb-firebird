@@ -43,6 +43,7 @@
 #define isc_database_info            (::duckdb::fbapi().isc_database_info)
 #define isc_get_client_version       (::duckdb::fbapi().isc_get_client_version)
 #define isc_dsql_sql_info            (::duckdb::fbapi().isc_dsql_sql_info)
+#define fb_cancel_operation          (::duckdb::fbapi().fb_cancel_operation)
 
 namespace duckdb {
 
@@ -733,15 +734,41 @@ static bool StatusMeansConnectionLost(const ISC_STATUS *status) {
     return false;
 }
 
+// True when the status vector carries isc_cancelled ("operation was
+// cancelled") in any isc_arg_gds entry.
+static bool StatusMeansCancelled(const ISC_STATUS *status) {
+    if (!StatusIsError(status)) {
+        return false;
+    }
+    const size_t n = 20;
+    size_t i = 0;
+    while (i + 1 < n && status[i] != isc_arg_end) {
+        if (status[i] == isc_arg_gds && status[i + 1] == 335544794L) {  // isc_cancelled
+            return true;
+        }
+        i += (status[i] == isc_arg_cstring) ? 3 : 2;
+    }
+    return false;
+}
+
 bool FirebirdConnection::NoteStatus(const ISC_STATUS *status) {
-    if (StatusMeansConnectionLost(status)) {
+    const bool lost = StatusMeansConnectionLost(status);
+    if (lost) {
         broken_.store(true, std::memory_order_relaxed);
+    }
+    // The error a cancel sent by CancelOperation produces: the raise's
+    // "operation was cancelled", or the lost connection of an abort (a raise
+    // the server never answered is followed by one).
+    if (cancel_sent_.load() != 0 && (lost || StatusMeansCancelled(status))) {
+        cancel_answered_ = true;
     }
     return StatusIsError(status);
 }
 
 void FirebirdConnection::CheckStatus(const ISC_STATUS *status, const std::string &context) {
-    NoteStatus(status);
+    if (NoteStatus(status) && cancel_answered_) {
+        throw InterruptException();
+    }
     Check(status, context);
 }
 
@@ -865,6 +892,17 @@ void FirebirdConnection::RestoreDefaultTransaction() {
     }
     in_snapshot_ = false;
     StartReadOnlyTransaction();
+}
+
+void FirebirdConnection::CancelOperation(bool abort) {
+    broken_.store(true, std::memory_order_relaxed);
+    if (!fb_cancel_operation) {
+        return;  // a client library without it: nothing to cancel with
+    }
+    // Before the call: the cancelled call may fail as soon as it is made.
+    cancel_sent_.store(abort ? 2 : 1);
+    ISC_STATUS status[20] = {};
+    fb_cancel_operation(status, &db_, abort ? fb_cancel_abort : fb_cancel_raise);
 }
 
 std::unique_ptr<FirebirdStatement> FirebirdConnection::OpenCursor(const std::string &sql) {

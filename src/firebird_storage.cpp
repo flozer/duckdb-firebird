@@ -28,6 +28,7 @@
 #include "firebird_query_function.hpp"
 #include "firebird_dbt_sources.hpp"
 #include "firebird_scanner.hpp"
+#include "firebird_cancel.hpp"
 #include "firebird_client.hpp"
 #include "firebird_view_analysis.hpp"
 
@@ -932,7 +933,7 @@ public:
                 return 0;  // Firebird 3: scans behave as without this option
             }
             try {
-                StartCoordinator();
+                StartCoordinator(context);
             } catch (...) {
                 start_failed_ = true;  // never fall back to no snapshot later
                 throw;
@@ -989,7 +990,7 @@ private:
     // tried; a healthy connection without a snapshot number (Firebird 3)
     // goes back to the pool and leaves number_ at 0. Anything else throws,
     // so the transaction never reads without its snapshot by accident.
-    void StartCoordinator() {
+    void StartCoordinator(ClientContext &context) {
         std::string error;
         // Parked connections may be dead; try until a new one was tried.
         while (true) {
@@ -997,8 +998,20 @@ private:
             auto conn = std::move(lease.conn);
             try {
                 error.clear();
-                if (conn->TryStartSnapshotTransaction(0, &error)) {
-                    const int64_t n = conn->SnapshotNumber();
+                bool started;
+                int64_t n = 0;
+                {
+                    // A DuckDB interrupt cancels these round trips. The
+                    // guard ends before the connection can go back to the
+                    // pool.
+                    FirebirdCancelGuard cancel(context, conn.get());
+                    started = conn->TryStartSnapshotTransaction(0, &error);
+                    if (started) {
+                        n = conn->SnapshotNumber();
+                    }
+                    ThrowIfFirebirdCancelled(cancel);
+                }
+                if (started) {
                     if (n > 0) {
                         number_ = n;
                         conn_ = std::move(conn);

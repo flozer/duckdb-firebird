@@ -19,6 +19,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/query_result.hpp"
 
+#include "firebird_cancel.hpp"
 #include "firebird_client.hpp"
 #include "firebird_dbt_sources.hpp"
 #include "firebird_observability.hpp"
@@ -178,7 +179,15 @@ unique_ptr<GlobalTableFunctionState> FirebirdQueryInitGlobal(ClientContext &cont
         const int64_t number = ts->Pin(context, idle_timeout_s);
         if (number > 0) {
             std::string error;
-            if (!state->conn->TryStartSnapshotTransaction(number, &error)) {
+            bool joined;
+            {
+                FirebirdCancelGuard cancel(context, state->conn.get());
+                joined = state->conn->TryStartSnapshotTransaction(number, &error);
+                if (!joined) {
+                    ThrowIfFirebirdCancelled(cancel);
+                }
+            }
+            if (!joined) {
                 state->pool->Discard(std::move(state->conn));
                 throw IOException("%s: could not join the snapshot of this DuckDB transaction "
                                   "(number %lld): %s",
@@ -209,6 +218,8 @@ unique_ptr<GlobalTableFunctionState> FirebirdQueryInitGlobal(ClientContext &cont
     obs->RecordQuery(rec, log_size);
 
     const auto t0 = std::chrono::steady_clock::now();
+    // A DuckDB interrupt cancels the Firebird request (see FirebirdCancelGuard).
+    FirebirdCancelGuard cancel(context, state->conn.get());
     try {
         auto stmt = PrepareSelect(*state->conn, bind.sql);
         const auto &cols = stmt->columns();
@@ -238,6 +249,9 @@ unique_ptr<GlobalTableFunctionState> FirebirdQueryInitGlobal(ClientContext &cont
         }
         stmt->ExecuteCursor(bind.sql);
         state->cursor = std::move(stmt);
+    } catch (const InterruptException &) {
+        obs->SetErrorIfEmpty(FirebirdInterruptMessage(*cancel.Connection()));
+        throw;
     } catch (std::exception &ex) {
         obs->SetError(ErrorData(ex).RawMessage());
         throw;
@@ -258,6 +272,7 @@ void FirebirdQueryFunction(ClientContext &context, TableFunctionInput &data, Dat
     idx_t row = 0;
     int64_t fetch_us = 0;
     auto obs = GetObservabilityState(context);
+    FirebirdCancelGuard cancel(context, state.conn.get());
     try {
         while (row < STANDARD_VECTOR_SIZE) {
             const auto t0 = std::chrono::steady_clock::now();
@@ -274,6 +289,9 @@ void FirebirdQueryFunction(ClientContext &context, TableFunctionInput &data, Dat
             }
             ++row;
         }
+    } catch (const InterruptException &) {
+        obs->SetErrorIfEmpty(FirebirdInterruptMessage(*cancel.Connection()));
+        throw;
     } catch (std::exception &ex) {
         obs->SetError(ErrorData(ex).RawMessage());
         throw;

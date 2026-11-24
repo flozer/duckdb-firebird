@@ -14,6 +14,28 @@ facil de encontrar.
 - **Para que serve**: casos de uso.
 - **Uso no dia a dia**: exemplos praticos.
 
+## Interromper uma query
+
+Interromper uma query DuckDB (Ctrl+C no CLI, `interrupt()` num cliente)
+tambem cancela o pedido Firebird pelo qual ela espera: a abertura de um
+cursor que ordena, ou o fetch de uma linha que o servidor ainda calcula.
+Os scans e o `firebird_query` terminam em uma fracao de segundo (cerca de
+um segundo no maximo, quando o servidor nao responde ao cancelamento) com o
+erro "Interrupted!" do DuckDB, em vez de esperar o servidor terminar. A conexao
+em que o pedido rodava sai do pool, e `firebird_last_query().error_message`
+diz como a query terminou:
+`Interrupted: the Firebird request was cancelled (fb_cancel_raise)`, ou
+`Interrupted: the Firebird connection was closed (fb_cancel_abort)` quando o
+servidor nao respondeu ao cancelamento. Um erro Firebird que nao e o do
+cancelamento (inclusive o "operation was cancelled" de um
+`DELETE FROM MON$STATEMENTS` feito por um DBA) guarda a propria mensagem, e o
+contexto de "fetch failed" dos scans nao e acrescentado a uma interrupcao.
+Uma query que falhou tambem guarda o erro: o DuckDB entao interrompe sozinho
+as outras partes dela, e o cancelamento delas nao substitui o erro que parou
+a query.
+A interrupcao nao alcanca a abertura de uma conexao nem a carga dos metadados
+das tabelas de um ATTACH: essas esperam o servidor.
+
 ## Requisito de runtime
 
 A partir da v0.5.5 a extensao nao embute o cliente Firebird no binario

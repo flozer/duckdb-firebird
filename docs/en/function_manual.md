@@ -17,6 +17,24 @@ The extension loads the Firebird client library (`libfbclient`) at runtime.
 Install the Firebird client/runtime matching your platform before loading the
 extension.
 
+**Interrupting a query.** Interrupting a DuckDB query (Ctrl+C in the CLI,
+`interrupt()` in a client) also cancels the Firebird request it is waiting
+on: a cursor open that sorts, or a fetch of a row the server is still
+computing. Scans and `firebird_query` end within a fraction of a second
+(about a second at most, when the server doesn't answer the cancel) with
+DuckDB's "Interrupted!" error, instead of waiting for the server to
+finish. The connection the request ran on is dropped from the pool, and
+`firebird_last_query().error_message` says how the query ended:
+`Interrupted: the Firebird request was cancelled (fb_cancel_raise)`, or
+`Interrupted: the Firebird connection was closed (fb_cancel_abort)` when
+the server didn't answer the cancel. A Firebird error that isn't the
+cancel's (including "operation was cancelled" from a DBA's
+`DELETE FROM MON$STATEMENTS`) keeps its own message, and so does a query
+that failed: DuckDB then interrupts its other parts itself, and their
+cancel doesn't replace the error that stopped the query. An interrupt doesn't
+reach opening a connection or loading an ATTACH's table metadata: those
+wait for the server.
+
 ## Level 1 - Direct reads
 
 ### `firebird_scan(connection_string, table_name)`
