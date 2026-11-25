@@ -31,7 +31,8 @@ This guide follows concepts documented by DuckDB:
   and JSON.
 - [`ATTACH`](https://duckdb.org/docs/current/sql/statements/attach.html):
   attaches another catalog to DuckDB. This extension uses the same
-  model to expose Firebird as a read-only catalog.
+  model to expose Firebird as a catalog, read-only unless it is
+  attached with `READ_WRITE`.
 - [`Indexes`](https://duckdb.org/docs/current/sql/indexes.html) and
   [index performance](https://duckdb.org/docs/current/guides/performance/indexing.html):
   DuckDB builds zonemaps automatically; ART indexes help with very
@@ -113,8 +114,10 @@ FROM fb.main.TABPESSOAS
 LIMIT 10;
 ```
 
-The Firebird catalog is read-only in this extension. Create analytical
-tables in the local DuckDB catalog.
+The Firebird catalog is read-only unless the ATTACH uses DuckDB's
+`READ_WRITE` option, which allows writes through `firebird_execute` (see
+the function manual). Create analytical tables in the local DuckDB
+catalog.
 
 ## 2. Installation and loading
 
@@ -248,6 +251,43 @@ LIMIT 10;
 Security note: connection strings and SQL can end up in terminal
 history, notebooks, and logs. In production, use a read-only Firebird
 user and do not commit real passwords into scripts.
+
+### Firebird users and grants
+
+Give each ATTACH the least its job needs:
+
+- **Reads** (a plain ATTACH, `firebird_scan`, `firebird_query`): a user
+  with `SELECT` on the tables and views it reads, and nothing else.
+- **Writes** (an ATTACH opened with `READ_WRITE`): a separate user,
+  granted only what the writes need: `INSERT`, `UPDATE` (on chosen
+  columns if you like) and `DELETE` on the tables they change, `EXECUTE`
+  on the procedures they call, and `SELECT` on what they read. DDL needs
+  the matching rights, or ownership; most write jobs need none.
+
+```sql
+-- In Firebird (isql, or any tool), as SYSDBA or the database owner:
+CREATE USER APP_READONLY PASSWORD 'secret-r';
+GRANT SELECT ON CUSTOMER TO USER APP_READONLY;
+
+CREATE USER APP_WRITER PASSWORD 'secret-w';
+GRANT SELECT, INSERT ON STAGING_ORDERS TO USER APP_WRITER;
+GRANT UPDATE (STATUS) ON ORDERS TO USER APP_WRITER;
+GRANT EXECUTE ON PROCEDURE SP_CLOSE_DAY TO USER APP_WRITER;
+```
+
+A `READ_WRITE` ATTACH reads with its own user too: its catalog and scans
+use the same credentials. To keep analytics on the read-only user, attach
+the database twice, once per user:
+
+```sql
+ATTACH 'database=db.example.com/3050:/data/erp.fdb;user=APP_READONLY;password=secret-r'
+    AS fb (TYPE firebird);
+ATTACH 'database=db.example.com/3050:/data/erp.fdb;user=APP_WRITER;password=secret-w'
+    AS fbw (TYPE firebird, READ_WRITE);
+```
+
+Firebird enforces the grants: a write the user may not do fails with
+Firebird's "no permission for ... access" error.
 
 ## 4. Charset and Brazilian legacy databases
 
@@ -857,7 +897,8 @@ WHERE DATAMOVIMENTO >= DATE '2024-01-01';
 - Order fact tables by date and filter keys.
 - Create indexes only for very selective point lookups.
 - Export analytical datasets as Parquet whenever possible.
-- Use a read-only Firebird user for analytics.
+- Use a read-only Firebird user for analytics, and a separate user, with
+  only the grants its writes need, for an ATTACH opened with `READ_WRITE`.
 - Do not run heavy loads against Firebird during critical hours
   without validating the impact.
 

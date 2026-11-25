@@ -1,0 +1,146 @@
+# name: test/sql/firebird_execute_atomic.test
+# description: A statement that runs firebird_execute is all or nothing. When
+#              something after the call, or beside it, fails, the call's write
+#              is not kept either. DuckDB 1.5 commits the write with the
+#              statement, so the failure rolls it back. DuckDB 2.0, in
+#              autocommit, commits a call before returning its row, so there
+#              the call must be the whole statement: any other form is
+#              refused before it writes (firebird_execute_autocommit_v2.test
+#              checks the message). Either way nothing is stored. Between
+#              BEGIN and COMMIT every form runs, on both.
+# group: [firebird]
+#
+# Needs scripts/fixture_rw.sql in the database named by FIREBIRD_RW_DB.
+# Uses RW_LOG rows 701 to 720 only.
+
+require firebird
+
+require-env FIREBIRD_RW_DB
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS rw (TYPE firebird, READ_WRITE);
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG WHERE ID BETWEEN 701 AND 720');
+
+# --- The call is the whole statement: it commits ---------------------------------
+
+query II
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (701, ''whole'')');
+----
+1	1
+
+query I
+SELECT executions FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (702, ''one column'')');
+----
+1
+
+query II
+SELECT executions, rows_affected FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (703, ''reordered'')');
+----
+1	1
+
+query II
+SELECT ID, NOTE FROM firebird_query('rw', 'SELECT ID, NOTE FROM RW_LOG WHERE ID BETWEEN 701 AND 703 ORDER BY ID');
+----
+701	whole
+702	one column
+703	reordered
+
+# --- An expression after the call fails: the write is not kept -------------------
+# The error depends on the call's row, so it is raised after the call ran
+# (DuckDB 1.5), or the form is refused before it (DuckDB 2.0).
+
+statement error
+SELECT *, error('after the write ' || executions) FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (704, ''expression'')');
+----
+<REGEX>:.*(after the write 1|must be the whole statement).*
+
+query I
+SELECT count(*) FROM firebird_query('rw', 'SELECT ID FROM RW_LOG WHERE ID = 704');
+----
+0
+
+# --- Two calls, the second fails: neither write is kept --------------------------
+# NOTE is VARCHAR(20): the second insert fails when it runs, not when it is
+# prepared.
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (705, ''union first'')')
+UNION ALL
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (706, ''longer than twenty characters'')');
+----
+<REGEX>:.*(truncation|must be the whole statement).*
+
+query I
+SELECT count(*) FROM firebird_query('rw', 'SELECT ID FROM RW_LOG WHERE ID IN (705, 706)');
+----
+0
+
+# --- Into a local table: refused, nothing kept on either side --------------------
+
+statement ok
+CREATE OR REPLACE TABLE local_log (rows_affected BIGINT, executions BIGINT);
+
+statement error
+INSERT INTO local_log SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (707, ''local'')');
+----
+<REGEX>:.*(single attached database|must be the whole statement).*
+
+query II
+SELECT (SELECT count(*) FROM local_log),
+       (SELECT * FROM firebird_query('rw', 'SELECT count(*) FROM RW_LOG WHERE ID = 707'));
+----
+0	0
+
+# --- Between BEGIN and COMMIT every form runs -------------------------------------
+
+statement ok
+BEGIN;
+
+query II
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (708, ''txn union a'')')
+UNION ALL
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (709, ''txn union b'')');
+----
+1	1
+1	1
+
+query I
+SELECT rows_affected + executions FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (710, ''txn expression'')');
+----
+2
+
+statement ok
+COMMIT;
+
+query II
+SELECT ID, NOTE FROM firebird_query('rw', 'SELECT ID, NOTE FROM RW_LOG WHERE ID BETWEEN 708 AND 710 ORDER BY ID');
+----
+708	txn union a
+709	txn union b
+710	txn expression
+
+# A failure inside the transaction: ROLLBACK drops every write of it.
+
+statement ok
+BEGIN;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (711, ''txn first'')');
+
+statement error
+SELECT *, error('after the write ' || executions) FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (712, ''txn second'')');
+----
+after the write 1
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM firebird_query('rw', 'SELECT ID FROM RW_LOG WHERE ID IN (711, 712)');
+----
+0
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG WHERE ID BETWEEN 701 AND 720');

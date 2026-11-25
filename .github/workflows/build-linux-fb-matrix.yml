@@ -61,6 +61,15 @@ jobs:
             fb_image: firebirdsql/firebird:5-noble
             duckdb: v2.0.1
             name_suffix: " (DuckDB v2.0.1)"
+          # The write path runs on DuckDB 2.0 with every Firebird version.
+          - fb_major: 3
+            fb_image: firebirdsql/firebird:3-noble
+            duckdb: v2.0.1
+            name_suffix: " (DuckDB v2.0.1)"
+          - fb_major: 4
+            fb_image: firebirdsql/firebird:4-noble
+            duckdb: v2.0.1
+            name_suffix: " (DuckDB v2.0.1)"
     env:
       DUCKDB_VERSION: ${{ matrix.duckdb }}
 
@@ -170,6 +179,13 @@ jobs:
             docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_query4.sql /var/lib/firebird/data/query.fdb
           fi
 
+          # Write-path fixture: its own database, so the writes never touch
+          # the other fixtures.
+          docker cp scripts/fixture_rw.sql fb:/tmp/fixture_rw.sql
+          printf "%s\n" "CREATE DATABASE '/var/lib/firebird/data/rw.fdb' DEFAULT CHARACTER SET UTF8;" \
+            | docker exec -i fb bash -c "isql -u SYSDBA -p masterkey"
+          docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_rw.sql /var/lib/firebird/data/rw.fdb
+
           # DataTypeCompatibility fixture (FB4+): its own database, opened
           # through a databases.conf alias with DataTypeCompatibility = 2.5,
           # so the server describes INT128 / DECFLOAT / WITH TIME ZONE /
@@ -211,6 +227,7 @@ jobs:
           echo "FIREBIRD_PARTITIONS_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/partitions.fdb?charset=UTF8" >> $GITHUB_ENV
           echo "FIREBIRD_NUMERICS_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/numerics.fdb?charset=UTF8" >> $GITHUB_ENV
           echo "FIREBIRD_QUERY_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/query.fdb?charset=UTF8" >> $GITHUB_ENV
+          echo "FIREBIRD_RW_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/rw.fdb?charset=UTF8" >> $GITHUB_ENV
           # DECVALS still loads into biz4.fdb above (issue #48). Exporting
           # the env HERE (instead of only in the FB4+ smoke step) lets the
           # main suite step run firebird_decfloat.test on FB4/FB5 legs;
@@ -342,6 +359,8 @@ jobs:
           chmod +x "$cli"
           echo "DUCKDB=$cli" >> $GITHUB_ENV
           echo "DUCKDB_PRELUDE=$load" >> $GITHUB_ENV
+          # Tests that hold for DuckDB 2.0 only (require-env FIREBIRD_DUCKDB_V2).
+          echo "FIREBIRD_DUCKDB_V2=1" >> $GITHUB_ENV
           cat "$cli"
           # The loaded extension must provide firebird_scan.
           n=$(printf '%s\n' "$load" \
@@ -410,6 +429,25 @@ jobs:
           # firebird_query (FB4+ types through FIREBIRD_QUERY4_DB, FB4/FB5).
           ./build/release/test/unittest test/sql/firebird_query.test
           ./build/release/test/unittest test/sql/firebird_query_fb4.test
+          # Writes (READ_WRITE ATTACH).
+          ./build/release/test/unittest test/sql/firebird_execute.test
+          ./build/release/test/unittest test/sql/firebird_execute_atomic.test
+          ./build/release/test/unittest test/sql/firebird_execute_autocommit_v2.test
+          ./build/release/test/unittest test/sql/firebird_read_your_writes.test
+          ./build/release/test/unittest test/sql/firebird_least_privilege.test
+          ./build/release/test/unittest test/sql/firebird_ddl_cache.test
+          ./build/release/test/unittest test/sql/firebird_session_reset.test
+
+      - name: Writes commit when a client reads one row and closes (Python)
+        # sqllogictest reads every result fully; this needs a real client
+        # that stops after fetchone(). Uses the Python package of the leg's
+        # DuckDB version (1.5.6 or 2.0.1).
+        run: |
+          python3 -m venv /tmp/pyduck
+          /tmp/pyduck/bin/pip install --quiet "duckdb==${DUCKDB_VERSION#v}"
+          /tmp/pyduck/bin/python scripts/check_execute_fetchone.py \
+            "$GITHUB_WORKSPACE/build/release/extension/firebird/firebird.duckdb_extension" \
+            "$FIREBIRD_RW_DB"
 
       - name: An interrupt cancels the running Firebird request (Python)
         # sqllogictest can't interrupt a running statement; this needs a

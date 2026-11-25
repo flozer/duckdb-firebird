@@ -1,0 +1,165 @@
+# name: test/sql/firebird_ddl_cache.test
+# description: DDL through firebird_execute refreshes the ATTACH's tables; firebird_clear_cache for DDL made elsewhere
+# group: [firebird]
+#
+# Needs scripts/fixture_rw.sql in the database named by FIREBIRD_RW_DB.
+
+require firebird
+
+require-env FIREBIRD_RW_DB
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS rw (TYPE firebird, READ_WRITE);
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS other (TYPE firebird);
+
+# Leftovers of an interrupted earlier run
+statement ok
+SELECT * FROM firebird_execute('rw', 'EXECUTE BLOCK AS BEGIN
+    IF (EXISTS (SELECT 1 FROM RDB$RELATIONS WHERE RDB$RELATION_NAME = ''RW_DDL_A'')) THEN EXECUTE STATEMENT ''DROP TABLE RW_DDL_A'';
+    IF (EXISTS (SELECT 1 FROM RDB$RELATIONS WHERE RDB$RELATION_NAME = ''RW_DDL_B'')) THEN EXECUTE STATEMENT ''DROP TABLE RW_DDL_B'';
+    IF (EXISTS (SELECT 1 FROM RDB$RELATIONS WHERE RDB$RELATION_NAME = ''RW_DDL_C'')) THEN EXECUTE STATEMENT ''DROP TABLE RW_DDL_C'';
+    END');
+
+# Both catalogs have loaded their tables before any DDL.
+query I
+SELECT count(*) > 0 FROM (SELECT * FROM rw.main.RW_TYPES);
+----
+true
+
+query I
+SELECT count(*) > 0 FROM (SELECT * FROM other.main.RW_TYPES);
+----
+true
+
+# --- CREATE TABLE: usable under rw.main at once --------------------------------
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'CREATE TABLE RW_DDL_A (ID INTEGER NOT NULL, NAME VARCHAR(10))');
+
+query I
+SELECT rows_affected FROM firebird_execute('rw', 'INSERT INTO RW_DDL_A SELECT 1, ''one'' FROM RDB$DATABASE UNION ALL SELECT 2, ''two'' FROM RDB$DATABASE');
+----
+2
+
+query II
+SELECT ID, NAME FROM rw.main.RW_DDL_A ORDER BY ID;
+----
+1	one
+2	two
+
+# --- ALTER TABLE: the new column shows up ---------------------------------------
+# A prepared statement too: the ATTACH reports no catalog version, so DuckDB
+# binds a prepared statement over it again on every execution.
+
+statement ok
+PREPARE p_ddl AS SELECT * FROM rw.main.RW_DDL_A ORDER BY ID;
+
+query II
+EXECUTE p_ddl;
+----
+1	one
+2	two
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'ALTER TABLE RW_DDL_A ADD QTY NUMERIC(9,3)');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'UPDATE RW_DDL_A SET QTY = 1.5 WHERE ID = 1');
+
+query III
+SELECT ID, NAME, QTY FROM rw.main.RW_DDL_A ORDER BY ID;
+----
+1	one	1.500
+2	two	NULL
+
+query III
+EXECUTE p_ddl;
+----
+1	one	1.500
+2	two	NULL
+
+statement ok
+DEALLOCATE p_ddl;
+
+# --- In a DuckDB transaction: refreshed at COMMIT, not on ROLLBACK -----------------
+
+statement ok
+BEGIN;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'CREATE TABLE RW_DDL_B (X INTEGER)');
+
+statement ok
+COMMIT;
+
+query I
+SELECT count(*) FROM rw.main.RW_DDL_B;
+----
+0
+
+statement ok
+BEGIN;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'CREATE TABLE RW_DDL_C (X INTEGER)');
+
+statement ok
+ROLLBACK;
+
+statement error
+SELECT count(*) FROM rw.main.RW_DDL_C;
+----
+does not exist
+
+# --- Another ATTACH keeps its cache until firebird_clear_cache --------------------
+
+statement error
+SELECT count(*) FROM other.main.RW_DDL_A;
+----
+does not exist
+
+query I
+SELECT * FROM firebird_clear_cache('other');
+----
+true
+
+# Listing the tables loads them under the same lock hold as a lookup (a
+# clear from another connection in between can't empty the list).
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'other' AND table_name = 'RW_DDL_A';
+----
+1
+
+query I
+SELECT count(*) FROM other.main.RW_DDL_A;
+----
+2
+
+# --- DROP TABLE: gone from rw.main ----------------------------------------------------
+# Firebird refuses to drop a table that another attachment still has in
+# its metadata cache ("object ... is in use"). firebird_execute closes the
+# idle connections of its own ATTACH first; another ATTACH that read the
+# table must let go of it too (firebird_clear_cache closes its idle ones).
+
+query I
+SELECT * FROM firebird_clear_cache('other');
+----
+true
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DROP TABLE RW_DDL_A');
+
+statement error
+SELECT count(*) FROM rw.main.RW_DDL_A;
+----
+does not exist
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DROP TABLE RW_DDL_B');
+
+statement error
+SELECT * FROM firebird_clear_cache('no_such_alias');
+----
+firebird_clear_cache: no attached catalog named 'no_such_alias'

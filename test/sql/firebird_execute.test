@@ -1,0 +1,429 @@
+# name: test/sql/firebird_execute.test
+# description: firebird_execute(alias, sql) and the READ_WRITE opt-in
+# group: [firebird]
+#
+# Needs scripts/fixture_rw.sql in the database named by FIREBIRD_RW_DB.
+
+require firebird
+
+require-env FIREBIRD_RW_DB
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS ro (TYPE firebird);
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS rw (TYPE firebird, READ_WRITE);
+
+statement ok
+SET firebird_write_lock_timeout = 1;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG');
+
+# --- The opt-in -------------------------------------------------------------
+
+statement error
+SELECT * FROM firebird_execute('ro', 'DELETE FROM RW_LOG');
+----
+Attach it with (TYPE firebird, READ_WRITE)
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS rdo (TYPE firebird, READ_ONLY);
+
+statement error
+SELECT * FROM firebird_execute('rdo', 'DELETE FROM RW_LOG');
+----
+ATTACH 'rdo' is READ_ONLY
+
+# --- Autocommit: one Firebird transaction per statement ---------------------
+
+query II
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (1, ''one'')');
+----
+1	1
+
+# Committed: another DuckDB connection sees it.
+query II con2
+SELECT ID, NOTE FROM firebird_query('ro', 'SELECT ID, NOTE FROM RW_LOG');
+----
+1	one
+
+query II
+SELECT * FROM firebird_execute('rw', 'UPDATE RW_LOG SET NOTE = ''uno'' WHERE ID = 1');
+----
+1	1
+
+# --- BEGIN ... COMMIT: one Firebird transaction -------------------------------
+
+statement ok
+BEGIN;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (2, ''two'')');
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (3, ''three'')');
+
+# Not committed yet: another connection does not see the new rows.
+query I con2
+SELECT count(*) FROM firebird_query('ro', 'SELECT ID FROM RW_LOG');
+----
+1
+
+statement ok
+COMMIT;
+
+query I con2
+SELECT count(*) FROM firebird_query('ro', 'SELECT ID FROM RW_LOG');
+----
+3
+
+# --- ROLLBACK, and an error in the transaction, leave nothing ----------------
+
+statement ok
+BEGIN;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (4, ''four'')');
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (5, ''five'')');
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO NO_SUCH_TABLE VALUES (1)');
+----
+NO_SUCH_TABLE
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT list(ID ORDER BY ID) FROM firebird_query('ro', 'SELECT ID FROM RW_LOG');
+----
+[1, 2, 3]
+
+# A statement that fails half-way leaves none of its own changes.
+statement error
+SELECT * FROM firebird_execute('rw',
+    'EXECUTE BLOCK AS DECLARE X INTEGER; BEGIN
+         INSERT INTO RW_LOG (ID, NOTE) VALUES (6, ''six'');
+         X = 1 / 0;
+     END');
+----
+divide by zero
+
+query I
+SELECT count(*) FROM firebird_query('ro', 'SELECT ID FROM RW_LOG WHERE ID = 6');
+----
+0
+
+# --- EXECUTE BLOCK, EXECUTE PROCEDURE, DDL -----------------------------------
+
+query II
+SELECT * FROM firebird_execute('rw',
+    'EXECUTE BLOCK AS BEGIN
+         INSERT INTO RW_LOG (ID, NOTE) VALUES (7, ''seven'');
+         INSERT INTO RW_LOG (ID, NOTE) VALUES (8, ''eight'');
+     END');
+----
+2	1
+
+query II
+SELECT * FROM firebird_execute('rw', 'EXECUTE PROCEDURE SP_SEQ(3)');
+----
+0	1
+
+# --- Telemetry: one record per call -------------------------------------------
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'UPDATE RW_LOG SET NOTE = NOTE WHERE ID IN (7, 8)');
+
+query IIIIII
+SELECT operation, write_mode, rows_written, rows_affected, remote_sql, error_message FROM firebird_last_query();
+----
+execute	row	1	2	UPDATE RW_LOG SET NOTE = NOTE WHERE ID IN (7, 8)	(empty)
+
+# A statement that returns rows: rows_affected unknown.
+statement ok
+SELECT * FROM firebird_execute('rw', 'SELECT 1 FROM RDB$DATABASE');
+
+query III
+SELECT operation, rows_written, rows_affected FROM firebird_last_query();
+----
+execute	1	NULL
+
+# A failure is recorded with its error.
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO NO_SUCH_TABLE VALUES (1)');
+----
+NO_SUCH_TABLE
+
+query II
+SELECT operation, error_message LIKE '%NO_SUCH_TABLE%' FROM firebird_last_query();
+----
+execute	true
+
+# Reads say what they are.
+statement ok
+SELECT * FROM firebird_query('ro', 'SELECT 1 FROM RDB$DATABASE');
+
+query IIII
+SELECT operation, write_mode, rows_written, rows_affected FROM firebird_last_query();
+----
+query	NULL	NULL	NULL
+
+statement ok
+SELECT count(*) FROM ro.main.RW_LOG;
+
+query II
+SELECT operation, write_mode FROM firebird_last_query();
+----
+scan	NULL
+
+query II
+SELECT * FROM firebird_execute('rw', 'CREATE TABLE RW_DDL (X INTEGER)');
+----
+0	1
+
+query I
+SELECT count(*) FROM firebird_query('ro',
+    'SELECT RDB$RELATION_NAME FROM RDB$RELATIONS WHERE RDB$RELATION_NAME = ''RW_DDL''');
+----
+1
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DROP TABLE RW_DDL');
+
+# --- Statements firebird_execute refuses ----------------------------------------
+
+# A statement that returns rows runs; its rows are read and discarded, and
+# rows_affected is unknown (NULL).
+query II
+SELECT * FROM firebird_execute('rw', 'SELECT 1 FROM RDB$DATABASE');
+----
+NULL	1
+
+# ... so a selectable procedure's side effects happen, and are committed
+# with the DuckDB transaction.
+query II
+SELECT * FROM firebird_execute('rw', 'SELECT * FROM SP_WRITE');
+----
+NULL	1
+
+query II con2
+SELECT ID, NOTE FROM firebird_query('ro', 'SELECT ID, NOTE FROM RW_LOG WHERE NOTE = ''written''');
+----
+1	written
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG WHERE NOTE = ''written''');
+
+# Parameters (?) have no values to take.
+statement error
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG WHERE ID = ?');
+----
+firebird_execute takes no parameter values
+
+statement error
+SELECT * FROM firebird_execute('rw', 'COMMIT');
+----
+transactions follow the DuckDB transaction
+
+# Session statements: the write connection goes back to the ATTACH's pool, so
+# their change would outlive the DuckDB transaction. Refused at bind, on every
+# server version (matched on the first words, after spaces and comments).
+statement error
+SELECT * FROM firebird_execute('rw', 'SET ROLE RDB$ADMIN');
+----
+SET ROLE is refused
+
+statement error
+SELECT * FROM firebird_execute('rw', '  /* a comment */ set time zone ''+03:00''');
+----
+SET TIME ZONE is refused
+
+statement error
+SELECT * FROM firebird_execute('rw', 'SET SESSION IDLE TIMEOUT 1');
+----
+SET SESSION is refused
+
+statement error
+SELECT * FROM firebird_execute('rw', '-- comment
+SET BIND OF DECFLOAT TO DOUBLE PRECISION');
+----
+SET BIND is refused
+
+statement error
+SELECT * FROM firebird_execute('rw', 'SET TRUSTED ROLE');
+----
+SET TRUSTED ROLE is refused
+
+statement error
+SELECT * FROM firebird_execute('rw', 'ALTER SESSION RESET');
+----
+ALTER SESSION is refused
+
+# --- A literal password reaches neither the query log nor an error --------------
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'CREATE USER FBX_T32 PASSWORD ''s3cret-32a''');
+
+query II
+SELECT remote_sql LIKE '%s3cret%', remote_sql LIKE '%PASSWORD ''***''%' FROM firebird_last_query();
+----
+false	true
+
+# The user exists now: creating it again fails (at commit: Firebird runs DDL
+# there), and the error doesn't show the literal.
+statement error
+SELECT * FROM firebird_execute('rw', 'CREATE USER FBX_T32 PASSWORD ''s3cret-32b''');
+----
+<!REGEX>:(?s).*s3cret.*
+
+query I
+SELECT error_message LIKE '%s3cret%' FROM firebird_last_query();
+----
+false
+
+# An error that quotes the statement (EXECUTE STATEMENT ... ON EXTERNAL to a
+# database that doesn't exist fails when it runs) shows the literal as '***'.
+statement error
+SELECT * FROM firebird_execute('rw', 'EXECUTE BLOCK AS DECLARE X INTEGER; BEGIN EXECUTE STATEMENT ''SELECT 1 FROM RDB$DATABASE'' ON EXTERNAL ''localhost:/no/such/fbx_t32.fdb'' AS USER ''SYSDBA'' PASSWORD ''s3cret-32c'' INTO :X; END');
+----
+<!REGEX>:(?s).*s3cret.*
+
+query II
+SELECT error_message LIKE '%s3cret%', error_message LIKE '%PASSWORD ''***''%' FROM firebird_last_query();
+----
+false	true
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DROP USER FBX_T32');
+
+# A password inside a nested statement (EXECUTE STATEMENT of a CREATE USER):
+# the statement mentions PASSWORD, so every literal of it is hidden.
+statement ok
+SELECT * FROM firebird_execute('rw', 'EXECUTE BLOCK AS BEGIN EXECUTE STATEMENT ''CREATE USER FBX_N32 PASSWORD ''''s3cret-32n''''''; END');
+
+query II
+SELECT remote_sql LIKE '%s3cret%', remote_sql LIKE '%EXECUTE STATEMENT ''***''%' FROM firebird_last_query();
+----
+false	true
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DROP USER FBX_N32');
+
+# --- A lock held by another writer: a clear error, no hang ---------------------
+
+statement ok con1
+BEGIN;
+
+statement ok con1
+SELECT * FROM firebird_execute('rw', 'UPDATE RW_LOG SET NOTE = ''locked'' WHERE ID = 1');
+
+statement error con2
+SELECT * FROM firebird_execute('rw', 'UPDATE RW_LOG SET NOTE = ''other'' WHERE ID = 1');
+----
+update conflicts with concurrent update
+
+statement ok con1
+ROLLBACK;
+
+# --- The read pool stays read-only ---------------------------------------------
+
+statement error
+SELECT * FROM firebird_query('rw', 'SELECT * FROM SP_WRITE');
+----
+read-only transaction
+
+query I
+SELECT count(*) FROM rw.main.RW_LOG;
+----
+5
+
+# --- Two calls in one statement: one after the other ----------------------------
+# They can run in parallel pipelines and share the DuckDB transaction's write
+# connection, so each waits for the other (no second connection: it would not
+# see the first call's rows nor share its locks). The race itself can't be
+# forced here; this runs the path. Between BEGIN and COMMIT, because on DuckDB
+# 2.0 an autocommit call must be the whole statement
+# (firebird_execute_atomic.test).
+
+statement ok
+BEGIN;
+
+query II
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (60, ''union a'')')
+UNION ALL
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (61, ''union b'')');
+----
+1	1
+1	1
+
+statement ok
+COMMIT;
+
+query I
+SELECT count(*) FROM firebird_query('ro', 'SELECT ID FROM RW_LOG WHERE ID IN (60, 61)');
+----
+2
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG WHERE ID IN (60, 61)');
+
+# --- Pool disabled: a write connection is closed as soon as it is released ------
+# (On DuckDB 2.0 an autocommit call commits before returning its row, and the
+# statement must be freed before that commit releases its connection.)
+
+statement ok
+SET firebird_pool_enabled = false;
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS rw_nopool (TYPE firebird, READ_WRITE);
+
+query II
+SELECT * FROM firebird_execute('rw_nopool', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (90, ''no pool'')');
+----
+1	1
+
+query II
+SELECT * FROM firebird_execute('rw_nopool', 'UPDATE RW_LOG SET NOTE = ''no pool 2'' WHERE ID = 90');
+----
+1	1
+
+query T
+SELECT NOTE FROM firebird_query('ro', 'SELECT NOTE FROM RW_LOG WHERE ID = 90');
+----
+no pool 2
+
+statement ok
+DETACH rw_nopool;
+
+statement ok
+SET firebird_pool_enabled = true;
+
+# --- firebird_pool_stats(): the write pool too -----------------------------------
+
+# A READ_WRITE ATTACH has a second row for its write pool; the writes above
+# created its connections, and none is leased outside a statement. An
+# ATTACH without READ_WRITE lists only its read pool.
+query TII
+SELECT pool, (total_created > 0)::INTEGER, active_connections
+FROM firebird_pool_stats('rw') ORDER BY pool;
+----
+read	1	0
+write	1	0
+
+query T
+SELECT string_agg(pool, ',') FROM firebird_pool_stats('ro');
+----
+read
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG');

@@ -242,18 +242,16 @@ public:
     void Scan(ClientContext & /*ctx*/, CatalogType type,
               const std::function<void(CatalogEntry &)> &callback) override {
         if (type != CatalogType::TABLE_ENTRY) return;
-        EnsureTablesLoaded();
-        for (auto &kv : tables_) {
-            callback(*kv.second);
+        for (auto *entry : TableSnapshot()) {
+            callback(*entry);
         }
     }
 
     void Scan(CatalogType type,
               const std::function<void(CatalogEntry &)> &callback) override {
         if (type != CatalogType::TABLE_ENTRY) return;
-        EnsureTablesLoaded();
-        for (auto &kv : tables_) {
-            callback(*kv.second);
+        for (auto *entry : TableSnapshot()) {
+            callback(*entry);
         }
     }
 
@@ -263,11 +261,40 @@ public:
         if (lookup_info.GetCatalogType() != CatalogType::TABLE_ENTRY) {
             return nullptr;
         }
-        EnsureTablesLoaded();
         auto key = ToUpper(lookup_info.GetEntryName());
+        // Load and look up under one hold of the lock: a ClearCache from
+        // another connection (a committed DDL, firebird_clear_cache) in
+        // between would empty the map and miss a table that exists.
+        std::lock_guard<std::mutex> g(load_lock_);
+        EnsureTablesLoadedLocked();
         auto it = tables_.find(key);
         if (it == tables_.end()) return nullptr;
         return it->second.get();
+    }
+
+    // Forget the cached tables: the next lookup loads them again. The old
+    // entries stay alive (retired_) because a running query may still hold
+    // them.
+    void ClearCache() {
+        std::lock_guard<std::mutex> g(load_lock_);
+        for (auto &kv : tables_) {
+            retired_.push_back(std::move(kv.second));
+        }
+        tables_.clear();
+        loaded_ = false;
+    }
+
+    // The loaded tables, copied under the lock (entries are never freed
+    // while the catalog lives).
+    std::vector<FirebirdTableEntry *> TableSnapshot() {
+        std::lock_guard<std::mutex> g(load_lock_);
+        EnsureTablesLoadedLocked();
+        std::vector<FirebirdTableEntry *> out;
+        out.reserve(tables_.size());
+        for (auto &kv : tables_) {
+            out.push_back(kv.second.get());
+        }
+        return out;
     }
 
     // -- mutating ops — all throw, this is a read-only catalog ---------------
@@ -384,8 +411,8 @@ private:
         return out;
     }
 
-    void EnsureTablesLoaded() {
-        std::lock_guard<std::mutex> g(load_lock_);
+    // The caller holds load_lock_.
+    void EnsureTablesLoadedLocked() {
         if (loaded_) return;
 
         // One connection covers all the schema-discovery queries; return
@@ -694,6 +721,7 @@ private:
     std::mutex load_lock_;
     bool loaded_ = false;
     std::unordered_map<std::string, std::unique_ptr<FirebirdTableEntry>> tables_;
+    std::vector<std::unique_ptr<FirebirdTableEntry>> retired_;
 };
 
 // ---------------------------------------------------------------------------
@@ -705,8 +733,8 @@ private:
 // visible here (MSVC was lenient and accepted a friend-only declaration,
 // which masked this until the Linux/community build).
 struct FirebirdPoolStatsRow;
-FirebirdPoolStatsRow ReadFirebirdPoolStats(ClientContext &context,
-                                           const string &catalog_name);
+std::vector<FirebirdPoolStatsRow> ReadFirebirdPoolStats(ClientContext &context,
+                                                        const string &catalog_name);
 
 class FirebirdCatalog final : public Catalog {
 public:
@@ -717,6 +745,7 @@ public:
         : Catalog(db),
           conn_info_(std::move(conn_info)),
           pool_(std::make_shared<FirebirdConnectionPool>(conn_info_, pool_config)),
+          write_pool_(std::make_shared<FirebirdConnectionPool>(conn_info_, pool_config)),
           none_encoding_(none_encoding),
           none_pushdown_(none_pushdown),
           numeric_widen_int64_(numeric_widen_int64) {}
@@ -733,7 +762,7 @@ public:
     // without leasing a connection. Implementation just below the class.
     // (FirebirdPoolStatsRow / ReadFirebirdPoolStats are forward-declared at
     // namespace scope above so this friend names them portably under GCC.)
-    friend FirebirdPoolStatsRow ReadFirebirdPoolStats(
+    friend std::vector<FirebirdPoolStatsRow> ReadFirebirdPoolStats(
         ClientContext &context, const string &catalog_name);
 
     string GetCatalogType() override { return "firebird"; }
@@ -748,6 +777,12 @@ public:
         std::make_shared<std::atomic<bool>>(false);
 
     const std::shared_ptr<FirebirdConnectionPool> &Pool() const { return pool_; }
+    // Connections for writes (ATTACH ... READ_WRITE). Kept apart from the
+    // read pool, so a scan never gets a connection that held a write
+    // transaction.
+    const std::shared_ptr<FirebirdConnectionPool> &WritePool() const { return write_pool_; }
+    // ATTACH ... (TYPE firebird, READ_WRITE): writes are allowed.
+    bool write_enabled = false;
     NoneEncoding NoneEncodingOption() const { return none_encoding_; }
     bool NumericWidenInt64() const { return numeric_widen_int64_; }
 
@@ -773,6 +808,13 @@ public:
     }
 
     bool InMemory() override { return false; }
+
+    // Reload the table list (and every table's columns) on next use.
+    void ClearCache() {
+        if (main_schema_) {
+            main_schema_->ClearCache();
+        }
+    }
 
     string GetDBPath() override {
         return RedactConnectionSecrets(conn_info_.database, conn_info_.password);
@@ -852,6 +894,7 @@ public:
 private:
     FirebirdConnectionInfo conn_info_;
     std::shared_ptr<FirebirdConnectionPool> pool_;
+    std::shared_ptr<FirebirdConnectionPool> write_pool_;
     NoneEncoding none_encoding_;
     bool none_pushdown_;
     bool numeric_widen_int64_;
@@ -898,8 +941,14 @@ class FirebirdTransaction final : public Transaction, public FirebirdTransaction
 public:
     FirebirdTransaction(TransactionManager &manager, ClientContext &context,
                         FirebirdCatalog &catalog)
-        : Transaction(manager, context), pool_(catalog.Pool()), catalog_name_(catalog.GetName()),
-          no_snapshot_numbers_(catalog.no_snapshot_numbers) {}
+        : Transaction(manager, context), pool_(catalog.Pool()), write_pool_(catalog.WritePool()),
+          catalog_(&catalog), catalog_name_(catalog.GetName()),
+          no_snapshot_numbers_(catalog.no_snapshot_numbers) {
+        Value v;
+        if (context.TryGetCurrentSetting("firebird_pool_session_reset", v) && !v.IsNull()) {
+            reset_session_ = BooleanValue::Get(v);
+        }
+    }
 
     ~FirebirdTransaction() override {
         if (state_) {
@@ -908,7 +957,80 @@ public:
         if (conn_) {
             GiveBack(std::move(conn_));
         }
+        if (write_conn_) {
+            // Not committed by the transaction manager: undo.
+            try {
+                EndWrite(false);
+            } catch (...) {
+            }
+        }
     }
+
+    // The connection holding this DuckDB transaction's Firebird write
+    // transaction, started on first use (from the ATTACH's write pool).
+    FirebirdConnection &WriteConnection(int64_t lock_timeout_s) {
+        std::lock_guard<std::mutex> g(write_lock_);
+        if (!write_conn_) {
+            auto conn = write_pool_->Acquire();
+            try {
+                conn->StartWriteTransaction(lock_timeout_s);
+            } catch (...) {
+                write_pool_->Discard(std::move(conn));
+                throw;
+            }
+            // Any write can change the session (a trigger, a procedure).
+            if (reset_session_) {
+                conn->MarkSessionChanged();
+            }
+            write_conn_ = std::move(conn);
+        }
+        return *write_conn_;
+    }
+
+    // Commits (or rolls back) the write transaction, if one was started,
+    // and returns its connection to the write pool. A connection that
+    // fails either is discarded; a failed commit throws.
+    void EndWrite(bool commit) {
+        std::unique_ptr<FirebirdConnection> conn;
+        {
+            std::lock_guard<std::mutex> g(write_lock_);
+            conn = std::move(write_conn_);
+        }
+        if (!conn) {
+            return;
+        }
+        try {
+            if (commit) {
+                conn->CommitWrite();
+            } else {
+                conn->RollbackWrite();
+            }
+        } catch (...) {
+            write_pool_->Discard(std::move(conn));
+            throw;
+        }
+        write_pool_->Release(std::move(conn));
+        // Committed DDL: the next lookup reloads the table list, so a table
+        // created or altered through firebird_execute shows up under
+        // fb.main without re-attaching. (Before the commit the read
+        // connections couldn't see it yet.)
+        if (commit && ddl_executed_ && catalog_) {
+            catalog_->ClearCache();
+        }
+        ddl_executed_ = false;
+    }
+
+    // firebird_execute ran a DDL statement in this transaction.
+    void NoteDdl() {
+        ddl_executed_ = true;
+    }
+
+    // Held by each write while it uses the write connection (see
+    // LockFirebirdWrites).
+    std::mutex &WriteUseLock() {
+        return write_use_lock_;
+    }
+
 
     // Transaction snapshot (opt-in, see GetFirebirdTransactionSnapshot).
     // The coordinating connection comes from the ATTACH's pool and holds a
@@ -1118,6 +1240,13 @@ private:
     }
 
     std::shared_ptr<FirebirdConnectionPool> pool_;
+    std::shared_ptr<FirebirdConnectionPool> write_pool_;
+    FirebirdCatalog *catalog_ = nullptr;
+    bool ddl_executed_ = false;  // a DDL statement ran in the write transaction
+    bool reset_session_ = true;  // SET firebird_pool_session_reset, when the transaction started
+    std::mutex write_lock_;
+    std::mutex write_use_lock_;
+    std::unique_ptr<FirebirdConnection> write_conn_;
     std::string catalog_name_;
     std::shared_ptr<std::atomic<bool>> no_snapshot_numbers_;
     shared_ptr<FirebirdTransactionSnapshotState> state_;
@@ -1154,11 +1283,22 @@ public:
     }
 
     ErrorData CommitTransaction(ClientContext &, Transaction &transaction) override {
+        ErrorData error;
+        try {
+            transaction.Cast<FirebirdTransaction>().EndWrite(true);
+        } catch (std::exception &ex) {
+            error = ErrorData(ex);
+        }
         End(transaction);
-        return ErrorData();
+        return error;
     }
 
     void RollbackTransaction(Transaction &transaction) override {
+        try {
+            transaction.Cast<FirebirdTransaction>().EndWrite(false);
+        } catch (...) {
+            // The connection was discarded; nothing else to undo.
+        }
         End(transaction);
     }
 
@@ -1317,7 +1457,7 @@ FirebirdAttach(optional_ptr<StorageExtensionInfo> /*info*/,
                AttachedDatabase &db,
                const string & /*name*/,
                AttachInfo &attach_info,
-               AttachOptions & /*options*/) {
+               AttachOptions &options) {
     NoneEncoding none_encoding;
     bool none_pushdown = false;
     bool numeric_widen_int64 = false;
@@ -1358,6 +1498,10 @@ FirebirdAttach(optional_ptr<StorageExtensionInfo> /*info*/,
             catalog->transaction_snapshot_option = b.GetValue<bool>() ? 1 : 0;
         }
     }
+    // ATTACH ... (TYPE firebird, READ_WRITE): an explicit opt-in. The
+    // default (automatic) access mode keeps the ATTACH read-only for
+    // Firebird writes.
+    catalog->write_enabled = options.access_mode == AccessMode::READ_WRITE;
     return std::move(catalog);
 }
 
@@ -1403,7 +1547,40 @@ FirebirdAttachHandle GetFirebirdAttachHandle(ClientContext &context, const strin
     handle.catalog = &fb_catalog;
     handle.none_encoding = fb_catalog.NoneEncodingOption();
     handle.numeric_widen_int64 = fb_catalog.NumericWidenInt64();
+    handle.write_enabled = fb_catalog.write_enabled;
+    handle.read_only = fb_catalog.GetAttached().IsReadOnly();
     return handle;
+}
+
+FirebirdConnection &GetFirebirdWriteConnection(ClientContext &context, Catalog &catalog,
+                                               int64_t lock_timeout_s) {
+    auto &tx = Transaction::Get(context, catalog).Cast<FirebirdTransaction>();
+    return tx.WriteConnection(lock_timeout_s);
+}
+
+std::unique_lock<std::mutex> LockFirebirdWrites(ClientContext &context, Catalog &catalog) {
+    auto &tx = Transaction::Get(context, catalog).Cast<FirebirdTransaction>();
+    return std::unique_lock<std::mutex>(tx.WriteUseLock());
+}
+
+void CommitFirebirdWriteNow(ClientContext &context, Catalog &catalog) {
+    Transaction::Get(context, catalog).Cast<FirebirdTransaction>().EndWrite(true);
+}
+
+void NoteFirebirdDdl(ClientContext &context, Catalog &catalog) {
+    Transaction::Get(context, catalog).Cast<FirebirdTransaction>().NoteDdl();
+}
+
+void ClearFirebirdCatalogCache(Catalog &catalog) {
+    auto &fb = catalog.Cast<FirebirdCatalog>();
+    fb.ClearCache();
+    ReleaseFirebirdIdleConnections(catalog);
+}
+
+void ReleaseFirebirdIdleConnections(Catalog &catalog) {
+    auto &fb = catalog.Cast<FirebirdCatalog>();
+    fb.Pool()->DiscardIdle();
+    fb.WritePool()->DiscardIdle();
 }
 
 // ---------------------------------------------------------------------------
@@ -1435,10 +1612,16 @@ struct FirebirdPoolStatsRow {
     // lifetime counters: process-relative, never reset. Direct
     // firebird_scan() calls are NOT included — they have no catalog.
     int64_t     bytes_read_estimate = 0;
+    // "read": the pool that serves scans and firebird_query. "write": the
+    // pool of the DuckDB transactions' write connections, listed only for
+    // an ATTACH opened with READ_WRITE.
+    std::string pool;
 };
 
-FirebirdPoolStatsRow ReadFirebirdPoolStats(ClientContext &context,
-                                           const string &catalog_name) {
+// One row per pool: the read pool, then the write pool of a READ_WRITE
+// ATTACH.
+std::vector<FirebirdPoolStatsRow> ReadFirebirdPoolStats(ClientContext &context,
+                                                        const string &catalog_name) {
     ValidateFirebirdAttachAlias(context, catalog_name, "firebird_pool_stats");
 #ifdef FIREBIRD_DUCKDB_V2
     // v2.0: GetCatalogEntry keys by Identifier.
@@ -1448,22 +1631,29 @@ FirebirdPoolStatsRow ReadFirebirdPoolStats(ClientContext &context,
 #endif
     // Validated above: non-null and GetCatalogType() == "firebird".
     auto &fb_catalog = catalog_ptr->Cast<FirebirdCatalog>();
-    auto &pool = *fb_catalog.pool_;
-    const auto &cfg = pool.Config();
-
-    FirebirdPoolStatsRow row;
-    row.catalog_name       = catalog_name;
-    row.pool_enabled       = cfg.enabled;
-    row.max_idle_size      = cfg.max_size;
-    row.idle_timeout_ms    = cfg.idle_timeout_ms;
-    row.idle_connections   = static_cast<int64_t>(pool.IdleCount());
-    row.total_created      = pool.TotalCreated();
-    row.total_reused       = pool.TotalReused();
-    row.total_discarded    = pool.TotalDiscarded();
-    row.active_connections = pool.ActiveCount();
-    row.last_error         = pool.LastError();
-    row.bytes_read_estimate = pool.BytesReadEstimate();
-    return row;
+    std::vector<FirebirdPoolStatsRow> rows;
+    auto read = [&](FirebirdConnectionPool &pool, const char *kind) {
+        const auto &cfg = pool.Config();
+        FirebirdPoolStatsRow row;
+        row.catalog_name       = catalog_name;
+        row.pool_enabled       = cfg.enabled;
+        row.max_idle_size      = cfg.max_size;
+        row.idle_timeout_ms    = cfg.idle_timeout_ms;
+        row.idle_connections   = static_cast<int64_t>(pool.IdleCount());
+        row.total_created      = pool.TotalCreated();
+        row.total_reused       = pool.TotalReused();
+        row.total_discarded    = pool.TotalDiscarded();
+        row.active_connections = pool.ActiveCount();
+        row.last_error         = pool.LastError();
+        row.bytes_read_estimate = pool.BytesReadEstimate();
+        row.pool               = kind;
+        rows.push_back(std::move(row));
+    };
+    read(*fb_catalog.pool_, "read");
+    if (fb_catalog.write_enabled) {
+        read(*fb_catalog.write_pool_, "write");
+    }
+    return rows;
 }
 
 namespace {
@@ -1508,6 +1698,7 @@ unique_ptr<FunctionData> PoolStatsBind(ClientContext &context,
         "active_connections",
         "last_error",
         "bytes_read_estimate",
+        "pool",
     };
     return_types = {
         LogicalType::VARCHAR,
@@ -1521,6 +1712,7 @@ unique_ptr<FunctionData> PoolStatsBind(ClientContext &context,
         LogicalType::BIGINT,
         LogicalType::VARCHAR,
         LogicalType::BIGINT,
+        LogicalType::VARCHAR,
     };
     return std::move(bind);
 }
@@ -1538,22 +1730,27 @@ void PoolStatsFunction(ClientContext &context, TableFunctionInput &input,
         return;
     }
     auto &bind = input.bind_data->Cast<PoolStatsBindData>();
-    FirebirdPoolStatsRow r = ReadFirebirdPoolStats(context, bind.catalog_name);
+    const auto rows = ReadFirebirdPoolStats(context, bind.catalog_name);
 
-    output.SetCardinality(1);
-    output.data[0].SetValue(0, Value(r.catalog_name));
-    output.data[1].SetValue(0, Value::BOOLEAN(r.pool_enabled));
-    output.data[2].SetValue(0, Value::BIGINT(r.max_idle_size));
-    output.data[3].SetValue(0, Value::BIGINT(r.idle_timeout_ms));
-    output.data[4].SetValue(0, Value::BIGINT(r.idle_connections));
-    output.data[5].SetValue(0, Value::BIGINT(r.total_created));
-    output.data[6].SetValue(0, Value::BIGINT(r.total_reused));
-    output.data[7].SetValue(0, Value::BIGINT(r.total_discarded));
-    output.data[8].SetValue(0, Value::BIGINT(r.active_connections));
-    output.data[9].SetValue(0, r.last_error.empty()
-                                  ? Value(LogicalType::VARCHAR)
-                                  : Value(r.last_error));
-    output.data[10].SetValue(0, Value::BIGINT(r.bytes_read_estimate));
+    idx_t i = 0;
+    for (const auto &r : rows) {
+        output.data[0].SetValue(i, Value(r.catalog_name));
+        output.data[1].SetValue(i, Value::BOOLEAN(r.pool_enabled));
+        output.data[2].SetValue(i, Value::BIGINT(r.max_idle_size));
+        output.data[3].SetValue(i, Value::BIGINT(r.idle_timeout_ms));
+        output.data[4].SetValue(i, Value::BIGINT(r.idle_connections));
+        output.data[5].SetValue(i, Value::BIGINT(r.total_created));
+        output.data[6].SetValue(i, Value::BIGINT(r.total_reused));
+        output.data[7].SetValue(i, Value::BIGINT(r.total_discarded));
+        output.data[8].SetValue(i, Value::BIGINT(r.active_connections));
+        output.data[9].SetValue(i, r.last_error.empty()
+                                       ? Value(LogicalType::VARCHAR)
+                                       : Value(r.last_error));
+        output.data[10].SetValue(i, Value::BIGINT(r.bytes_read_estimate));
+        output.data[11].SetValue(i, Value(r.pool));
+        ++i;
+    }
+    output.SetCardinality(i);
     g.emitted = true;
 }
 
