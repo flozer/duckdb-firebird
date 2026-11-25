@@ -828,8 +828,9 @@ Retorna uma linha:
   extensao mostram todos os literais dele como `'***'`. Os logs do proprio
   DuckDB e o cliente ainda veem a chamada como digitada.
 - **Duas chamadas num comando** (por exemplo com `UNION ALL`) rodam uma
-  depois da outra na conexao de escrita da transacao DuckDB. No DuckDB 2.0
-  em autocommit, cada uma confirma a propria escrita (veja abaixo).
+  depois da outra na conexao de escrita da transacao DuckDB. No DuckDB 2.0,
+  em autocommit, essa forma e recusada: rode-a entre `BEGIN` e `COMMIT`
+  (veja abaixo).
 - **Estado de sessao** que uma procedure, um trigger ou um `EXECUTE BLOCK`
   define (uma variavel de contexto de `RDB$SET_CONTEXT('USER_SESSION',
   ...)`, um role, um fuso horario, linhas de uma tabela temporaria `ON
@@ -849,14 +850,21 @@ Retorna uma linha:
   tabelas que usou, e o Firebird recusa alterar ou excluir essas tabelas
   enquanto ela existir ("object ... is in use"). Para DDL feito fora deste
   ATTACH, veja `firebird_clear_cache`.
-- **A escrita fica mesmo se o cliente para de ler.** Um cliente que le a
-  linha com `fetchone()` e fecha a conexao mantem a escrita. No DuckDB 1.5
-  o resultado do comando e materializado, como o DuckDB faz para
-  `INSERT`. No DuckDB 2.0, em autocommit, a chamada confirma sua escrita
-  Firebird antes de retornar a linha; assim, se um comando DuckDB fizer
-  duas chamadas a `firebird_execute` e a segunda falhar, a primeira fica
-  confirmada. Dentro de `BEGIN ... COMMIT` as duas linhas se comportam
-  igual.
+- **A escrita fica mesmo se o cliente para de ler, e um comando e tudo ou
+  nada.** Um cliente que le a linha com `fetchone()` e fecha a conexao
+  mantem a escrita. No DuckDB 1.5 o resultado do comando e materializado,
+  como o DuckDB faz para `INSERT`, e a escrita e confirmada junto com o
+  comando. No DuckDB 2.0, em autocommit, a chamada confirma sua escrita
+  Firebird antes de retornar a linha, entao ela precisa ser o comando
+  inteiro: `SELECT * FROM firebird_execute(...)`, ou uma escolha das suas
+  colunas. Qualquer outra forma (uma expressao ou um filtro sobre a linha,
+  uma agregacao, `LIMIT`, um join, `UNION ALL`, `INSERT ... SELECT`) e
+  recusada antes de escrever, porque o resto do comando poderia falhar
+  depois desse commit. Entre `BEGIN` e `COMMIT` toda forma roda, nas duas
+  linhas, e a escrita e confirmada ou desfeita com a transacao. A
+  verificacao le o plano otimizado do DuckDB; com o otimizador desligado
+  (`PRAGMA disable_optimizer`), o DuckDB 2.0 recusa toda chamada em
+  autocommit.
 - **Telemetria.** Cada chamada deixa um registro em
   `firebird_last_query()` / `firebird_query_log()`: o comando em
   `remote_sql`, `operation = 'execute'`, `write_mode = 'row'`,

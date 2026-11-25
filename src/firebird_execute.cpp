@@ -22,6 +22,12 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
+#ifdef FIREBIRD_DUCKDB_V2
+#include "duckdb/main/config.hpp"
+#include "duckdb/optimizer/optimizer_extension.hpp"
+#include "duckdb/planner/expression.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
+#endif
 
 #include "firebird_client.hpp"
 #include "firebird_observability.hpp"
@@ -42,6 +48,9 @@ struct FirebirdExecuteBindData : public TableFunctionData {
     std::vector<std::string> secrets;
     FirebirdAttachHandle attach;
     int64_t lock_timeout_s = 10;
+    // DuckDB 2.0: the call is the whole statement (the plan is the call, or
+    // a choice of its columns). Set by the optimizer hook, MarkWholeStatement.
+    bool whole_statement = false;
 };
 
 struct FirebirdExecuteGlobalState : public GlobalTableFunctionState {
@@ -339,6 +348,20 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
     }
     state.done = true;
 
+#ifdef FIREBIRD_DUCKDB_V2
+    // In autocommit the call commits its write before returning its row
+    // (see below), so nothing after it in the same statement could roll it
+    // back. Only a call that is the whole statement can do that and stay
+    // all or nothing; anything else is refused before it writes.
+    if (context.transaction.IsAutoCommit() && !bind.whole_statement) {
+        throw InvalidInputException(
+            "%s: on DuckDB 2.0, in autocommit, firebird_execute must be the whole statement "
+            "(SELECT * FROM firebird_execute(...)): it commits as soon as it runs, so the rest of the "
+            "statement could not roll it back. Run it between BEGIN and COMMIT to combine it with other work.",
+            kFunctionName);
+    }
+#endif
+
     // A DuckDB transaction writes to one attached database at most; this
     // also makes a READ ONLY DuckDB transaction refuse the write.
     auto &db = bind.attach.catalog->GetAttached();
@@ -395,10 +418,11 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
         // DuckDB 2.0 runs this statement's result lazily and rolls the
         // statement back when its client closes before reading it all
         // (fetchone(), then close): the write would be lost without an
-        // error. In autocommit the statement is the transaction, so commit
-        // the Firebird write here, before the row is returned. Inside
-        // BEGIN ... COMMIT nothing changes. (1.5 materializes the result
-        // instead; see the bind.)
+        // error. In autocommit this call is the whole statement (checked
+        // above), so nothing after it can fail or write: commit the Firebird
+        // write here, before the row is returned. Inside BEGIN ... COMMIT
+        // nothing changes. (1.5 materializes the result instead; see the
+        // bind.)
         if (context.transaction.IsAutoCommit()) {
             CommitFirebirdWriteNow(context, *bind.attach.catalog);
         }
@@ -499,5 +523,49 @@ TableFunction GetFirebirdExecuteFunction() {
     fn.projection_pushdown = false;
     return fn;
 }
+
+#ifdef FIREBIRD_DUCKDB_V2
+// Marks the firebird_execute call that is the whole statement: the
+// optimized plan is the call itself, or projections that only choose its
+// columns. Anything else (an expression, a filter, a join, UNION ALL, an
+// INSERT ... SELECT) runs after the call or beside it, and could fail or
+// write after the call's autocommit commit. Runs after DuckDB's optimizers;
+// a plan the optimizer never sees (optimizer disabled) marks nothing, so its
+// autocommit call is refused.
+static void MarkWholeStatement(OptimizerExtensionInput &, unique_ptr<LogicalOperator> &plan) {
+    LogicalOperator *op = plan.get();
+    // PREPARE ... AS <statement>, and an EXECUTE that binds the prepared
+    // statement again: the statement's plan is the child.
+    while (op &&
+           (op->type == LogicalOperatorType::LOGICAL_PREPARE || op->type == LogicalOperatorType::LOGICAL_EXECUTE) &&
+           op->children.size() == 1) {
+        op = op->children[0].get();
+    }
+    while (op && op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+        for (auto &expr : op->expressions) {
+            if (expr->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+                return;
+            }
+        }
+        if (op->children.size() != 1) {
+            return;
+        }
+        op = op->children[0].get();
+    }
+    if (!op || op->type != LogicalOperatorType::LOGICAL_GET) {
+        return;
+    }
+    auto &get = op->Cast<LogicalGet>();
+    if (get.function.GetName() == kFunctionName && get.bind_data) {
+        get.bind_data->Cast<FirebirdExecuteBindData>().whole_statement = true;
+    }
+}
+
+void RegisterFirebirdExecuteOptimizer(DBConfig &config) {
+    OptimizerExtension extension;
+    extension.optimize_function = MarkWholeStatement;
+    OptimizerExtension::Register(config, std::move(extension));
+}
+#endif
 
 } // namespace duckdb

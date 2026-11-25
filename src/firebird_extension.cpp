@@ -217,6 +217,9 @@ static void LoadInternal(ExtensionLoader &loader) {
     auto storage_ext = GetFirebirdStorageExtension();
     StorageExtension::Register(config, "firebird",
                                shared_ptr<StorageExtension>(storage_ext.release()));
+#ifdef FIREBIRD_DUCKDB_V2
+    RegisterFirebirdExecuteOptimizer(config);
+#endif
 
     // Chunk E - firebird_query_log() ring buffer is opt-in. The default
     // (0) disables capture; users opt in per session via:

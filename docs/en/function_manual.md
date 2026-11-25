@@ -573,7 +573,8 @@ Returns one row:
   still see the call as typed.
 - **Two calls in one statement** (for example under `UNION ALL`) run one
   after the other on the DuckDB transaction's write connection. On DuckDB
-  2.0 in autocommit each one commits its own write (see below).
+  2.0, in autocommit, this form is refused: run it between `BEGIN` and
+  `COMMIT` (see below).
 - **Session state** that a procedure, a trigger or an `EXECUTE BLOCK` sets
   (a context variable from `RDB$SET_CONTEXT('USER_SESSION', ...)`, a role,
   a time zone, rows of an `ON COMMIT PRESERVE ROWS` temporary table) doesn't
@@ -592,13 +593,20 @@ Returns one row:
   in its metadata cache, and Firebird refuses to drop or alter them while
   it lives ("object ... is in use"). For DDL made outside this ATTACH, see
   `firebird_clear_cache`.
-- **The write is kept when the client stops reading.** A client that reads
-  the one row with `fetchone()` and closes still keeps the write. On
-  DuckDB 1.5 the statement's result is materialized, as DuckDB does for
-  `INSERT`. On DuckDB 2.0, in autocommit, the call commits its Firebird
-  write before it returns the row; so if one DuckDB statement runs two
-  `firebird_execute` calls and the second fails, the first stays
-  committed. Inside `BEGIN ... COMMIT` both lines behave the same.
+- **The write is kept when the client stops reading, and a statement is
+  all or nothing.** A client that reads the one row with `fetchone()` and
+  closes still keeps the write. On DuckDB 1.5 the statement's result is
+  materialized, as DuckDB does for `INSERT`, and the write commits with the
+  statement. On DuckDB 2.0, in autocommit, the call commits its Firebird
+  write before it returns the row, so it must be the whole statement:
+  `SELECT * FROM firebird_execute(...)`, or a choice of its columns. Any
+  other form (an expression or a filter on its row, an aggregate, `LIMIT`,
+  a join, `UNION ALL`, `INSERT ... SELECT`) is refused before it writes,
+  because the rest of the statement could fail after that commit. Between
+  `BEGIN` and `COMMIT` every form runs, on both lines, and the write
+  commits or rolls back with the transaction. The check reads DuckDB's
+  optimized plan, so with the optimizer disabled (`PRAGMA
+  disable_optimizer`) DuckDB 2.0 refuses every autocommit call.
 - **Telemetry.** Each call leaves one `firebird_last_query()` /
   `firebird_query_log()` record: the statement in `remote_sql`,
   `operation = 'execute'`, `write_mode = 'row'`, `rows_written` (1) and

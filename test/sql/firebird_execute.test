@@ -351,7 +351,12 @@ SELECT count(*) FROM rw.main.RW_LOG;
 # They can run in parallel pipelines and share the DuckDB transaction's write
 # connection, so each waits for the other (no second connection: it would not
 # see the first call's rows nor share its locks). The race itself can't be
-# forced here; this runs the path.
+# forced here; this runs the path. Between BEGIN and COMMIT, because on DuckDB
+# 2.0 an autocommit call must be the whole statement
+# (firebird_execute_atomic.test).
+
+statement ok
+BEGIN;
 
 query II
 SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (60, ''union a'')')
@@ -360,6 +365,9 @@ SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (61, 
 ----
 1	1
 1	1
+
+statement ok
+COMMIT;
 
 query I
 SELECT count(*) FROM firebird_query('ro', 'SELECT ID FROM RW_LOG WHERE ID IN (60, 61)');

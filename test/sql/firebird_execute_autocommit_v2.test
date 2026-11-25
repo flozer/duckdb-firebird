@@ -1,0 +1,132 @@
+# name: test/sql/firebird_execute_autocommit_v2.test
+# description: DuckDB 2.0 only. In autocommit, firebird_execute commits its
+#              write before returning its row (a client that reads the row
+#              with fetchone() and closes would otherwise lose the write), so
+#              the call must be the whole statement: the call, or a choice of
+#              its columns. Every other form is refused before it writes, with
+#              a message that points to BEGIN ... COMMIT. A plan the optimizer
+#              doesn't see (optimizer disabled) is refused too. A prepared
+#              statement follows the same rule when it is executed.
+# group: [firebird]
+#
+# Needs scripts/fixture_rw.sql in the database named by FIREBIRD_RW_DB.
+# FIREBIRD_DUCKDB_V2 is set by the CI legs that build against DuckDB 2.0.
+# Uses RW_LOG rows 721 to 740 only.
+
+require firebird
+
+require-env FIREBIRD_RW_DB
+
+require-env FIREBIRD_DUCKDB_V2
+
+statement ok
+ATTACH '${FIREBIRD_RW_DB}' AS rw (TYPE firebird, READ_WRITE);
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG WHERE ID BETWEEN 721 AND 740');
+
+statement ok
+CREATE OR REPLACE TABLE local_log (rows_affected BIGINT, executions BIGINT);
+
+# --- Refused: anything that runs after the call or beside it ---------------------
+
+statement error
+SELECT *, executions + 1 FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (721, ''expression'')');
+----
+on DuckDB 2.0, in autocommit, firebird_execute must be the whole statement
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (722, ''filter'')') WHERE executions = 1;
+----
+must be the whole statement
+
+statement error
+SELECT count(*) FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (723, ''aggregate'')');
+----
+must be the whole statement
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (724, ''limit'')') LIMIT 1;
+----
+must be the whole statement
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (725, ''union a'')')
+UNION ALL
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (726, ''union b'')');
+----
+Run it between BEGIN and COMMIT to combine it with other work
+
+statement ok
+PRAGMA disable_optimizer;
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (728, ''no optimizer'')');
+----
+must be the whole statement
+
+statement ok
+PRAGMA enable_optimizer;
+
+# None of them wrote.
+query II
+SELECT (SELECT count(*) FROM local_log),
+       (SELECT * FROM firebird_query('rw', 'SELECT count(*) FROM RW_LOG WHERE ID BETWEEN 721 AND 728'));
+----
+0	0
+
+# --- Accepted: the whole statement, in its other spellings ---------------------
+
+query II
+FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (729, ''from first'')');
+----
+1	1
+
+query II
+CALL firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (730, ''call'')');
+----
+1	1
+
+statement ok
+PREPARE whole AS SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (732, ''prepared'')');
+
+query II
+EXECUTE whole;
+----
+1	1
+
+statement ok
+PREPARE composite AS SELECT *, executions + 1 FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (733, ''prepared expr'')');
+
+statement error
+EXECUTE composite;
+----
+must be the whole statement
+
+query II
+SELECT ID, NOTE FROM firebird_query('rw', 'SELECT ID, NOTE FROM RW_LOG WHERE ID IN (729, 730, 732, 733) ORDER BY ID');
+----
+729	from first
+730	call
+732	prepared
+
+# --- The same forms between BEGIN and COMMIT: accepted ---------------------------
+
+statement ok
+BEGIN;
+
+query I
+SELECT count(*) FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (731, ''txn aggregate'')');
+----
+1
+
+statement ok
+COMMIT;
+
+query I
+SELECT * FROM firebird_query('rw', 'SELECT count(*) FROM RW_LOG WHERE ID = 731');
+----
+1
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG WHERE ID BETWEEN 721 AND 740');

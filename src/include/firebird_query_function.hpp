@@ -61,6 +61,12 @@ TableFunction GetFirebirdClearCacheFunction();
 // that returns rows are read and discarded.
 TableFunction GetFirebirdExecuteFunction();
 
+#ifdef FIREBIRD_DUCKDB_V2
+// DuckDB 2.0: the optimizer hook that tells firebird_execute whether it is
+// the whole statement (its autocommit commit depends on it).
+void RegisterFirebirdExecuteOptimizer(DBConfig &config);
+#endif
+
 // Resolves `alias` to a Firebird ATTACH (BinderException naming
 // `function_name` otherwise). Leases nothing.
 FirebirdAttachHandle GetFirebirdAttachHandle(ClientContext &context, const std::string &alias,

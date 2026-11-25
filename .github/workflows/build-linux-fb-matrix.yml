@@ -359,6 +359,8 @@ jobs:
           chmod +x "$cli"
           echo "DUCKDB=$cli" >> $GITHUB_ENV
           echo "DUCKDB_PRELUDE=$load" >> $GITHUB_ENV
+          # Tests that hold for DuckDB 2.0 only (require-env FIREBIRD_DUCKDB_V2).
+          echo "FIREBIRD_DUCKDB_V2=1" >> $GITHUB_ENV
           cat "$cli"
           # The loaded extension must provide firebird_scan.
           n=$(printf '%s\n' "$load" \
@@ -429,6 +431,8 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_query_fb4.test
           # Writes (READ_WRITE ATTACH).
           ./build/release/test/unittest test/sql/firebird_execute.test
+          ./build/release/test/unittest test/sql/firebird_execute_atomic.test
+          ./build/release/test/unittest test/sql/firebird_execute_autocommit_v2.test
           ./build/release/test/unittest test/sql/firebird_read_your_writes.test
           ./build/release/test/unittest test/sql/firebird_least_privilege.test
           ./build/release/test/unittest test/sql/firebird_ddl_cache.test

@@ -5,7 +5,10 @@ is fully read, so a client that read a write's single row with fetchone()
 and closed the connection would lose the write without an error. On DuckDB
 1.5 firebird_execute has DuckDB materialize its result, as DuckDB does for
 INSERT; on DuckDB 2.0, in autocommit, it commits its Firebird write before
-returning the row.
+returning the row (it must then be the whole statement).
+
+Between BEGIN and COMMIT the write belongs to the transaction: a COMMIT
+after fetchone() keeps it, a ROLLBACK drops it.
 
 sqllogictest reads every result fully, so this needs a real client.
 
@@ -51,6 +54,21 @@ for marker, sql in cases.items():
     if n != 1:
         failures += 1
     print(f"{status}: {sql[:70]}... -> {n} row(s) after close")
+
+# Between BEGIN and COMMIT: the transaction decides, after fetchone().
+for marker, end, expected in ((9101, "COMMIT", 1), (9102, "ROLLBACK", 0)):
+    con = connect()
+    con.execute("BEGIN")
+    con.execute(
+        f"SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES ({marker}, ''{end.lower()}'')')"
+    ).fetchone()
+    con.execute(end)
+    con.close()
+    n = count(marker)
+    status = "ok" if n == expected else "FAILED"
+    if n != expected:
+        failures += 1
+    print(f"{status}: BEGIN, fetchone(), {end} -> {n} row(s) after close (expected {expected})")
 
 con = connect()
 con.execute("SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG')").fetchall()
