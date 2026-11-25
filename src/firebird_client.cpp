@@ -1416,7 +1416,12 @@ ISC_QUAD FirebirdConnection::CreateBlob(const std::string &bytes, int16_t subtyp
         }
     }
     isc_close_blob(status, &blob);
-    CheckStatus(status, "isc_close_blob");
+    if (NoteStatus(status)) {
+        // A failed close leaves the handle open: cancel it, as above.
+        ISC_STATUS cancel_status[20] = {};
+        isc_cancel_blob(cancel_status, &blob);
+        CheckStatus(status, "isc_close_blob");
+    }
     return id;
 }
 

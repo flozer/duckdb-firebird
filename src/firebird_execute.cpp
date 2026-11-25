@@ -20,7 +20,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cctype>
 #include <chrono>
 
 #include "duckdb/catalog/catalog.hpp"
@@ -38,6 +37,8 @@
 #ifdef FIREBIRD_DUCKDB_V2
 #include "duckdb/main/config.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/planner/expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #endif
@@ -305,6 +306,24 @@ bool CheckStatementType(FirebirdStatement &stmt, bool allow_rows) {
     return returns_rows;
 }
 
+#ifdef FIREBIRD_DUCKDB_V2
+// DuckDB 2.0 fills an omitted keyword-only parameter with NULL, so its value
+// alone can't tell `source := NULL` from no source. The call as written still
+// names its arguments (the binder moves out their expressions, not their
+// names), so this reads whether the caller wrote `name := ...`.
+bool CallNamesArgument(const TableFunctionBindInput &input, const char *name) {
+    if (!input.ref.function || input.ref.function->GetExpressionClass() != ExpressionClass::FUNCTION) {
+        return false;
+    }
+    for (auto &argument : input.ref.function->Cast<FunctionExpression>().GetArguments()) {
+        if (argument.HasName() && argument.GetName() == name) {
+            return true;
+        }
+    }
+    return false;
+}
+#endif
+
 unique_ptr<FunctionData> FirebirdExecuteBind(ClientContext &context, TableFunctionBindInput &input,
                                              vector<LogicalType> &return_types,
 #ifdef FIREBIRD_DUCKDB_V2
@@ -322,6 +341,11 @@ unique_ptr<FunctionData> FirebirdExecuteBind(ClientContext &context, TableFuncti
     for (auto &kv : input.named_parameters) {
 #ifdef FIREBIRD_DUCKDB_V2
         if (kv.second.IsNull()) {
+            // An explicit `source := NULL` is refused, as on 1.5; an omitted
+            // source arrives as NULL too, and means no source.
+            if (kv.first == "source" && CallNamesArgument(input, "source")) {
+                throw BinderException("%s: source must not be NULL", kFunctionName);
+            }
             continue;  // v2.0 fills omitted keyword-only parameters with NULL
         }
 #endif
