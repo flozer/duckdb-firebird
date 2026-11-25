@@ -305,7 +305,7 @@ ATTACH 'database=C:/data/erp.fdb user=APP_READONLY password=secret'
 ```
 
 The ATTACH is read-only unless it is opened with DuckDB's `READ_WRITE`
-option, which allows writes through [`firebird_execute`](#firebird_executealias-sql):
+option, which allows writes through [`firebird_execute`](#firebird_executealias-sql--source-commit_every-count_rows):
 
 ```sql
 ATTACH 'database=C:/data/erp.fdb user=APP_WRITER password=secret'
@@ -496,7 +496,7 @@ Both arguments may be any constant expression, for example
   columns) and again when it runs. If its columns changed in between, the
   query fails and asks to be run again.
 
-### `firebird_execute(alias, sql)`
+### `firebird_execute(alias, sql [, source, commit_every, count_rows])`
 
 Runs one Firebird statement (DML, DDL, `EXECUTE PROCEDURE`,
 `EXECUTE BLOCK`) on an ATTACH opened with `READ_WRITE`, inside the DuckDB
@@ -584,7 +584,10 @@ Returns one row:
   small, and if the query fails half-way, the rows `commit_every`
   committed before the failure stay (the error says which). Its column
   types are checked when the call runs: if another connection changed them
-  since the bind, the call fails before writing.
+  since the bind, the call fails before writing. `source := NULL` is
+  refused ("source must not be NULL") on DuckDB 1.5 and 2.0, also when the
+  NULL comes from a prepared statement's parameter; a call without
+  `source` runs the statement once.
 - **Exact values.** Each value travels in a Firebird type that represents
   it exactly, and the server converts it to the parameter's type with its
   own rules, so rounding, overflow and truncation are what the same
@@ -1360,7 +1363,7 @@ Output columns (12):
 | `active_connections` | BIGINT | Connections currently leased out and not yet returned via Release or discarded |
 | `last_error` | VARCHAR | Sanitized message of the most recent failed connection creation (`NULL` when none); the password is redacted before storage |
 | `bytes_read_estimate` | BIGINT | G5 — lifetime estimate of Firebird payload bytes fetched by scans that ran **inside this catalog** (ATTACH path). Same semantics as the other lifetime counters: process-relative, never reset. Direct `firebird_scan()` calls are **not** included — they belong to no catalog. Estimate definition: see [`firebird_last_query()`](#firebird_last_query). `0` on the `write` row: scans never use that pool |
-| `pool` | VARCHAR | `'read'`: the pool of scans, `firebird_query` and catalog loads. `'write'`: the pool of the DuckDB transactions' write connections, listed only for an ATTACH opened with `READ_WRITE` (see [`firebird_execute`](#firebird_executealias-sql)) |
+| `pool` | VARCHAR | `'read'`: the pool of scans, `firebird_query` and catalog loads. `'write'`: the pool of the DuckDB transactions' write connections, listed only for an ATTACH opened with `READ_WRITE` (see [`firebird_execute`](#firebird_executealias-sql--source-commit_every-count_rows)) |
 
 It reads only counters and config the pool already tracks, and it does
 **not** lease a connection — calling it never perturbs the pool it reports

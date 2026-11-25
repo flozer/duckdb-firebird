@@ -134,15 +134,15 @@ statement ok
 SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM9_3) VALUES (?, ?)',
     source := 'SELECT 33, -1.2345675::DECIMAL(18,7)');
 
-query I
-SELECT count(DISTINCT C_NUM9_3) FROM rw.main.RW_TARGET WHERE ID IN (30, 31);
+# The same value as the literal, and the value the server rounds to (half away
+# from zero), so a rounding error the two paths shared would show.
+query II
+SELECT ID, C_NUM9_3 FROM rw.main.RW_TARGET WHERE ID BETWEEN 30 AND 33 ORDER BY ID;
 ----
-1
-
-query I
-SELECT count(DISTINCT C_NUM9_3) FROM rw.main.RW_TARGET WHERE ID IN (32, 33);
-----
-1
+30	1.235
+31	1.235
+32	-1.235
+33	-1.235
 
 # NUMERIC(18,4) limits and negative scaled values through parameters
 statement ok
@@ -476,11 +476,48 @@ SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_TIME) VALUES 
 ----
 TIME '24:00:00' is outside Firebird's times
 
+# DuckDB holds TIMETZ '24:00:00+00' (the source below really sends it).
+query I
+SELECT '24:00:00+00'::TIMETZ::VARCHAR;
+----
+24:00:00+00
+
 statement error
 SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_TIME) VALUES (?, ?)',
     source := $$SELECT 98, '24:00:00+00'::TIMETZ$$);
 ----
-<REGEX>:.*(TIME '24:00:00' is outside Firebird's times|Conversion Error).*
+parameter 2: TIME '24:00:00' is outside Firebird's times
+
+# --- source := NULL: refused, on DuckDB 1.5 and 2.0 alike -------------------------
+# DuckDB 2.0 hands an omitted source to the extension as NULL too; the call as
+# written tells them apart. Without the refusal, these calls would run the
+# statement once, as a call with no source.
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (97)', source := NULL);
+----
+source must not be NULL
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (97)', source := NULL::VARCHAR);
+----
+source must not be NULL
+
+statement error
+CALL firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (97)', source := NULL);
+----
+source must not be NULL
+
+statement ok
+PREPARE p_null_source AS SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (97)', source := ?);
+
+statement error
+EXECUTE p_null_source(NULL);
+----
+source must not be NULL
+
+statement ok
+DEALLOCATE p_null_source;
 
 # A statement that fails to prepare at bind quotes the SQL: its literals are
 # hidden there too, as the statement mentions PASSWORD.

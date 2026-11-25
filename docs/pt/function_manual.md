@@ -523,7 +523,7 @@ ATTACH 'C:/dados/empresa.fdb' AS fb
 
 O ATTACH e somente leitura, a menos que seja aberto com a opcao
 `READ_WRITE` do DuckDB, que permite escritas via
-[`firebird_execute`](#firebird_executealias-sql):
+[`firebird_execute`](#firebird_executealias-sql--source-commit_every-count_rows):
 
 ```sql
 ATTACH 'database=C:/dados/empresa.fdb user=APP_WRITER password=secret'
@@ -750,7 +750,7 @@ Os dois argumentos podem ser qualquer expressao constante, por exemplo
   as colunas) e de novo ao executar. Se as colunas mudarem nesse
   intervalo, a consulta falha e pede para ser executada de novo.
 
-### `firebird_execute(alias, sql)`
+### `firebird_execute(alias, sql [, source, commit_every, count_rows])`
 
 Executa um comando Firebird (DML, DDL, `EXECUTE PROCEDURE`,
 `EXECUTE BLOCK`) num ATTACH aberto com `READ_WRITE`, dentro da transacao de
@@ -840,7 +840,10 @@ Retorna uma linha:
   memoria fica pequena, e se a query falha no meio, as linhas que
   `commit_every` confirmou antes da falha ficam (o erro diz quais). Os
   tipos das colunas sao conferidos quando a chamada roda: se outra conexao
-  os mudou depois do bind, a chamada falha antes de gravar.
+  os mudou depois do bind, a chamada falha antes de gravar. `source :=
+  NULL` e recusado ("source must not be NULL") no DuckDB 1.5 e no 2.0,
+  tambem quando o NULL vem do parametro de um prepared statement; uma
+  chamada sem `source` roda o comando uma vez.
 - **Valores exatos.** Cada valor viaja num tipo Firebird que o representa
   exatamente, e o servidor o converte para o tipo do parametro com suas
   proprias regras: arredondamento, overflow e truncamento sao os mesmos
@@ -2050,7 +2053,7 @@ Colunas de saida (12):
 - `pool`: `'read'`, o pool dos scans, do `firebird_query` e da carga do
   catalogo; `'write'`, o pool das conexoes de escrita das transacoes
   DuckDB, listado so num ATTACH aberto com `READ_WRITE` (veja
-  [`firebird_execute`](#firebird_executealias-sql)).
+  [`firebird_execute`](#firebird_executealias-sql--source-commit_every-count_rows)).
 
 Le apenas contadores e config que o pool ja rastreia, e **nao** faz lease de
 conexao - chamar nunca perturba o pool que reporta. Os valores configurados

@@ -88,5 +88,29 @@ SELECT C_INT128, C_NUM38_6, C_DEC16, C_DEC34, C_TSTZ, C_TTZ FROM rw.main.RW_TARG
 ----
 170141183460469231731687303715884105727	-12345678901234567890123456789012.123456	1.500	1.234567890123456789012345678901234E+100	2026-11-18 13:45:30.1234+00	11:45:30.1234+00
 
+# A TIMESTAMPTZ with a non-zero offset, here one that also changes the date in
+# UTC: a TIMESTAMP WITH TIME ZONE column keeps the instant, and a TIMESTAMP
+# column (no time zone) gets its UTC time, as the manual says.
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET4 (ID, C_TSTZ) VALUES (?, ?)',
+    source := $$SELECT 11, TIMESTAMPTZ '2026-11-18 02:15:30.1234+05'$$);
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_TS) VALUES (?, ?)',
+    source := $$SELECT 9110, TIMESTAMPTZ '2026-11-18 02:15:30.1234+05'$$);
+
+query I
+SELECT C_TSTZ FROM rw.main.RW_TARGET4 WHERE ID = 11;
+----
+2026-11-17 21:15:30.1234+00
+
+query I
+SELECT C_TS FROM rw.main.RW_TARGET WHERE ID = 9110;
+----
+2026-11-17 21:15:30.1234
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET WHERE ID = 9110');
+
 statement ok
 SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET4');
