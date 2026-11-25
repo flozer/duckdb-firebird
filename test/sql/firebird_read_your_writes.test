@@ -35,15 +35,15 @@ FROM firebird_health('rw');
 statement ok
 SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (601, ''auto'')');
 
-query I
-SELECT count(*) FROM rw.main.RW_LOG WHERE ID = 601;
+query T
+SELECT NOTE FROM rw.main.RW_LOG WHERE ID = 601;
 ----
-1
+auto
 
-query I
-SELECT * FROM firebird_query('rw', 'SELECT count(*) FROM RW_LOG WHERE ID = 601');
+query T
+SELECT * FROM firebird_query('rw', 'SELECT NOTE FROM RW_LOG WHERE ID = 601');
 ----
-1
+auto
 
 # --- BEGIN ... COMMIT: the transaction's reads don't see its own writes ----------
 
@@ -66,10 +66,10 @@ SELECT * FROM firebird_query('rw', 'SELECT count(*) FROM RW_LOG WHERE ID = 602')
 statement ok
 COMMIT;
 
-query I
-SELECT count(*) FROM rw.main.RW_LOG WHERE ID = 602;
+query T
+SELECT NOTE FROM rw.main.RW_LOG WHERE ID = 602;
 ----
-1
+txn
 
 # --- With firebird_transaction_snapshot ------------------------------------------
 
@@ -127,10 +127,11 @@ statement ok
 COMMIT;
 
 # A new transaction, a new snapshot: both rows.
-query I
-SELECT count(*) FROM rw.main.RW_LOG WHERE ID IN (604, 605);
+query IT
+SELECT ID, NOTE FROM rw.main.RW_LOG WHERE ID IN (604, 605) ORDER BY ID;
 ----
-2
+604	other
+605	txn snap
 
 statement ok
 SET firebird_transaction_snapshot = false;

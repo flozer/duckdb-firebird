@@ -1,7 +1,7 @@
 # name: test/sql/firebird_bytes_estimate.test
 # description: G5 - bytes_read_estimate telemetry. Schema (25 columns on
 #              firebird_last_query/firebird_query_log, bytes_read_estimate
-#              at index 18; 11 on firebird_pool_stats), positivity/monotonicity,
+#              at index 18; 12 on firebird_pool_stats), positivity/monotonicity,
 #              determinism between identical runs, linear scaling with
 #              row_limit, BLOB segment bytes counting, and the ATTACH-only
 #              lifetime accumulation in firebird_pool_stats.
@@ -202,7 +202,7 @@ SELECT bytes_read_estimate FROM firebird_last_query();
 4028
 
 # ---------------------------------------------------------------------------
-#  firebird_pool_stats: 11 columns, bytes_read_estimate last, BIGINT.
+#  firebird_pool_stats: 12 columns, bytes_read_estimate before pool, BIGINT.
 # ---------------------------------------------------------------------------
 
 statement ok

@@ -18,6 +18,7 @@ Rule:
 | Function manual | `docs/en/function_manual.md` | `docs/pt/function_manual.md` | Paired |
 | `firebird_query(alias, sql)` | `docs/en/function_manual.md` | `docs/pt/function_manual.md` | Paired, including where read-only stops |
 | Writes: `firebird_execute(alias, sql)`, what a read sees after a write, no atomicity across engines, the write pool in `firebird_pool_stats()` | `docs/en/function_manual.md`, `docs/en/observability.md` | `docs/pt/function_manual.md` | Paired; PT keeps its observability in the manual |
+| `firebird_clear_cache(alias)` | `docs/en/function_manual.md` | `docs/pt/function_manual.md` | Paired |
 | Firebird users and grants (read-only user, separate write user) | `docs/en/usage_guide.md` | `docs/pt/usage_guide.md` | Paired |
 | Interrupting a query | `docs/en/function_manual.md`, `docs/en/observability.md` ("Interrupted queries") | `docs/pt/function_manual.md` ("Interromper uma query") | Paired; PT keeps its observability part in the same section, as for the rest of observability |
 | Roadmap | `docs/en/roadmap.md` | `docs/pt/roadmap.md` | Paired for current strategy; EN keeps full historical detail |

@@ -372,6 +372,14 @@ roadmap enquanto nao provarem que fortalecem o nucleo da extensao:
   permanece focada em acesso Firebird seguro, performatico e observavel a
   partir do DuckDB.
 
+## Fora de escopo (rejeitado por enquanto)
+
+- **Escritas pelo `fb.main.…`** - `INSERT / UPDATE / DELETE / CREATE TABLE`
+  contra `fb.main.…`. As escritas sao opt-in: um ATTACH aberto com
+  `READ_WRITE` executa o SQL Firebird que o usuario escreveu por
+  `firebird_execute`, em transacao de escrita e pool de conexoes proprios,
+  enquanto as leituras mantem o perfil de transacao somente leitura.
+
 ## Regras para DEV
 
 Nao iniciar implementacao sem autorizacao explicita do HUMANO/PM.

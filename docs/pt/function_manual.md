@@ -821,7 +821,10 @@ Retorna uma linha:
   `SET BIND`, `SET DECFLOAT`, `SET TIME ZONE`, `SET SESSION ...`,
   `SET STATEMENT TIMEOUT`, `SET OPTIMIZE`, `ALTER SESSION`. A conexao de
   escrita volta ao pool do ATTACH, e as escritas seguintes herdariam a
-  mudanca.
+  mudanca. A verificacao le so as primeiras palavras do comando: a mesma
+  mudanca feita dentro de `EXECUTE BLOCK` ou `EXECUTE STATEMENT`, ou uma
+  variavel de contexto definida com `RDB$SET_CONTEXT('USER_SESSION', ...)`,
+  nao e recusada (veja "Estado de sessao" abaixo).
 - **Senhas.** Quando um comando menciona `PASSWORD` (`CREATE USER ...
   PASSWORD '...'`, `EXECUTE STATEMENT ... PASSWORD '...'`, tambem dentro de
   um comando aninhado), o log de queries e as mensagens de erro desta
@@ -841,15 +844,19 @@ Retorna uma linha:
   `ON DISCONNECT` e `ON CONNECT` do banco, com a variavel `RESETTING`
   verdadeira, para que um trigger possa ignora-lo; `SET
   firebird_pool_session_reset = false` desliga o reset. O Firebird 3 nao
-  tem reset de sessao: nele, esse estado pode ficar na conexao do pool.
+  tem reset de sessao: nele, esse estado fica na conexao do pool, inclusive
+  as variaveis de contexto definidas com `RDB$SET_CONTEXT('USER_SESSION',
+  ...)`, e as queries seguintes que recebem essa conexao o veem.
 - **DDL.** `CREATE`, `ALTER` e `DROP` rodam como qualquer comando. Depois do
   commit, o ATTACH carrega suas tabelas de novo, e `fb.main` mostra a
   mudanca sem novo ATTACH; um comando preparado tambem a ve (o DuckDB o
   liga de novo a cada execucao). Antes do DDL, o ATTACH fecha suas conexoes
   ociosas: uma conexao Firebird ociosa guarda no cache de metadados as
   tabelas que usou, e o Firebird recusa alterar ou excluir essas tabelas
-  enquanto ela existir ("object ... is in use"). Para DDL feito fora deste
-  ATTACH, veja `firebird_clear_cache`.
+  enquanto ela existir ("object ... is in use"). O DDL e reconhecido pelo
+  tipo do proprio comando: DDL rodado via `EXECUTE BLOCK` ou `EXECUTE
+  STATEMENT` nao e, e nenhum dos dois passos acontece para ele; rode
+  `firebird_clear_cache` depois, como para DDL feito fora deste ATTACH.
 - **A escrita fica mesmo se o cliente para de ler, e um comando e tudo ou
   nada.** Um cliente que le a linha com `fetchone()` e fecha a conexao
   mantem a escrita. No DuckDB 1.5 o resultado do comando e materializado,

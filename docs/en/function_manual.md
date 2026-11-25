@@ -565,7 +565,10 @@ Returns one row:
   `SET BIND`, `SET DECFLOAT`, `SET TIME ZONE`, `SET SESSION ...`,
   `SET STATEMENT TIMEOUT`, `SET OPTIMIZE`, `ALTER SESSION`. The write
   connection goes back to the ATTACH's pool, and later writes would
-  inherit the change.
+  inherit the change. The check reads the statement's first words only:
+  the same change made inside `EXECUTE BLOCK` or `EXECUTE STATEMENT`, or a
+  context variable set with `RDB$SET_CONTEXT('USER_SESSION', ...)`, is not
+  refused (see "Session state" below).
 - **Passwords.** When a statement mentions `PASSWORD` (`CREATE USER ...
   PASSWORD '...'`, `EXECUTE STATEMENT ... PASSWORD '...'`, also inside a
   nested statement), this extension's query log and error messages show
@@ -584,15 +587,19 @@ Returns one row:
   fires the database's `ON DISCONNECT` and `ON CONNECT` triggers, with the
   `RESETTING` variable true, so a trigger can skip it; `SET
   firebird_pool_session_reset = false` turns the reset off. Firebird 3 has
-  no session reset: there, such state can stay with the pooled connection.
+  no session reset: there, such state stays with the pooled connection,
+  context variables set with `RDB$SET_CONTEXT('USER_SESSION', ...)`
+  included, and later queries that get that connection see it.
 - **DDL.** `CREATE`, `ALTER` and `DROP` run like any statement. Once the
   transaction commits, the ATTACH loads its tables again, so `fb.main`
   shows the change without a new ATTACH; a prepared statement sees it too
   (DuckDB binds it again on every execution). Before DDL, the ATTACH closes its
   idle connections: an idle Firebird attachment keeps the tables it used
   in its metadata cache, and Firebird refuses to drop or alter them while
-  it lives ("object ... is in use"). For DDL made outside this ATTACH, see
-  `firebird_clear_cache`.
+  it lives ("object ... is in use"). DDL is recognized by the statement's
+  own type: DDL run through `EXECUTE BLOCK` or `EXECUTE STATEMENT` is not,
+  so neither step happens for it; run `firebird_clear_cache` after it, as
+  for DDL made outside this ATTACH.
 - **The write is kept when the client stops reading, and a statement is
   all or nothing.** A client that reads the one row with `fetchone()` and
   closes still keeps the write. On DuckDB 1.5 the statement's result is
