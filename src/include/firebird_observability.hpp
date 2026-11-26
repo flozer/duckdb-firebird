@@ -83,6 +83,9 @@ struct FirebirdQueryTelemetry {
     // error text.
     std::string error_message;
     bool valid = false;
+    // Which record this is (RecordQuery numbers them from 1), so a write
+    // whose outcome is only known later (a commit) can find it again.
+    uint64_t seq = 0;
 };
 
 // Per-ClientContext observability state. Registered on demand via
@@ -109,7 +112,8 @@ public:
     // also appended to the ring buffer; the buffer is trimmed (oldest
     // dropped) until it fits log_size. log_size = 0 disables logging
     // and clears any leftover entries so the off state is truly empty.
-    void RecordQuery(const FirebirdQueryTelemetry &rec, int64_t log_size);
+    // Returns the record's seq.
+    uint64_t RecordQuery(const FirebirdQueryTelemetry &rec, int64_t log_size);
 
     // Chunk C - cumulative metrics for the *current* last_ record.
     // Each method grabs the same mutex as RecordQuery; the cost per call
@@ -135,6 +139,11 @@ public:
     void SetErrorIfEmpty(const std::string &msg);
     // Writes: the final (or in-flight) counts and mode of the current record.
     void SetWriteResult(const std::string &write_mode, int64_t rows_written, int64_t rows_affected);
+    // A write whose rows were not kept after it recorded itself (its
+    // commit failed): the record numbered seq, wherever it is now (the
+    // current record, the ring buffer, or both), gets the error and
+    // rows_written = 0. A record already gone is left alone.
+    void FailWrite(uint64_t seq, const std::string &msg);
 
 private:
     mutable std::mutex lock_;
@@ -150,6 +159,7 @@ private:
     // surfaced value reflects "scan still in progress" if read mid-flight
     // and "wall time of the slowest partition" once everything settles.
     std::chrono::steady_clock::time_point start_;
+    uint64_t seq_ = 0;
 };
 
 // Fetch (or create) the observability state attached to this ClientContext.
@@ -159,8 +169,12 @@ shared_ptr<FirebirdObservabilityState> GetObservabilityState(ClientContext &ctx)
 // Starts the telemetry record of a write (firebird_execute or INSERT into
 // an ATTACH table): operation "execute" or "insert", the SQL as prepared,
 // write_mode "row" until the caller sets the result.
-void RecordFirebirdWrite(ClientContext &ctx, const std::string &sql, const std::string &operation,
-                         const std::string &table_name, int64_t connection_id);
+// Returns the record's seq (see FirebirdObservabilityState::FailWrite).
+uint64_t RecordFirebirdWrite(ClientContext &ctx, const std::string &sql, const std::string &operation,
+                             const std::string &table_name, int64_t connection_id);
+
+// The query log size the session has set (firebird_query_log_size).
+int64_t FirebirdQueryLogSize(ClientContext &ctx);
 
 // G1 observability wave — react to a scan that has residual (not pushed)
 // filters, according to the firebird_unpushed_mode session setting:

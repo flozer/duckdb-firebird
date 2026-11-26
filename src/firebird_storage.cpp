@@ -32,6 +32,7 @@
 #include "firebird_cancel.hpp"
 #include "firebird_client.hpp"
 #include "firebird_view_analysis.hpp"
+#include "firebird_observability.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -967,6 +968,10 @@ public:
             } catch (...) {
             }
         }
+        try {
+            EndInserts("");
+        } catch (...) {
+        }
     }
 
     // The connection holding this DuckDB transaction's Firebird write
@@ -1046,15 +1051,78 @@ public:
         return write_use_lock_;
     }
 
-    // Open INSERTs with a statement on the write connection (see
-    // PinFirebirdWrites).
-    void PinWrites(int64_t delta) {
+    // Open INSERTs (see OpenFirebirdInsert).
+    int64_t OpenInsert(ClientContext &context, const std::string &sql, const std::string &table_name) {
+        OpenInsertEntry entry;
+        entry.sql = sql;
+        entry.table_name = table_name;
+        entry.obs = GetObservabilityState(context);
+        entry.log_size = FirebirdQueryLogSize(context);
         std::lock_guard<std::mutex> g(write_lock_);
-        write_pins_ += delta;
+        entry.id = ++insert_ids_;
+        open_inserts_.push_back(std::move(entry));
+        return insert_ids_;
+    }
+    void NoteInsertReported(int64_t id) {
+        std::lock_guard<std::mutex> g(write_lock_);
+        for (auto &entry : open_inserts_) {
+            if (entry.id == id) {
+                entry.reported = true;
+            }
+        }
+    }
+    void CloseInsert(int64_t id, uint64_t record_seq) {
+        std::lock_guard<std::mutex> g(write_lock_);
+        for (auto it = open_inserts_.begin(); it != open_inserts_.end(); ++it) {
+            if (it->id == id) {
+                ClosedInsertEntry closed;
+                closed.obs = it->obs;
+                closed.record_seq = record_seq;
+                closed_inserts_.push_back(std::move(closed));
+                open_inserts_.erase(it);
+                return;
+            }
+        }
     }
     bool WritesPinned() {
         std::lock_guard<std::mutex> g(write_lock_);
-        return write_pins_ > 0;
+        return !open_inserts_.empty();
+    }
+
+    // The transaction ends. A failed commit marks the records of the
+    // INSERTs that finished in it as failed (their rows are gone); an INSERT
+    // still open never finished, and gets a failed record of its own unless
+    // it reported its error already.
+    void EndInserts(const std::string &commit_error) {
+        std::vector<OpenInsertEntry> open;
+        std::vector<ClosedInsertEntry> closed;
+        {
+            std::lock_guard<std::mutex> g(write_lock_);
+            open.swap(open_inserts_);
+            closed.swap(closed_inserts_);
+        }
+        if (!commit_error.empty()) {
+            for (auto &entry : closed) {
+                entry.obs->FailWrite(entry.record_seq, "the Firebird commit failed: " + commit_error);
+            }
+        }
+        for (auto &entry : open) {
+            if (entry.reported) {
+                continue;
+            }
+            FirebirdQueryTelemetry rec;
+            rec.remote_sql = entry.sql;
+            rec.table_name = entry.table_name;
+            rec.operation = "insert";
+            rec.write_mode = "row";
+            rec.rows_written = 0;
+            rec.partitions = 1;
+            rec.connection_id = -1;
+            rec.captured_at = Timestamp::GetCurrentTimestamp();
+            entry.obs->RecordQuery(rec, entry.log_size);
+            entry.obs->SetError("INSERT into Firebird table \"" + entry.table_name +
+                                "\" did not complete; none of its rows were kept");
+        }
     }
 
     // See HoldFirebirdWriteResources.
@@ -1278,7 +1346,23 @@ private:
     bool reset_session_ = true;  // SET firebird_pool_session_reset, when the transaction started
     std::mutex write_lock_;
     std::mutex write_use_lock_;
-    int64_t write_pins_ = 0;
+    // Open INSERTs (see OpenFirebirdInsert), and the telemetry records of
+    // the ones that finished, for a failing commit to mark.
+    struct OpenInsertEntry {
+        int64_t id = 0;
+        std::string sql;
+        std::string table_name;
+        shared_ptr<FirebirdObservabilityState> obs;
+        int64_t log_size = 0;
+        bool reported = false;
+    };
+    struct ClosedInsertEntry {
+        shared_ptr<FirebirdObservabilityState> obs;
+        uint64_t record_seq = 0;
+    };
+    std::vector<OpenInsertEntry> open_inserts_;
+    std::vector<ClosedInsertEntry> closed_inserts_;
+    int64_t insert_ids_ = 0;
     std::vector<std::weak_ptr<FirebirdWriteResources>> write_resources_;
     std::unique_ptr<FirebirdConnection> write_conn_;
     std::string catalog_name_;
@@ -1318,20 +1402,30 @@ public:
 
     ErrorData CommitTransaction(ClientContext &, Transaction &transaction) override {
         ErrorData error;
+        auto &tx = transaction.Cast<FirebirdTransaction>();
         try {
-            transaction.Cast<FirebirdTransaction>().EndWrite(true);
+            tx.EndWrite(true);
         } catch (std::exception &ex) {
             error = ErrorData(ex);
+        }
+        try {
+            tx.EndInserts(error.HasError() ? error.RawMessage() : std::string());
+        } catch (...) {
         }
         End(transaction);
         return error;
     }
 
     void RollbackTransaction(Transaction &transaction) override {
+        auto &tx = transaction.Cast<FirebirdTransaction>();
         try {
-            transaction.Cast<FirebirdTransaction>().EndWrite(false);
+            tx.EndWrite(false);
         } catch (...) {
             // The connection was discarded; nothing else to undo.
+        }
+        try {
+            tx.EndInserts("");
+        } catch (...) {
         }
         End(transaction);
     }
@@ -1606,19 +1700,23 @@ bool FirebirdWritesPinned(ClientContext &context, Catalog &catalog) {
     return Transaction::Get(context, catalog).Cast<FirebirdTransaction>().WritesPinned();
 }
 
-void PinFirebirdWrites(ClientContext &context, Catalog &catalog) {
-    Transaction::Get(context, catalog).Cast<FirebirdTransaction>().PinWrites(1);
+int64_t OpenFirebirdInsert(ClientContext &context, Catalog &catalog, const std::string &sql,
+                           const std::string &table_name) {
+    return Transaction::Get(context, catalog).Cast<FirebirdTransaction>().OpenInsert(context, sql, table_name);
 }
 
-void UnpinFirebirdWrites(ClientContext &context, Catalog &catalog) {
-    Transaction::Get(context, catalog).Cast<FirebirdTransaction>().PinWrites(-1);
+void NoteFirebirdInsertReported(ClientContext &context, Catalog &catalog, int64_t id) {
+    Transaction::Get(context, catalog).Cast<FirebirdTransaction>().NoteInsertReported(id);
+}
+
+void CloseFirebirdInsert(ClientContext &context, Catalog &catalog, int64_t id, uint64_t record_seq) {
+    Transaction::Get(context, catalog).Cast<FirebirdTransaction>().CloseInsert(id, record_seq);
 }
 
 void CommitFirebirdWriteNow(ClientContext &context, Catalog &catalog) {
     auto &tx = Transaction::Get(context, catalog).Cast<FirebirdTransaction>();
-    // An INSERT in this statement (fed by this firebird_execute) still has
-    // its statement prepared on the connection: the commit waits for the
-    // DuckDB transaction.
+    // An INSERT into this ATTACH is open in this transaction: the commit
+    // waits for the DuckDB transaction (see OpenFirebirdInsert).
     if (tx.WritesPinned()) {
         return;
     }

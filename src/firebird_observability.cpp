@@ -27,11 +27,12 @@ FirebirdQueryTelemetry FirebirdObservabilityState::GetLastQuery() const {
     return last_;
 }
 
-void FirebirdObservabilityState::RecordQuery(const FirebirdQueryTelemetry &rec,
-                                              int64_t log_size) {
+uint64_t FirebirdObservabilityState::RecordQuery(const FirebirdQueryTelemetry &rec,
+                                                  int64_t log_size) {
     std::lock_guard<std::mutex> g(lock_);
     last_ = rec;
     last_.valid = true;
+    last_.seq = ++seq_;
     // G2 (none_pushdown): pushed NONE-column filters / remote SQL may
     // intentionally contain non-UTF-8 bytes (re-encoded literals). DuckDB
     // Value construction validates UTF-8, so escape invalid bytes for
@@ -46,12 +47,13 @@ void FirebirdObservabilityState::RecordQuery(const FirebirdQueryTelemetry &rec,
         // Logging disabled: drop any leftover entries so the off state
         // is truly empty even if the user toggled the setting mid-session.
         log_.clear();
-        return;
+        return last_.seq;
     }
     log_.push_back(last_);
     while (log_.size() > static_cast<size_t>(log_size)) {
         log_.pop_front();
     }
+    return last_.seq;
 }
 
 std::vector<FirebirdQueryTelemetry> FirebirdObservabilityState::SnapshotLog() const {
@@ -143,8 +145,31 @@ void FirebirdObservabilityState::SetWriteResult(const std::string &write_mode, i
     }
 }
 
-void RecordFirebirdWrite(ClientContext &ctx, const std::string &sql, const std::string &operation,
-                         const std::string &table_name, int64_t connection_id) {
+void FirebirdObservabilityState::FailWrite(uint64_t seq, const std::string &msg) {
+    auto sanitized = SanitizeErrorMessage(msg);
+    std::lock_guard<std::mutex> g(lock_);
+    if (last_.seq == seq) {
+        last_.error_message = sanitized;
+        last_.rows_written = 0;
+    }
+    for (auto &entry : log_) {
+        if (entry.seq == seq) {
+            entry.error_message = sanitized;
+            entry.rows_written = 0;
+        }
+    }
+}
+
+int64_t FirebirdQueryLogSize(ClientContext &ctx) {
+    Value v;
+    if (ctx.TryGetCurrentSetting("firebird_query_log_size", v) && !v.IsNull()) {
+        return v.GetValue<int64_t>();
+    }
+    return 0;
+}
+
+uint64_t RecordFirebirdWrite(ClientContext &ctx, const std::string &sql, const std::string &operation,
+                             const std::string &table_name, int64_t connection_id) {
     FirebirdQueryTelemetry rec;
     rec.remote_sql = MakeTelemetrySafeUtf8(sql);
     rec.table_name = table_name;
@@ -154,12 +179,7 @@ void RecordFirebirdWrite(ClientContext &ctx, const std::string &sql, const std::
     rec.partitions = 1;
     rec.connection_id = connection_id;
     rec.captured_at = Timestamp::GetCurrentTimestamp();
-    int64_t log_size = 0;
-    Value v;
-    if (ctx.TryGetCurrentSetting("firebird_query_log_size", v) && !v.IsNull()) {
-        log_size = v.GetValue<int64_t>();
-    }
-    GetObservabilityState(ctx)->RecordQuery(rec, log_size);
+    return GetObservabilityState(ctx)->RecordQuery(rec, FirebirdQueryLogSize(ctx));
 }
 
 shared_ptr<FirebirdObservabilityState> GetObservabilityState(ClientContext &ctx) {

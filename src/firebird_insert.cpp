@@ -57,6 +57,9 @@ struct FirebirdInsertResources : public FirebirdWriteResources {
 struct FirebirdInsertGlobalState : public GlobalSinkState {
     std::shared_ptr<FirebirdInsertResources> res = std::make_shared<FirebirdInsertResources>();
     int64_t rows = 0;  // rows inserted (executed)
+    int64_t lock_timeout_s = 10;
+    // This INSERT's entry in the DuckDB transaction (see OpenFirebirdInsert).
+    int64_t open_id = 0;
     // For the telemetry record, made when the INSERT ends: a Firebird scan
     // in its source records itself while the INSERT runs.
     int64_t connection_id = -1;
@@ -90,33 +93,43 @@ public:
     }
 
     // --- Sink: one execution per row ---------------------------------------
+    // The INSERT opens its entry in the DuckDB transaction when the pipeline
+    // starts, so a firebird_execute in its source that runs first doesn't
+    // commit (see OpenFirebirdInsert). The write connection, and with it the
+    // Firebird write transaction, waits for the first row: a source that
+    // blocks (a sort, an aggregate) holds no Firebird transaction open while
+    // it computes.
     unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override {
-        int64_t lock_timeout_s = 10;
+        auto state = make_uniq<FirebirdInsertGlobalState>();
         Value v;
         if (context.TryGetCurrentSetting("firebird_write_lock_timeout", v) && !v.IsNull()) {
-            lock_timeout_s = v.GetValue<int64_t>();
+            state->lock_timeout_s = v.GetValue<int64_t>();
         }
-        auto state = make_uniq<FirebirdInsertGlobalState>();
-        // One write at a time on the transaction's write connection (a
-        // firebird_execute in the source shares it), and the connection
-        // stays this transaction's until the INSERT ends (Finalize unpins).
         auto writes = LockFirebirdWrites(context, catalog_);
-        PinFirebirdWrites(context, catalog_);
-        auto &conn = GetFirebirdWriteConnection(context, catalog_, lock_timeout_s);
-        state->connection_id = conn.Id();
-        HoldFirebirdWriteResources(context, catalog_, state->res);
-        try {
-            state->res->stmt = make_uniq<FirebirdStatement>(conn, sql_, FirebirdStatement::PrepareOnlyTag {});
-            state->res->encoder = make_uniq<FirebirdParamEncoder>(*state->res->stmt, value_types_, none_encoding_);
-        } catch (std::exception &ex) {
-            Fail(context, *state, "INSERT into Firebird table \"" + table_name_ + "\": " + ErrorData(ex).RawMessage());
-        }
+        state->open_id = OpenFirebirdInsert(context, catalog_, sql_, table_name_);
         return std::move(state);
+    }
+
+    // On the first row: the transaction's write connection (a
+    // firebird_execute in the source shares it) and the prepared statement.
+    void Prepare(ClientContext &context, FirebirdInsertGlobalState &state) const {
+        try {
+            auto &conn = GetFirebirdWriteConnection(context, catalog_, state.lock_timeout_s);
+            state.connection_id = conn.Id();
+            HoldFirebirdWriteResources(context, catalog_, state.res);
+            state.res->stmt = make_uniq<FirebirdStatement>(conn, sql_, FirebirdStatement::PrepareOnlyTag {});
+            state.res->encoder = make_uniq<FirebirdParamEncoder>(*state.res->stmt, value_types_, none_encoding_);
+        } catch (std::exception &ex) {
+            Fail(context, state, "INSERT into Firebird table \"" + table_name_ + "\": " + ErrorData(ex).RawMessage());
+        }
     }
 
     SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override {
         auto &state = input.global_state.Cast<FirebirdInsertGlobalState>();
         auto writes = LockFirebirdWrites(context.client, catalog_);
+        if (!state.res->encoder) {
+            Prepare(context.client, state);
+        }
         const auto t0 = std::chrono::steady_clock::now();
         for (idx_t r = 0; r < chunk.size(); ++r) {
             try {
@@ -136,11 +149,13 @@ public:
                               OperatorSinkFinalizeInput &input) const override {
         auto &state = input.global_state.Cast<FirebirdInsertGlobalState>();
         auto writes = LockFirebirdWrites(context, catalog_);
-        UnpinFirebirdWrites(context, catalog_);
-        Report(context, state, "");
+        const auto record_seq = Report(context, state, "");
         // The statement goes before the connection does (the transaction
         // releases it too, on every other path).
         state.res->ReleaseFirebird();
+        // The rows commit with the DuckDB transaction; a failing commit
+        // marks this record as failed.
+        CloseFirebirdInsert(context, catalog_, state.open_id, record_seq);
         return SinkFinalizeType::READY;
     }
 
@@ -151,11 +166,12 @@ public:
 
     // The INSERT's telemetry record, made when it ends (success or error).
     // Record counts would cost one round trip per row: rows_affected stays
-    // NULL.
-    void Report(ClientContext &context, const FirebirdInsertGlobalState &state, const std::string &error) const {
-        RecordFirebirdWrite(context, sql_, "insert", table_name_, state.connection_id);
+    // NULL. On an error no row is kept: rows_written is 0. Returns the
+    // record's seq.
+    uint64_t Report(ClientContext &context, const FirebirdInsertGlobalState &state, const std::string &error) const {
+        const auto seq = RecordFirebirdWrite(context, sql_, "insert", table_name_, state.connection_id);
         auto obs = GetObservabilityState(context);
-        obs->SetWriteResult("row", state.rows, -1);
+        obs->SetWriteResult("row", error.empty() ? state.rows : 0, -1);
         obs->AddFirebirdTimeUs(state.firebird_time_us);
         obs->SetTotalTimeUs(
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - state.started)
@@ -163,11 +179,15 @@ public:
         if (!error.empty()) {
             obs->SetError(error);
         }
+        return seq;
     }
 
+    // The entry stays open, so the write connection stays pinned until the
+    // transaction ends: the INSERT's rows can't commit with anything else.
     [[noreturn]] void Fail(ClientContext &context, const FirebirdInsertGlobalState &state,
                            const std::string &msg) const {
         Report(context, state, msg);
+        NoteFirebirdInsertReported(context, catalog_, state.open_id);
         throw InvalidInputException(msg);
     }
 
@@ -240,7 +260,12 @@ PhysicalOperator &PlanFirebirdInsert(ClientContext &, PhysicalPlanGenerator &pla
         throw BinderException("INSERT into Firebird table \"%s\": RETURNING is not supported", Str(table.name));
     }
     // ON CONFLICT and INSERT OR REPLACE never get here: DuckDB's binder
-    // turns them into a MERGE first, which PlanMergeInto refuses.
+    // refuses them, with or without a conflict target, since it checks the
+    // target against the unique indexes in the table's storage info and the
+    // ATTACH reports none (the primary and unique keys it loads are for
+    // information_schema). It refuses MERGE INTO a table of the ATTACH too
+    // (only DuckDB's own tables); PlanMergeInto refuses a MERGE that gets
+    // past it.
     if (!plan) {
         throw BinderException("INSERT into Firebird table \"%s\": nothing to insert", Str(table.name));
     }

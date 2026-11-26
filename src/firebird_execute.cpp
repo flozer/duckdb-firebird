@@ -464,9 +464,13 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
     // (see below), so nothing after it in the same statement could roll it
     // back. Only a call that is the whole statement can do that and stay
     // all or nothing; anything else is refused before it writes. The one
-    // exception: an INSERT into the same ATTACH that the call feeds directly
-    // has the write connection pinned, so the call doesn't commit, and the
-    // write commits with the INSERT's statement.
+    // exception: while an INSERT into a table of the same ATTACH is open in
+    // the statement, the write connection is pinned (see OpenFirebirdInsert),
+    // so the call doesn't commit and its write commits with the INSERT's
+    // statement. The check is per ATTACH, not per INSERT: any call on that
+    // ATTACH in the statement, feeding the INSERT or not, shares the write
+    // transaction and commits with it, so the statement stays all or
+    // nothing.
     if (context.transaction.IsAutoCommit() && !bind.whole_statement &&
         !FirebirdWritesPinned(context, *bind.attach.catalog)) {
         throw InvalidInputException(
