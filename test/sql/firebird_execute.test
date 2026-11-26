@@ -224,11 +224,17 @@ SELECT ID, NOTE FROM firebird_query('ro', 'SELECT ID, NOTE FROM RW_LOG WHERE NOT
 statement ok
 SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG WHERE NOTE = ''written''');
 
-# Parameters (?) have no values to take.
+# Parameters (?) take their values from a source.
 statement error
 SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG WHERE ID = ?');
 ----
-firebird_execute takes no parameter values
+pass their values with source
+
+# With a source, a statement that returns rows is refused.
+statement error
+SELECT * FROM firebird_execute('rw', 'SELECT ID FROM RW_LOG WHERE ID = ?', source := 'SELECT 1');
+----
+with source, the statement must not return rows
 
 statement error
 SELECT * FROM firebird_execute('rw', 'COMMIT');

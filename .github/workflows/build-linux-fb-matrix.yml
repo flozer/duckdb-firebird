@@ -180,11 +180,16 @@ jobs:
           fi
 
           # Write-path fixture: its own database, so the writes never touch
-          # the other fixtures.
+          # the other fixtures. The FB4+ types load into the same database
+          # on FB4/FB5.
           docker cp scripts/fixture_rw.sql fb:/tmp/fixture_rw.sql
           printf "%s\n" "CREATE DATABASE '/var/lib/firebird/data/rw.fdb' DEFAULT CHARACTER SET UTF8;" \
             | docker exec -i fb bash -c "isql -u SYSDBA -p masterkey"
           docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_rw.sql /var/lib/firebird/data/rw.fdb
+          if [ "${{ matrix.fb_major }}" != "3" ]; then
+            docker cp scripts/fixture_rw4.sql fb:/tmp/fixture_rw4.sql
+            docker exec fb isql -u SYSDBA -p masterkey -i /tmp/fixture_rw4.sql /var/lib/firebird/data/rw.fdb
+          fi
 
           # DataTypeCompatibility fixture (FB4+): its own database, opened
           # through a databases.conf alias with DataTypeCompatibility = 2.5,
@@ -238,6 +243,7 @@ jobs:
             # An alias needs the key=value form (the URL form keeps a leading '/').
             echo "FIREBIRD_TYPE_COMPAT_DB=user=SYSDBA;password=masterkey;database=localhost/3050:compat25;charset=UTF8" >> $GITHUB_ENV
             echo "FIREBIRD_QUERY4_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/query.fdb?charset=UTF8" >> $GITHUB_ENV
+            echo "FIREBIRD_RW4_DB=firebird://SYSDBA:masterkey@localhost:3050/var/lib/firebird/data/rw.fdb?charset=UTF8" >> $GITHUB_ENV
           fi
 
       - name: Extract matching libfbclient from the fb${{ matrix.fb_major }} container
@@ -429,7 +435,7 @@ jobs:
           # firebird_query (FB4+ types through FIREBIRD_QUERY4_DB, FB4/FB5).
           ./build/release/test/unittest test/sql/firebird_query.test
           ./build/release/test/unittest test/sql/firebird_query_fb4.test
-          # Writes (READ_WRITE ATTACH).
+          # Writes (READ_WRITE ATTACH; FB4+ types through FIREBIRD_RW4_DB).
           ./build/release/test/unittest test/sql/firebird_execute.test
           ./build/release/test/unittest test/sql/firebird_execute_atomic.test
           ./build/release/test/unittest test/sql/firebird_execute_autocommit_v2.test
@@ -437,6 +443,8 @@ jobs:
           ./build/release/test/unittest test/sql/firebird_least_privilege.test
           ./build/release/test/unittest test/sql/firebird_ddl_cache.test
           ./build/release/test/unittest test/sql/firebird_session_reset.test
+          ./build/release/test/unittest test/sql/firebird_execute_source.test
+          ./build/release/test/unittest test/sql/firebird_execute_source_fb4.test
 
       - name: Writes commit when a client reads one row and closes (Python)
         # sqllogictest reads every result fully; this needs a real client
@@ -513,6 +521,56 @@ jobs:
             exit 1
           }
           ./build/release/test/unittest test/sql/firebird_health.test
+
+      - name: Firebird 3 client against a Firebird 4+ server (writes)
+        # The parameter encoder sends INT128 only when the client library
+        # is Firebird 4+ too; every other step pairs a client with a server
+        # of its own version, so that branch had no leg of its own. One
+        # DuckDB version is enough: the encoder has no DuckDB-version
+        # branch.
+        if: matrix.fb_major != '3' && matrix.duckdb == 'v2.0.1'
+        env:
+          ISC_USER: SYSDBA
+          ISC_PASSWORD: masterkey
+        run: |
+          # The FB3 libfbclient and its own dependencies, from the FB3
+          # image, as the FB4-client step does.
+          docker run -d --name fb3client --entrypoint sleep firebirdsql/firebird:3-noble infinity
+          trap 'docker rm -f fb3client >/dev/null 2>&1 || true' EXIT
+          LIB_IN_CONTAINER=$(docker exec fb3client sh -c "find / -xdev -name 'libfbclient.so*' 2>/dev/null | head -1")
+          if [ -z "$LIB_IN_CONTAINER" ]; then
+            echo "::error::could not locate libfbclient.so* in firebirdsql/firebird:3-noble"
+            exit 1
+          fi
+          echo "found $LIB_IN_CONTAINER in the FB3 image"
+          FB3_DIR="$PWD/fbclient-fb3-on-fb${{ matrix.fb_major }}"
+          mkdir -p "$FB3_DIR"
+          docker exec fb3client sh -c "ldd '$LIB_IN_CONTAINER'" \
+            | grep -oE '/[^ ]+' | sort -u \
+            | grep -vE '/(libc|libpthread|libm|libdl|librt|ld-linux)[.-]' \
+            | while read -r dep; do
+                docker cp -L "fb3client:$dep" "$FB3_DIR/$(basename "$dep")" 2>/dev/null || true
+              done
+          docker cp -L "fb3client:$LIB_IN_CONTAINER" "$FB3_DIR/$(basename "$LIB_IN_CONTAINER")"
+          ls -l "$FB3_DIR"
+          export DUCKDB_FIREBIRD_CLIENT_LIBRARY="$FB3_DIR/$(basename "$LIB_IN_CONTAINER")"
+          export LD_LIBRARY_PATH="$FB3_DIR"
+          # firebird_fb3_client.test checks the pairing (a 3.x client, a 4+
+          # server) before anything else. The other files run unchanged
+          # through that client. A file that skips (a missing variable)
+          # would pass without running, so a skip fails the step.
+          # firebird_scan.test stays out: it scans a view whose SUM a
+          # Firebird 4+ server returns as INT128, which a Firebird 3
+          # client can't describe ("Data type unknown").
+          export FIREBIRD_FB3_CLIENT_RW_DB="$FIREBIRD_RW_DB"
+          for t in firebird_fb3_client firebird_execute firebird_execute_source firebird_bind_params firebird_ddl_cache firebird_query; do
+            out=$(./build/release/test/unittest "test/sql/$t.test" 2>&1) || { echo "$out"; exit 1; }
+            echo "$t: $(echo "$out" | tail -n 1)"
+            if echo "$out" | grep -q 'All tests were skipped'; then
+              echo "::error::$t.test was skipped through the Firebird 3 client"
+              exit 1
+            fi
+          done
 
       - name: Shared-snapshot consistency under a concurrent writer
         env:

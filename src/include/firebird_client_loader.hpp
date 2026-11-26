@@ -30,6 +30,7 @@ struct FirebirdClientApi {
     decltype(&::isc_dsql_free_statement)     isc_dsql_free_statement;
     decltype(&::isc_open_blob2)              isc_open_blob2;
     decltype(&::isc_close_blob)              isc_close_blob;
+    decltype(&::isc_cancel_blob)             isc_cancel_blob;
     decltype(&::isc_get_segment)             isc_get_segment;
     decltype(&::isc_sqlcode)                 isc_sqlcode;
     decltype(&::fb_interpret)                fb_interpret;
@@ -40,6 +41,9 @@ struct FirebirdClientApi {
     decltype(&::fb_cancel_operation)         fb_cancel_operation;
     // Commits a write transaction (firebird_execute).
     decltype(&::isc_commit_transaction)      isc_commit_transaction;
+    // Writes a BLOB parameter value.
+    decltype(&::isc_create_blob2)            isc_create_blob2;
+    decltype(&::isc_put_segment)             isc_put_segment;
 };
 
 // Resolve the Firebird client library (once per process) and return

@@ -92,3 +92,48 @@ SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
 ----
 2
 5
+
+# --- A date Firebird can't hold stays a DuckDB filter ------------------
+# (sent as a parameter it would be refused; DuckDB applies it instead)
+
+query I
+SELECT count(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE HIRE_DATE < make_date(10000, 1, 1);
+----
+5
+
+query I
+SELECT count(*) FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE HIRE_DATE IN (DATE '2020-03-15', make_date(10000, 1, 1));
+----
+1
+
+# --- A text BLOB column compared with strings -----------------------
+# NOTE is BLOB SUB_TYPE TEXT: whether the filter is sent to Firebird or
+# applied by DuckDB, the rows are the same.
+
+query I
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE NOTE = 'Team lead';
+----
+4
+
+query I
+SELECT EMP_ID FROM firebird_scan('${FIREBIRD_TEST_DB}', 'EMPLOYEE')
+ WHERE NOTE IN ('On leave', 'Team lead', 'nobody')
+ ORDER BY EMP_ID;
+----
+3
+4
+
+statement ok
+ATTACH '${FIREBIRD_TEST_DB}' AS fb_blobf (TYPE firebird);
+
+query I
+SELECT EMP_ID FROM fb_blobf.main.EMPLOYEE
+ WHERE NOTE = 'Senior developer';
+----
+1
+
+statement ok
+DETACH fb_blobf;
