@@ -18,6 +18,7 @@ Rule:
 | Function manual | `docs/en/function_manual.md` | `docs/pt/function_manual.md` | Paired |
 | `firebird_query(alias, sql)` | `docs/en/function_manual.md` | `docs/pt/function_manual.md` | Paired, including where read-only stops |
 | Writes: `firebird_execute(alias, sql [, source, commit_every, count_rows])` (parameters from a DuckDB query, exact values, `commit_every`, `count_rows`), what a read sees after a write, no atomicity across engines, the write pool in `firebird_pool_stats()` | `docs/en/function_manual.md`, `docs/en/observability.md` | `docs/pt/function_manual.md` | Paired; PT keeps its observability in the manual |
+| Writes: `INSERT INTO fb.main.T` on a `READ_WRITE` ATTACH (the refusals: `RETURNING`, `DEFAULT VALUES`, `ON CONFLICT`, `INSERT OR REPLACE`, `MERGE`, no `READ_WRITE`, `READ_ONLY`; `COPY ... FROM`; `DEFAULT` in `VALUES` becoming NULL; `operation = 'insert'` in the telemetry) | `docs/en/function_manual.md` | `docs/pt/function_manual.md` | Paired |
 | `firebird_clear_cache(alias)` | `docs/en/function_manual.md` | `docs/pt/function_manual.md` | Paired |
 | Firebird users and grants (read-only user, separate write user) | `docs/en/usage_guide.md` | `docs/pt/usage_guide.md` | Paired |
 | Interrupting a query | `docs/en/function_manual.md`, `docs/en/observability.md` ("Interrupted queries") | `docs/pt/function_manual.md` ("Interromper uma query") | Paired; PT keeps its observability part in the same section, as for the rest of observability |

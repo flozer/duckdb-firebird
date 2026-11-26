@@ -966,6 +966,7 @@ ATTACH 'database=C:/data/erp.fdb;user=APP_WRITER;password=secret'
 
 INSERT INTO fb.main.CUSTOMER SELECT id, name, city FROM staging_customers;
 INSERT INTO fb.main.CUSTOMER (NAME, ID) VALUES ('Fa', 6);
+COPY fb.main.CUSTOMER FROM 'customers.csv' (HEADER);
 ```
 
 - **Como.** O INSERT prepara `INSERT INTO "T" ("C1", ...) VALUES (?, ...)`
@@ -974,7 +975,9 @@ INSERT INTO fb.main.CUSTOMER (NAME, ID) VALUES ('Fa', 6);
   Firebird da transacao DuckDB (veja `firebird_execute`). Retorna o numero
   de linhas como qualquer INSERT; o `EXPLAIN` mostra `FIREBIRD_INSERT`.
   `COPY ... FROM` um arquivo para uma tabela do ATTACH insere do mesmo
-  jeito.
+  jeito. A transacao de escrita Firebird comeca na primeira linha do
+  INSERT, entao uma origem que ordena ou agrega nao mantem nenhuma aberta
+  enquanto calcula.
 - **Colunas.** O DuckDB converte os valores para os tipos das colunas do
   ATTACH antes. Com lista de colunas, so essas colunas sao enviadas, e o
   Firebird aplica seus proprios defaults, triggers e generators as
@@ -982,9 +985,10 @@ INSERT INTO fb.main.CUSTOMER (NAME, ID) VALUES ('Fa', 6);
   `COMPUTED BY` faz o Firebird recusar o INSERT, entao nomeie as colunas.
   `DEFAULT` dentro de uma lista `VALUES` vira NULL: o ATTACH nao declara
   ao DuckDB os defaults do Firebird.
-- **Recusados:** `RETURNING`, `DEFAULT VALUES` e `ON CONFLICT` (use
-  `firebird_execute`, com `UPDATE OR INSERT ... MATCHING` para um upsert),
-  e um ATTACH sem `READ_WRITE` ou com `READ_ONLY`.
+- **Recusados:** `RETURNING`, `DEFAULT VALUES`, `ON CONFLICT`,
+  `INSERT OR REPLACE` e `MERGE` (use `firebird_execute`, com
+  `UPDATE OR INSERT ... MATCHING` para um upsert), e um ATTACH sem
+  `READ_WRITE` ou com `READ_ONLY`, todos antes de gravar qualquer linha.
 - **Erros.** A primeira linha que falha para o INSERT com "row N failed:"
   e o erro do Firebird; a transacao DuckDB e desfeita, e com ela todas as
   linhas do INSERT.
@@ -1006,6 +1010,11 @@ INSERT INTO fb.main.CUSTOMER (NAME, ID) VALUES ('Fa', 6);
   `write_mode` (`row`), `rows_written`, `firebird_time_us` (a codificacao
   e as chamadas ao Firebird), `total_time_us` e `error_message`;
   `rows_affected` e `NULL` (contar custaria uma ida e volta por linha).
+  Num erro nenhuma linha fica, e `rows_written` e 0. Um comando que falha
+  fora do INSERT (na origem, ou interrompido) ainda deixa o registro do
+  INSERT, com "did not complete"; um commit que falha poe o erro no
+  `error_message` do registro ("the Firebird commit failed: ...") e
+  `rows_written` em 0.
 
 ### `firebird_attach_sql(connection_string [, schema])`
 

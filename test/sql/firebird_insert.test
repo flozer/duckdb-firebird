@@ -23,6 +23,9 @@ SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
 statement ok
 SELECT * FROM firebird_execute('rw', 'DELETE FROM CUSTOMER');
 
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG');
+
 # --- The opt-in ---------------------------------------------------------------
 
 statement error
@@ -150,6 +153,135 @@ SELECT count(*) FROM ro.main.CUSTOMER WHERE ID = 7;
 ----
 0
 
+# A duplicate key past the first DuckDB chunk (row 5,001 of 20,000): the
+# rows already sent are rolled back too, and the record keeps none. (The
+# record is read first: a scan of the ATTACH makes a record of its own.)
+query I
+INSERT INTO rw.main.CUSTOMER VALUES (6000, 'kept', NULL);
+----
+1
+
+statement error
+INSERT INTO rw.main.CUSTOMER SELECT i + 1000, 'n', NULL FROM range(20000) t(i);
+----
+row 5001 failed
+
+query IIII
+SELECT operation, table_name, rows_written, error_message LIKE '%row 5001 failed%' FROM firebird_last_query();
+----
+insert	CUSTOMER	0	true
+
+query I
+SELECT count(*) FROM ro.main.CUSTOMER WHERE ID BETWEEN 1000 AND 20999;
+----
+1
+
+# A failure in the source, after rows were sent: none is kept, and the
+# INSERT still gets its record, with the error.
+statement error
+INSERT INTO rw.main.CUSTOMER SELECT CASE WHEN i = 3000 THEN error('the source failed') ELSE i + 1000 END, 'n', NULL
+  FROM range(5000) t(i);
+----
+the source failed
+
+query IIII
+SELECT operation, table_name, rows_written, error_message FROM firebird_last_query();
+----
+insert	CUSTOMER	0	INSERT into Firebird table "CUSTOMER" did not complete; none of its rows were kept
+
+query I
+SELECT count(*) FROM ro.main.CUSTOMER WHERE ID BETWEEN 1000 AND 20999;
+----
+1
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM CUSTOMER WHERE ID = 6000');
+
+# A key another transaction holds, uncommitted: the INSERT waits up to
+# firebird_write_lock_timeout, then fails. Firebird reports the key
+# violation (not an update conflict): measured on Firebird 5, an INSERT
+# whose key is held by an uncommitted insert, update or delete gets it.
+statement ok con2
+SET firebird_write_lock_timeout = 1;
+
+statement ok con1
+BEGIN;
+
+statement ok con1
+SELECT * FROM firebird_execute('rw', 'INSERT INTO CUSTOMER (ID, NAME) VALUES (40, ''held'')');
+
+statement error con2
+INSERT INTO rw.main.CUSTOMER VALUES (39, 'free', NULL), (40, 'blocked', NULL);
+----
+<REGEX>:.*row 2 failed: .*violation of PRIMARY or UNIQUE KEY constraint.*
+
+query III con2
+SELECT operation, rows_written, error_message LIKE '%row 2 failed%' FROM firebird_last_query();
+----
+insert	0	true
+
+statement ok con1
+COMMIT;
+
+query II
+SELECT ID, NAME FROM ro.main.CUSTOMER WHERE ID IN (39, 40) ORDER BY ID;
+----
+40	held
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM CUSTOMER WHERE ID = 40');
+
+# A commit that fails: RW_COMMIT_CHECK (a database trigger) refuses a
+# commit with a row in RW_COMMIT_GUARD. The INSERT had recorded its rows;
+# the failed commit marks that record as failed, with none kept.
+statement error
+INSERT INTO rw.main.RW_COMMIT_GUARD VALUES (1), (2);
+----
+commit refused: RW_COMMIT_GUARD has a row
+
+query IIII
+SELECT operation, table_name, rows_written, error_message LIKE '%the Firebird commit failed: %commit refused%' FROM firebird_last_query();
+----
+insert	RW_COMMIT_GUARD	0	true
+
+query I
+SELECT count(*) FROM firebird_query('ro', 'SELECT ID FROM RW_COMMIT_GUARD');
+----
+0
+
+# The next write commits as usual.
+query I
+INSERT INTO rw.main.RW_LOG VALUES (-90, 'after the refusal');
+----
+1
+
+query I
+SELECT count(*) FROM firebird_query('ro', 'SELECT ID FROM RW_LOG WHERE ID = -90');
+----
+1
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG');
+
+# WIN1252 columns in the UTF8 database: stored as WIN1252 bytes ('Ação' is
+# 4 bytes), the VARCHAR and the text BLOB alike.
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_CS1252');
+
+query I
+INSERT INTO rw.main.RW_CS1252 VALUES (1, 'Ação', 'Ação');
+----
+1
+
+query IIIIII
+SELECT * FROM firebird_query('rw', $$SELECT ID, OCTET_LENGTH(V), OCTET_LENGTH(B), IIF(V = 'Ação', 1, 0),
+    IIF(CAST(B AS VARCHAR(20) CHARACTER SET WIN1252) = 'Ação', 1, 0), V FROM RW_CS1252 ORDER BY ID$$);
+----
+1	4	4	1	1	Ação
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_CS1252');
+
 # --- Refused forms -------------------------------------------------------------------
 
 # Firebird refuses a COMPUTED BY column at prepare; the error is on the
@@ -199,11 +331,41 @@ INSERT INTO rw.main.CUSTOMER DEFAULT VALUES;
 ----
 DEFAULT VALUES is not supported
 
-# (DuckDB's binder refuses it first: the ATTACH declares no unique keys)
+# ON CONFLICT and INSERT OR REPLACE: DuckDB's binder refuses them itself,
+# with or without a conflict target. It checks the table's unique indexes in
+# its storage info, and the ATTACH reports none (CUSTOMER's primary key is
+# loaded for information_schema only). It refuses MERGE INTO a table of the
+# ATTACH too (only DuckDB's own tables).
 statement error
 INSERT INTO rw.main.CUSTOMER VALUES (8, 'c', NULL) ON CONFLICT DO NOTHING;
 ----
-ON CONFLICT
+There are no UNIQUE/PRIMARY KEY constraints that refer to this table, specify ON CONFLICT columns manually
+
+statement error
+INSERT OR REPLACE INTO rw.main.CUSTOMER VALUES (8, 'c', NULL);
+----
+There are no UNIQUE/PRIMARY KEY constraints that refer to this table, specify ON CONFLICT columns manually
+
+statement error
+INSERT INTO rw.main.CUSTOMER VALUES (8, 'c', NULL) ON CONFLICT (ID) DO NOTHING;
+----
+The specified columns as conflict target are not referenced by a UNIQUE/PRIMARY KEY CONSTRAINT or INDEX
+
+statement error
+INSERT INTO rw.main.CUSTOMER VALUES (8, 'c', NULL) ON CONFLICT (ID) DO UPDATE SET NAME = excluded.NAME;
+----
+The specified columns as conflict target are not referenced by a UNIQUE/PRIMARY KEY CONSTRAINT or INDEX
+
+statement error
+MERGE INTO rw.main.CUSTOMER c USING (SELECT 8 AS ID, 'm' AS NAME) s ON c.ID = s.ID
+WHEN NOT MATCHED THEN INSERT VALUES (s.ID, s.NAME, NULL);
+----
+Can only merge into base tables!
+
+query I
+SELECT count(*) FROM ro.main.CUSTOMER WHERE ID = 8;
+----
+0
 
 # --- In a transaction: one Firebird transaction, committed with DuckDB's ---------------
 
@@ -327,15 +489,23 @@ SELECT CASE WHEN executions = 1 THEN error('after the write') ELSE 600002 END
 ----
 after the write
 
-# With an ORDER BY in between, DuckDB 2.0 may run the call before the INSERT
-# starts: in autocommit the call is then refused. Either way, a failure
-# after it keeps nothing.
+# With an ORDER BY in between, the call runs in its own pipeline, before the
+# INSERT's. The INSERT opens its entry in the transaction when the query
+# starts, so the call is already pinned when it runs, on both DuckDB
+# versions: it doesn't commit, and the failure after it keeps nothing.
+# (One thread: the INSERT's start then comes before the call for sure.)
+statement ok
+SET threads = 1;
+
 statement error
 INSERT INTO rw.main.RW_TARGET (ID)
 SELECT CASE WHEN executions = 1 THEN error('after the sort') ELSE 600003 END
   FROM (SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (-64, ''sorted fail'')') ORDER BY 1);
 ----
-<REGEX>:.*(after the sort|must be the whole statement).*
+after the sort
+
+statement ok
+RESET threads;
 
 query II
 SELECT (SELECT count(*) FROM firebird_query('ro', 'SELECT ID FROM RW_TARGET WHERE ID IN (600002, 600003)')),

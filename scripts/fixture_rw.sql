@@ -14,6 +14,9 @@
  *   RW_COMPUTED: a COMPUTED BY column, which an INSERT must not send.
  *   SP_SEQ   : selectable procedure returning N rows.
  *   RW_LOG / SP_WRITE: a log table, and a selectable procedure that writes.
+ *   RW_COMMIT_GUARD: always empty; a transaction that commits with a row in
+ *              it is refused by the RW_COMMIT_CHECK database trigger (a
+ *              commit that fails, for the INSERT tests).
  */
 SET SQL DIALECT 3;
 
@@ -113,6 +116,12 @@ CREATE TABLE RW_LOG (
     NOTE VARCHAR(20)
 );
 
+CREATE TABLE RW_COMMIT_GUARD (
+    ID INTEGER NOT NULL
+);
+
+CREATE EXCEPTION RW_COMMIT_REFUSED 'commit refused: RW_COMMIT_GUARD has a row';
+
 SET TERM ^ ;
 
 CREATE PROCEDURE SP_SEQ (N INTEGER)
@@ -135,6 +144,13 @@ BEGIN
     INSERT INTO RW_LOG (ID, NOTE) VALUES (1, 'written');
     ID = 1;
     SUSPEND;
+END^
+
+CREATE TRIGGER RW_COMMIT_CHECK ON TRANSACTION COMMIT
+AS
+BEGIN
+    IF (EXISTS (SELECT 1 FROM RW_COMMIT_GUARD)) THEN
+        EXCEPTION RW_COMMIT_REFUSED;
 END^
 
 SET TERM ; ^

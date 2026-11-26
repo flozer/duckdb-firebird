@@ -715,16 +715,19 @@ COPY fb.main.CUSTOMER FROM 'customers.csv' (HEADER);
   `firebird_execute(..., source := ...)`, in the DuckDB transaction's
   Firebird write transaction (see `firebird_execute`). It returns the row
   count like any INSERT; `EXPLAIN` shows `FIREBIRD_INSERT`. `COPY ... FROM`
-  a file into an ATTACH table inserts the same way.
+  a file into an ATTACH table inserts the same way. The Firebird write
+  transaction starts at the INSERT's first row, so a source that sorts or
+  aggregates holds none open while it computes.
 - **Columns.** DuckDB casts the values to the ATTACH's column types first.
   With a column list, only those columns are sent, and Firebird applies
   its own defaults, triggers and generators to the others. Without one,
   every column is sent; a `COMPUTED BY` column then makes Firebird refuse
   the INSERT, so name the columns. `DEFAULT` inside a `VALUES` list
   becomes NULL: the ATTACH doesn't declare Firebird's defaults to DuckDB.
-- **Refused:** `RETURNING`, `DEFAULT VALUES` and `ON CONFLICT` (use
-  `firebird_execute`, with `UPDATE OR INSERT ... MATCHING` for an upsert),
-  and an ATTACH without `READ_WRITE` or with `READ_ONLY`.
+- **Refused:** `RETURNING`, `DEFAULT VALUES`, `ON CONFLICT`,
+  `INSERT OR REPLACE` and `MERGE` (use `firebird_execute`, with
+  `UPDATE OR INSERT ... MATCHING` for an upsert), and an ATTACH without
+  `READ_WRITE` or with `READ_ONLY`, all before any row is written.
 - **Errors.** The first failing row stops the INSERT with "row N failed:"
   and Firebird's error; the DuckDB transaction rolls back, and with it
   every row of the INSERT.
@@ -746,7 +749,12 @@ COPY fb.main.CUSTOMER FROM 'customers.csv' (HEADER);
   `table_name`, the prepared statement in `remote_sql`, `write_mode`
   (`row`), `rows_written`, `firebird_time_us` (the encoding and Firebird
   calls), `total_time_us` and `error_message`; `rows_affected` is `NULL`
-  (counting would cost one round trip per row).
+  (counting would cost one round trip per row). On an error no row is
+  kept, and `rows_written` is 0. A statement that fails outside the INSERT
+  (in its source, or interrupted) still leaves the INSERT's record, with
+  "did not complete"; a commit that fails sets the record's
+  `error_message` ("the Firebird commit failed: ...") and `rows_written`
+  to 0.
 
 ### `firebird_attach_sql(connection_string [, schema])`
 
