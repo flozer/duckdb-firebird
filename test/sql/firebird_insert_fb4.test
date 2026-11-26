@@ -1,0 +1,72 @@
+# name: test/sql/firebird_insert_fb4.test
+# description: INSERT INTO <firebird ATTACH>.main.T with the Firebird 4+ types
+# group: [firebird]
+#
+# Needs scripts/fixture_rw.sql and scripts/fixture_rw4.sql in the database
+# named by FIREBIRD_RW4_DB (Firebird 4/5 only).
+
+require firebird
+
+require-env FIREBIRD_RW4_DB
+
+statement ok
+ATTACH '${FIREBIRD_RW4_DB}' AS ro (TYPE firebird);
+
+statement ok
+ATTACH '${FIREBIRD_RW4_DB}' AS rw (TYPE firebird, READ_WRITE);
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET4');
+
+# INT128, NUMERIC(38,6), DECFLOAT(16/34), TIMESTAMP / TIME WITH TIME ZONE,
+# from a Firebird scan of the same types.
+query I
+INSERT INTO rw.main.RW_TARGET4 SELECT * FROM ro.main.RW_TYPES4;
+----
+3
+
+query I
+SELECT count(*) FROM (SELECT * FROM rw.main.RW_TARGET4 EXCEPT ALL SELECT * FROM rw.main.RW_TYPES4);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT * FROM rw.main.RW_TYPES4 EXCEPT ALL SELECT * FROM rw.main.RW_TARGET4);
+----
+0
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET4');
+
+# DuckDB values into the Firebird 4 types.
+query I
+INSERT INTO rw.main.RW_TARGET4 VALUES (10,
+    170141183460469231731687303715884105727::HUGEINT,
+    -12345678901234567890123456789012.123456::DECIMAL(38,6),
+    1.5::DECIMAL(9,3),
+    '1.234567890123456789012345678901234E+100',
+    TIMESTAMPTZ '2026-11-18 13:45:30.1234+00',
+    '13:45:30.1234+02'::TIMETZ);
+----
+1
+
+query IIIIII
+SELECT C_INT128, C_NUM38_6, C_DEC16, C_DEC34, C_TSTZ, C_TTZ FROM rw.main.RW_TARGET4 WHERE ID = 10;
+----
+170141183460469231731687303715884105727	-12345678901234567890123456789012.123456	1.500	1.234567890123456789012345678901234E+100	2026-11-18 13:45:30.1234+00	11:45:30.1234+00
+
+# A TIMESTAMPTZ whose UTC date is the day before: the TIMESTAMP WITH TIME
+# ZONE column keeps the instant. (Into a TIMESTAMP column DuckDB casts the
+# value itself, with the session's time zone, before the INSERT sees it.)
+query I
+INSERT INTO rw.main.RW_TARGET4 (ID, C_TSTZ) VALUES (11, TIMESTAMPTZ '2026-11-18 02:15:30.1234+05');
+----
+1
+
+query I
+SELECT C_TSTZ FROM rw.main.RW_TARGET4 WHERE ID = 11;
+----
+2026-11-17 21:15:30.1234+00
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET4');

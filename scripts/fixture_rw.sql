@@ -10,8 +10,13 @@
  *   RW_TARGET: the same columns as RW_TYPES, empty: parameter round trips.
  *   CUSTOMER : an upsert target (EXECUTE BLOCK ... UPDATE OR INSERT).
  *   RW_CS1252: WIN1252 VARCHAR and text BLOB in the UTF8 database.
+ *   RW_DEFAULTS: column defaults, for INSERTs that don't name every column.
+ *   RW_COMPUTED: a COMPUTED BY column, which an INSERT must not send.
  *   SP_SEQ   : selectable procedure returning N rows.
  *   RW_LOG / SP_WRITE: a log table, and a selectable procedure that writes.
+ *   RW_COMMIT_GUARD: always empty; a transaction that commits with a row in
+ *              it is refused by the RW_COMMIT_CHECK database trigger (a
+ *              commit that fails, for the INSERT tests).
  */
 SET SQL DIALECT 3;
 
@@ -92,10 +97,30 @@ CREATE TABLE RW_CS1252 (
     B  BLOB SUB_TYPE TEXT CHARACTER SET WIN1252
 );
 
+/* A COMPUTED BY column: an INSERT that sends it is refused at prepare. */
+CREATE TABLE RW_COMPUTED (
+    ID    INTEGER NOT NULL,
+    TWICE COMPUTED BY (ID * 2)
+);
+
+/* Column defaults: an INSERT that doesn't name a column gets Firebird's
+ * default, not NULL. */
+CREATE TABLE RW_DEFAULTS (
+    ID   INTEGER NOT NULL PRIMARY KEY,
+    NOTE VARCHAR(10) DEFAULT 'dflt',
+    QTY  INTEGER DEFAULT 7
+);
+
 CREATE TABLE RW_LOG (
     ID INTEGER NOT NULL,
     NOTE VARCHAR(20)
 );
+
+CREATE TABLE RW_COMMIT_GUARD (
+    ID INTEGER NOT NULL
+);
+
+CREATE EXCEPTION RW_COMMIT_REFUSED 'commit refused: RW_COMMIT_GUARD has a row';
 
 SET TERM ^ ;
 
@@ -119,6 +144,13 @@ BEGIN
     INSERT INTO RW_LOG (ID, NOTE) VALUES (1, 'written');
     ID = 1;
     SUSPEND;
+END^
+
+CREATE TRIGGER RW_COMMIT_CHECK ON TRANSACTION COMMIT
+AS
+BEGIN
+    IF (EXISTS (SELECT 1 FROM RW_COMMIT_GUARD)) THEN
+        EXCEPTION RW_COMMIT_REFUSED;
 END^
 
 SET TERM ; ^

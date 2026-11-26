@@ -523,7 +523,8 @@ ATTACH 'C:/dados/empresa.fdb' AS fb
 
 O ATTACH e somente leitura, a menos que seja aberto com a opcao
 `READ_WRITE` do DuckDB, que permite escritas via
-[`firebird_execute`](#firebird_executealias-sql--source-commit_every-count_rows):
+[`firebird_execute`](#firebird_executealias-sql--source-commit_every-count_rows) e
+[`INSERT INTO`](#insert-into-fbmaint-):
 
 ```sql
 ATTACH 'database=C:/dados/empresa.fdb user=APP_WRITER password=secret'
@@ -929,7 +930,9 @@ Retorna uma linha:
   colunas. Qualquer outra forma (uma expressao ou um filtro sobre a linha,
   uma agregacao, `LIMIT`, um join, `UNION ALL`, `INSERT ... SELECT`) e
   recusada antes de escrever, porque o resto do comando poderia falhar
-  depois desse commit. Entre `BEGIN` e `COMMIT` toda forma roda, nas duas
+  depois desse commit. A excecao e um `INSERT INTO` numa tabela do mesmo
+  ATTACH para onde as linhas da chamada vao direto: a chamada nao confirma,
+  e sua escrita e confirmada com o INSERT (veja `INSERT INTO`). Entre `BEGIN` e `COMMIT` toda forma roda, nas duas
   linhas, e a escrita e confirmada ou desfeita com a transacao. A
   verificacao le o plano otimizado do DuckDB; com o otimizador desligado
   (`PRAGMA disable_optimizer`), o DuckDB 2.0 recusa toda chamada em
@@ -951,6 +954,67 @@ SELECT * FROM firebird_clear_cache('fb');
 ```
 
 Retorna uma linha, `cleared BOOLEAN` (`true`).
+
+### `INSERT INTO fb.main.T ...`
+
+Num ATTACH aberto com `READ_WRITE`, o `INSERT` do DuckDB grava numa tabela
+Firebird.
+
+```sql
+ATTACH 'database=C:/data/erp.fdb;user=APP_WRITER;password=secret'
+  AS fb (TYPE firebird, READ_WRITE);
+
+INSERT INTO fb.main.CUSTOMER SELECT id, name, city FROM staging_customers;
+INSERT INTO fb.main.CUSTOMER (NAME, ID) VALUES ('Fa', 6);
+COPY fb.main.CUSTOMER FROM 'customers.csv' (HEADER);
+```
+
+- **Como.** O INSERT prepara `INSERT INTO "T" ("C1", ...) VALUES (?, ...)`
+  uma vez e o executa uma vez por linha, com os valores codificados como
+  em `firebird_execute(..., source := ...)`, na transacao de escrita
+  Firebird da transacao DuckDB (veja `firebird_execute`). Retorna o numero
+  de linhas como qualquer INSERT; o `EXPLAIN` mostra `FIREBIRD_INSERT`.
+  `COPY ... FROM` um arquivo para uma tabela do ATTACH insere do mesmo
+  jeito. A transacao de escrita Firebird comeca na primeira linha do
+  INSERT, entao uma origem que ordena ou agrega nao mantem nenhuma aberta
+  enquanto calcula.
+- **Colunas.** O DuckDB converte os valores para os tipos das colunas do
+  ATTACH antes. Com lista de colunas, so essas colunas sao enviadas, e o
+  Firebird aplica seus proprios defaults, triggers e generators as
+  demais. Sem lista, todas as colunas sao enviadas; uma coluna
+  `COMPUTED BY` faz o Firebird recusar o INSERT, entao nomeie as colunas.
+  `DEFAULT` dentro de uma lista `VALUES` vira NULL: o ATTACH nao declara
+  ao DuckDB os defaults do Firebird.
+- **Recusados:** `RETURNING`, `DEFAULT VALUES`, `ON CONFLICT`,
+  `INSERT OR REPLACE` e `MERGE` (use `firebird_execute`, com
+  `UPDATE OR INSERT ... MATCHING` para um upsert), e um ATTACH sem
+  `READ_WRITE` ou com `READ_ONLY`, todos antes de gravar qualquer linha.
+- **Erros.** A primeira linha que falha para o INSERT com "row N failed:"
+  e o erro do Firebird; a transacao DuckDB e desfeita, e com ela todas as
+  linhas do INSERT.
+- **Alimentado por `firebird_execute`.** Um `INSERT ... SELECT ... FROM
+  firebird_execute(...)` no mesmo ATTACH compartilha uma transacao de
+  escrita, confirmada quando o comando termina, quando as linhas da chamada
+  vao direto para o INSERT. Com um `ORDER BY` ou uma agregacao no meio, o
+  DuckDB 2.0 pode rodar a chamada antes de o INSERT comecar; em autocommit
+  ele entao recusa a chamada (ela precisa ser o comando inteiro, veja
+  `firebird_execute`). Entre `BEGIN` e `COMMIT` as duas formas rodam.
+  `commit_every` e recusado ali.
+- **Numa transacao.** Entre `BEGIN` e `COMMIT`, os scans do ATTACH ainda
+  nao veem as linhas inseridas (leem nas proprias conexoes), e, como em
+  qualquer transacao DuckDB, a transacao escreve em um unico banco anexado.
+- **Nao via `fb.main`:** `UPDATE`, `DELETE` e DDL. Use `firebird_execute`.
+- **Telemetria.** Um registro por INSERT, feito quando ele termina (entao
+  vem depois do registro de um scan Firebird na origem): `operation =
+  'insert'`, `table_name`, o comando preparado em `remote_sql`,
+  `write_mode` (`row`), `rows_written`, `firebird_time_us` (a codificacao
+  e as chamadas ao Firebird), `total_time_us` e `error_message`;
+  `rows_affected` e `NULL` (contar custaria uma ida e volta por linha).
+  Num erro nenhuma linha fica, e `rows_written` e 0. Um comando que falha
+  fora do INSERT (na origem, ou interrompido) ainda deixa o registro do
+  INSERT, com "did not complete"; um commit que falha poe o erro no
+  `error_message` do registro ("the Firebird commit failed: ...") e
+  `rows_written` em 0.
 
 ### `firebird_attach_sql(connection_string [, schema])`
 
@@ -1673,8 +1737,9 @@ Saida compartilhada com `firebird_query_log()`:
 - `partition_method`: como a tabela foi dividida: `none` (uma particao),
   `pk` (faixas de PK) ou `dbkey` (faixas de `RDB$DB_KEY`,
   `partition_by = 'dbkey'`).
-- `operation`: o que e o registro: `scan`, `query` (`firebird_query`) ou
-  `execute` (`firebird_execute`).
+- `operation`: o que e o registro: `scan`, `query` (`firebird_query`),
+  `execute` (`firebird_execute`) ou `insert` (INSERT em tabela de um
+  ATTACH).
 - `write_mode`, `rows_written`, `rows_affected`: so para escritas; `NULL`
   em leituras. `write_mode` e `row`; `rows_written` sao as execucoes;
   `rows_affected` sao as contagens de registros do Firebird (`NULL` quando
@@ -2441,7 +2506,7 @@ transacao; esse scan entao falha. Veja "Um snapshot por transacao DuckDB
 
 ### `SET firebird_write_lock_timeout = SEGUNDOS`
 
-Quanto tempo uma escrita Firebird (`firebird_execute`) espera por um lock de
+Quanto tempo uma escrita Firebird (`firebird_execute`, `INSERT`) espera por um lock de
 linha de outra transacao antes de falhar com "update conflicts with
 concurrent update". Padrao 10; `0` falha na hora (sem espera); no maximo
 32767. Lido quando a transacao de escrita comeca.

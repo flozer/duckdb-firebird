@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <mutex>
 
 #include "duckdb.hpp"
@@ -36,8 +37,41 @@ FirebirdConnection &GetFirebirdWriteConnection(ClientContext &context, Catalog &
 // connection would not see the first call's rows nor share its locks).
 std::unique_lock<std::mutex> LockFirebirdWrites(ClientContext &context, Catalog &catalog);
 
+// Firebird objects an operator keeps on the write connection across its
+// steps (an INSERT's prepared statement): the write transaction releases
+// them before the connection goes back to the pool, unless the operator did.
+class FirebirdWriteResources {
+public:
+    virtual ~FirebirdWriteResources() = default;
+    virtual void ReleaseFirebird() = 0;
+};
+
+// The transaction keeps a weak reference: an operator gone first is skipped.
+void HoldFirebirdWriteResources(ClientContext &context, Catalog &catalog,
+                                const std::shared_ptr<FirebirdWriteResources> &resources);
+
+// Whether an INSERT is open on this ATTACH in the current DuckDB
+// transaction (see OpenFirebirdInsert).
+bool FirebirdWritesPinned(ClientContext &context, Catalog &catalog);
+
+// An INSERT is open from its first step to its last. While one is, the
+// write connection is pinned: CommitFirebirdWriteNow does nothing, and the
+// write commits with the DuckDB transaction. The transaction owns the
+// entry: CloseFirebirdInsert ends it when the INSERT finishes, and a
+// transaction that ends with an entry still open (the statement failed in
+// the INSERT's source, or was interrupted) records that INSERT as failed in
+// the telemetry, unless the INSERT reported its error itself
+// (NoteFirebirdInsertReported). Returns the entry's id.
+int64_t OpenFirebirdInsert(ClientContext &context, Catalog &catalog, const std::string &sql,
+                           const std::string &table_name);
+void NoteFirebirdInsertReported(ClientContext &context, Catalog &catalog, int64_t id);
+// record_seq: the INSERT's telemetry record, which a failing commit marks
+// as failed.
+void CloseFirebirdInsert(ClientContext &context, Catalog &catalog, int64_t id, uint64_t record_seq);
+
 // Commits the current DuckDB transaction's Firebird write transaction on
-// this ATTACH now, if one was started (a later write starts a new one).
+// this ATTACH now, if one was started (a later write starts a new one), and
+// unless an INSERT is open (see OpenFirebirdInsert).
 void CommitFirebirdWriteNow(ClientContext &context, Catalog &catalog);
 
 // firebird_execute ran a DDL statement in the current DuckDB transaction:

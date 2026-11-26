@@ -53,6 +53,8 @@ public:
     void Encode(const vector<Value> &values);
     // Encodes row `row` of `chunk` (column i -> parameter i).
     void Encode(DataChunk &chunk, idx_t row);
+    // Same, with column columns[i] -> parameter i.
+    void Encode(DataChunk &chunk, idx_t row, const vector<idx_t> &columns);
 
 private:
     // WIDE: a 128-bit integer or wide DECIMAL for a parameter that is not

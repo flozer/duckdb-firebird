@@ -173,9 +173,9 @@ SELECT * FROM fb.other.EMPLOYEE;
 # --- Catalog is read-only ------------------------------------------
 #
 # All write paths against an attached Firebird catalog must raise.
-# (INSERT / CREATE / DROP go through our NotImplemented stubs;
-# UPDATE / DELETE are caught earlier by DuckDB's binder as
-# "Can only update/delete base table".)
+# (An ATTACH without READ_WRITE refuses INSERT; CREATE / DROP go through
+# our NotImplemented stubs; UPDATE / DELETE are caught earlier by DuckDB's
+# binder as "Can only update/delete base table".)
 
 statement error
 INSERT INTO fb.main.EMPLOYEE VALUES (99, 'x', '600', 0, DATE '2026-01-01', TRUE, NULL);

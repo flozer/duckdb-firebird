@@ -342,8 +342,8 @@ static void LoadInternal(ExtensionLoader &loader) {
     // transaction before it fails.
     config.AddExtensionOption(
         "firebird_write_lock_timeout",
-        "Seconds a Firebird write (firebird_execute) waits for a row lock held by another "
-        "transaction before failing "
+        "Seconds a Firebird write (firebird_execute, INSERT into an ATTACH opened with "
+        "READ_WRITE) waits for a row lock held by another transaction before failing "
         "(0 = fail at once). Read when the write transaction starts. Default 10.",
         LogicalType::BIGINT,
         Value::BIGINT(10));
