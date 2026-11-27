@@ -56,6 +56,38 @@ uint64_t FirebirdObservabilityState::RecordQuery(const FirebirdQueryTelemetry &r
     return last_.seq;
 }
 
+uint64_t FirebirdObservabilityState::RecordFailureAfter(const FirebirdQueryTelemetry &rec, int64_t log_size,
+                                                        uint64_t since_seq) {
+    FirebirdQueryTelemetry r = rec;
+    r.error_message = SanitizeErrorMessage(r.error_message);
+    r.remote_sql = MakeTelemetrySafeUtf8(r.remote_sql);
+    for (auto &f : r.pushed_filters) {
+        f = MakeTelemetrySafeUtf8(f);
+    }
+    std::lock_guard<std::mutex> g(lock_);
+    r.valid = true;
+    r.seq = ++seq_;
+    const bool keep_current = last_.valid && last_.seq > since_seq && !last_.error_message.empty();
+    if (!keep_current) {
+        last_ = r;
+        start_ = std::chrono::steady_clock::now();
+    }
+    if (log_size <= 0) {
+        log_.clear();
+        return r.seq;
+    }
+    log_.push_back(r);
+    while (log_.size() > static_cast<size_t>(log_size)) {
+        log_.pop_front();
+    }
+    return r.seq;
+}
+
+uint64_t FirebirdObservabilityState::CurrentSeq() const {
+    std::lock_guard<std::mutex> g(lock_);
+    return seq_;
+}
+
 std::vector<FirebirdQueryTelemetry> FirebirdObservabilityState::SnapshotLog() const {
     std::lock_guard<std::mutex> g(lock_);
     // Most-recent-first.
@@ -182,10 +214,10 @@ int64_t FirebirdQueryLogSize(ClientContext &ctx) {
     return 0;
 }
 
-uint64_t RecordFirebirdWrite(ClientContext &ctx, const std::string &sql, const std::string &operation,
-                             const std::string &table_name, int64_t connection_id) {
+FirebirdQueryTelemetry MakeFirebirdWriteRecord(const std::string &sql, const std::string &operation,
+                                               const std::string &table_name, int64_t connection_id) {
     FirebirdQueryTelemetry rec;
-    rec.remote_sql = MakeTelemetrySafeUtf8(sql);
+    rec.remote_sql = sql;
     rec.table_name = table_name;
     rec.operation = operation;
     rec.write_mode = "row";
@@ -193,7 +225,13 @@ uint64_t RecordFirebirdWrite(ClientContext &ctx, const std::string &sql, const s
     rec.partitions = 1;
     rec.connection_id = connection_id;
     rec.captured_at = Timestamp::GetCurrentTimestamp();
-    return GetObservabilityState(ctx)->RecordQuery(rec, FirebirdQueryLogSize(ctx));
+    return rec;
+}
+
+uint64_t RecordFirebirdWrite(ClientContext &ctx, const std::string &sql, const std::string &operation,
+                             const std::string &table_name, int64_t connection_id) {
+    return GetObservabilityState(ctx)->RecordQuery(MakeFirebirdWriteRecord(sql, operation, table_name, connection_id),
+                                                   FirebirdQueryLogSize(ctx));
 }
 
 shared_ptr<FirebirdObservabilityState> GetObservabilityState(ClientContext &ctx) {

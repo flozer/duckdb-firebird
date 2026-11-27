@@ -33,9 +33,14 @@ contexto de "fetch failed" dos scans nao e acrescentado a uma interrupcao.
 Uma query que falhou tambem guarda o erro: o DuckDB entao interrompe sozinho
 as outras partes dela, e o cancelamento delas nao substitui o erro que parou
 a query. Escritas tambem: um `firebird_execute` interrompido (um comando
-longo, ou um laco de `source`) ou um `INSERT INTO fb.main.T` para do mesmo
-jeito, e sua transacao de escrita e desfeita com o comando DuckDB (linhas
-que um `commit_every` anterior confirmou ficam).
+longo, um lote, ou um laco de `source`) ou um `INSERT INTO fb.main.T` para
+do mesmo jeito. Em autocommit sua transacao de escrita Firebird e desfeita
+com o comando DuckDB; linhas que um `commit_every` anterior confirmou
+ficam. Dentro de `BEGIN ... COMMIT`, o DuckDB mantem a transacao abortada
+depois da interrupcao (todo comando falha com "Current transaction is
+aborted" ate o `ROLLBACK`), e a transacao de escrita Firebird fica aberta,
+com seus locks, ate esse `ROLLBACK` encerra-la; depois de um abort o
+servidor ja a desfez.
 A interrupcao nao alcanca a abertura de uma conexao nem a carga dos metadados
 das tabelas de um ATTACH: essas esperam o servidor.
 

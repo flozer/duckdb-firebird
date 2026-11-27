@@ -765,7 +765,22 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
         // nothing changes. (1.5 materializes the result instead; see the
         // bind.)
         if (context.transaction.IsAutoCommit()) {
+            // The guard goes before the commit, which may give the
+            // connection back (a guard must not outlive it); no cancel is
+            // sent after this. A raise sent before it could still land on
+            // the commit, and an interrupt that came after the last call
+            // would be raised by DuckDB once the write had committed. Either
+            // way the statement was interrupted: it doesn't commit, and the
+            // write rolls back with it.
+            auto *guarded = cancel ? cancel->Connection() : nullptr;
             cancel.reset();
+            const bool cancel_sent = guarded && guarded->CancelSent();
+            if (cancel_sent || context.IsInterrupted()) {
+                obs->SetWriteResult(write_mode, executions, -1);
+                obs->SetErrorIfEmpty(cancel_sent ? FirebirdInterruptMessage(*guarded)
+                                                 : std::string(InterruptException::INTERRUPT_MESSAGE));
+                throw InterruptException();
+            }
             CommitFirebirdWriteNow(context, *bind.attach.catalog);
         }
 #endif

@@ -263,8 +263,14 @@ message. When one part of a query fails (a worker of a parallel scan, one
 side of a `UNION ALL`), DuckDB interrupts the query's other parts, and the
 watcher cancels their Firebird calls too; their "Interrupted: ..." never
 replaces the error already recorded, so `error_message` keeps the failure
-that stopped the query. An interrupted write's transaction rolls back with
-the DuckDB statement. See "Interrupting a query" in `function_manual.md`.
+that stopped the query. In autocommit, an interrupted write's Firebird
+transaction rolls back with the DuckDB statement; inside `BEGIN ... COMMIT`
+it stays open until `ROLLBACK`. An INSERT into an ATTACH records itself when
+it ends; when another part of its statement recorded a failure first (a
+Firebird query in its source that failed), the INSERT's own failed record
+(its interrupt, or "... did not complete; none of its rows were kept") goes
+to `firebird_query_log()` only, and `firebird_last_query()` keeps that
+failure. See "Interrupting a query" in `function_manual.md`.
 
 ### `bytes_read_estimate` — definition (G5)
 

@@ -32,11 +32,16 @@ cancel's (including "operation was cancelled" from a DBA's
 `DELETE FROM MON$STATEMENTS`) keeps its own message, and so does a query
 that failed: DuckDB then interrupts its other parts itself, and their
 cancel doesn't replace the error that stopped the query. Writes too: an
-interrupted `firebird_execute` (one long statement, or a `source` loop) or
-`INSERT INTO fb.main.T` stops the same way, and its write transaction rolls
-back with the DuckDB statement (rows an earlier `commit_every` committed
-stay). An interrupt doesn't reach opening a connection or loading an
-ATTACH's table metadata: those wait for the server.
+interrupted `firebird_execute` (one long statement, a batch, or a `source`
+loop) or `INSERT INTO fb.main.T` stops the same way. In autocommit its
+Firebird write transaction rolls back with the DuckDB statement; rows an
+earlier `commit_every` committed stay. Inside `BEGIN ... COMMIT`, DuckDB
+keeps the transaction aborted after the interrupt (every statement fails
+with "Current transaction is aborted" until `ROLLBACK`), and the Firebird
+write transaction stays open, with its locks, until that `ROLLBACK` ends
+it; after an abort the server has rolled it back already. An interrupt
+doesn't reach opening a connection or loading an ATTACH's table metadata:
+those wait for the server.
 
 ## Level 1 - Direct reads
 

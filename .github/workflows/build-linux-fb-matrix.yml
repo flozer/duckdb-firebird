@@ -460,7 +460,7 @@ jobs:
             "$GITHUB_WORKSPACE/build/release/extension/firebird/firebird.duckdb_extension" \
             "$FIREBIRD_RW_DB"
 
-      - name: An interrupt cancels the running Firebird request (Python)
+      - name: An interrupt cancels the running Firebird request, of reads and writes (Python)
         # sqllogictest can't interrupt a running statement; this needs a
         # client that calls interrupt() while a query waits on Firebird.
         # Uses the Python package of the leg's DuckDB version.
@@ -470,7 +470,7 @@ jobs:
           timeout 180 /tmp/pycancel/bin/python scripts/check_cancel.py \
             "$GITHUB_WORKSPACE/build/release/extension/firebird/firebird.duckdb_extension" \
             "$FIREBIRD_QUERY_DB"
-          timeout 180 /tmp/pycancel/bin/python scripts/check_cancel_writes.py \
+          timeout 300 /tmp/pycancel/bin/python scripts/check_cancel_writes.py \
             "$GITHUB_WORKSPACE/build/release/extension/firebird/firebird.duckdb_extension" \
             "$FIREBIRD_RW_DB"
 

@@ -199,7 +199,9 @@ that sends one short request after another was seen waiting on the
 server's reply for good, on Firebird 3, 4 and 5), so a guard still
 registered 1 s after the raise gets `fb_cancel_abort`: the client closes
 the attachment's network connection, the blocked call fails whatever the
-server does, and the server rolls the transaction back.
+server does, and the server rolls the transaction back. A guard clears
+its connection's cancel state when it is created, so what it reports is
+about the calls it watches only.
 
 Each cancel runs on a short-lived thread of its own, so one that blocks
 holds up neither the watcher nor another connection's cancel. In the
@@ -213,16 +215,26 @@ Guarded: a scan's chunks, `firebird_query`'s open and fetches, and a
 scan's setup (the catalog round trips of `firebird_scan()`'s bind, the
 shared-snapshot coordinator, the DB_KEY geometry, the fallback PK probe,
 a worker joining the snapshot, the start of the transaction snapshot),
-and writes: `firebird_execute` for the call (released before its early
-autocommit commit, which may give the connection back) and the INSERT sink
-per chunk and in Finalize. `firebird_execute` also checks the interrupt
-flag between the chunks of its `source` query, which runs on its own
-DuckDB connection the interrupt doesn't reach. A cancelled write's
-transaction rolls back with the DuckDB statement. Not guarded, so an interrupt waits for the call to return: opening a
-connection (an attach has no handle to cancel yet), loading an ATTACH's
-table metadata, and the round trips that keep a transaction snapshot
-alive. For tests, `DUCKDB_FIREBIRD_TEST_CANCEL_ABORT=1` in the environment
-makes the first cancel the abort (`scripts/check_cancel.py`).
+and writes: `firebird_execute` for the call, and the INSERT sink in its
+first `Prepare` (the statement prepare and the batch), per chunk, and in
+Finalize when there is a batch left to send. `firebird_execute` releases
+its guard before the DuckDB 2.0 early autocommit commit, which may give
+the connection back; when a cancel was sent before that, or the query was
+interrupted after its last call, it doesn't commit: the statement ends as
+the interrupt. It also checks the interrupt flag between the chunks of its
+`source` query, which runs on its own DuckDB connection the interrupt
+doesn't reach. A cancelled write's Firebird transaction rolls back with the
+DuckDB statement in autocommit. Inside `BEGIN ... COMMIT`, DuckDB keeps
+the transaction aborted after the interrupt, and the Firebird write
+transaction stays open on the pinned connection, with its locks, until
+`ROLLBACK` (after an abort the server has rolled it back already). Not
+guarded, so an interrupt waits for the call to return: opening a
+connection (an attach has no handle to cancel yet), starting the write
+transaction (no lock wait happens there), loading an ATTACH's table
+metadata, and the round trips that keep a transaction snapshot alive. For
+tests, `DUCKDB_FIREBIRD_TEST_CANCEL_ABORT=1` in the environment makes the
+first cancel the abort (`scripts/check_cancel.py`,
+`scripts/check_cancel_writes.py`).
 
 XSQLDA buffers are owned by `FirebirdStatement` and reused across every
 `isc_dsql_fetch`. BLOBs go through a separate `isc_open_blob2` /

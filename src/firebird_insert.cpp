@@ -70,6 +70,13 @@ struct FirebirdInsertGlobalState : public GlobalSinkState {
     int64_t lock_timeout_s = 10;
     // This INSERT's entry in the DuckDB transaction (see OpenFirebirdInsert).
     int64_t open_id = 0;
+    // The newest telemetry record when the INSERT opened: a failure
+    // recorded after it, in this statement, stays in firebird_last_query()
+    // (see Report).
+    uint64_t open_seq = 0;
+    // The transaction's write connection, once Prepare got it (it outlives
+    // the INSERT).
+    FirebirdConnection *conn = nullptr;
     // For the telemetry record, made when the INSERT ends: a Firebird scan
     // in its source records itself while the INSERT runs.
     int64_t connection_id = -1;
@@ -116,6 +123,7 @@ public:
             state->lock_timeout_s = v.GetValue<int64_t>();
         }
         auto writes = LockFirebirdWrites(context, catalog_);
+        state->open_seq = GetObservabilityState(context)->CurrentSeq();
         state->open_id = OpenFirebirdInsert(context, catalog_, sql_, table_name_);
         return std::move(state);
     }
@@ -125,7 +133,11 @@ public:
     void Prepare(ClientContext &context, FirebirdInsertGlobalState &state) const {
         try {
             auto &conn = GetFirebirdWriteConnection(context, catalog_, state.lock_timeout_s);
+            state.conn = &conn;
             state.connection_id = conn.Id();
+            // The prepare can wait on the server (a metadata lock); Fail
+            // turns the error a cancel causes into the interrupt.
+            FirebirdCancelGuard cancel(context, &conn);
             HoldFirebirdWriteResources(context, catalog_, state.res);
             state.res->stmt = make_uniq<FirebirdStatement>(conn, sql_, FirebirdStatement::PrepareOnlyTag {});
             Value b;
@@ -199,8 +211,9 @@ public:
         auto &state = input.global_state.Cast<FirebirdInsertGlobalState>();
         auto writes = LockFirebirdWrites(context, catalog_);
         const auto t0 = std::chrono::steady_clock::now();
-        // Only a batch has rows left to send. An INSERT that got no row never
-        // prepared: it has no statement nor connection.
+        // Only a batch has rows left to send (one row at a time, every call
+        // ran in Sink). An INSERT that got no row never prepared: it has no
+        // statement nor connection.
         if (state.res->batch) {
             FirebirdCancelGuard cancel(context, &state.res->stmt->Connection());
             Flush(context, state, t0);
@@ -224,23 +237,28 @@ public:
     // The INSERT's telemetry record, made when it ends (success or error).
     // One row at a time, record counts would cost one round trip per row:
     // rows_affected stays NULL. On an error no row is kept: rows_written is
-    // 0, and so is rows_affected when counted. Returns the record's seq.
+    // 0, and so is rows_affected when counted. A failure doesn't take
+    // firebird_last_query() from one that another part of the statement
+    // recorded first (an interrupt the INSERT got because DuckDB stopped
+    // the query): it goes to the query log only. Returns the record's seq.
     uint64_t Report(ClientContext &context, const FirebirdInsertGlobalState &state, const std::string &error) const {
-        const auto seq = RecordFirebirdWrite(context, sql_, "insert", table_name_, state.connection_id);
-        auto obs = GetObservabilityState(context);
-        obs->SetWriteResult(state.res->batch ? "batch" : "row", error.empty() ? state.rows : 0,
-                            error.empty() || state.affected < 0 ? state.affected : 0);
+        auto rec = MakeFirebirdWriteRecord(sql_, "insert", table_name_, state.connection_id);
+        rec.write_mode = state.res->batch ? "batch" : "row";
+        rec.rows_written = error.empty() ? state.rows : 0;
+        rec.rows_affected = error.empty() || state.affected < 0 ? state.affected : 0;
         if (!state.batch_fallback.empty()) {
-            obs->SetWriteNote("batch: " + state.batch_fallback);
+            rec.not_pushed_reasons = {"batch: " + state.batch_fallback};
         }
-        obs->AddFirebirdTimeUs(state.firebird_time_us);
-        obs->SetTotalTimeUs(
+        rec.firebird_time_us = state.firebird_time_us;
+        rec.total_time_us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - state.started)
-                .count());
-        if (!error.empty()) {
-            obs->SetError(error);
+                .count();
+        auto obs = GetObservabilityState(context);
+        if (error.empty()) {
+            return obs->RecordQuery(rec, FirebirdQueryLogSize(context));
         }
-        return seq;
+        rec.error_message = error;
+        return obs->RecordFailureAfter(rec, FirebirdQueryLogSize(context), state.open_seq);
     }
 
     // Every failure of the INSERT ends here. One caused by a cancel the
@@ -251,10 +269,10 @@ public:
     // transaction ends: the INSERT's rows can't commit with anything else.
     [[noreturn]] void Fail(ClientContext &context, const FirebirdInsertGlobalState &state,
                            const std::string &msg) const {
-        // Before the statement is prepared (a failure in the sink's setup)
-        // there is no connection call a cancel could have ended.
-        if (state.res && state.res->stmt && state.res->stmt->Connection().CancelAnswered()) {
-            Report(context, state, FirebirdInterruptMessage(state.res->stmt->Connection()));
+        // Before Prepare got the write connection there is no call a cancel
+        // could have ended.
+        if (state.conn && state.conn->CancelAnswered()) {
+            Report(context, state, FirebirdInterruptMessage(*state.conn));
             NoteFirebirdInsertReported(context, catalog_, state.open_id);
             throw InterruptException();
         }
