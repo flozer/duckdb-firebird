@@ -64,6 +64,8 @@ struct FirebirdInsertGlobalState : public GlobalSinkState {
     int64_t added = 0;  // rows encoded
     // Record counts the batches returned (batch mode only; -1 = not counted).
     int64_t affected = -1;
+    // Why a batch_size > 0 INSERT runs one row at a time (empty otherwise).
+    std::string batch_fallback;
     int64_t lock_timeout_s = 10;
     // This INSERT's entry in the DuckDB transaction (see OpenFirebirdInsert).
     int64_t open_id = 0;
@@ -136,6 +138,7 @@ public:
                                                              isc_info_sql_stmt_insert, true, &why);
                 if (!state.res->batch) {
                     state.res->encoder.reset();
+                    state.batch_fallback = why;
                 }
             }
             if (state.res->batch) {
@@ -218,6 +221,9 @@ public:
         auto obs = GetObservabilityState(context);
         obs->SetWriteResult(state.res->batch ? "batch" : "row", error.empty() ? state.rows : 0,
                             error.empty() || state.affected < 0 ? state.affected : 0);
+        if (!state.batch_fallback.empty()) {
+            obs->SetWriteNote("batch: " + state.batch_fallback);
+        }
         obs->AddFirebirdTimeUs(state.firebird_time_us);
         obs->SetTotalTimeUs(
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - state.started)

@@ -628,8 +628,12 @@ Returns one row:
   PROCEDURE` and `EXECUTE BLOCK` on Firebird 5+ (a Firebird 4 server fails
   the second `EXECUTE BLOCK` message of a batch). Other statements,
   Firebird 3, a client library older than Firebird 4 (it lacks
-  `fb_get_statement_interface`), and statements with BLOB parameters run
-  one row at a time; `write_mode` in the query log says which mode ran. A batch is sent every N rows, at every `commit_every` boundary, and
+  `fb_get_statement_interface`), statements with BLOB parameters, and
+  statements that return values (`INSERT ... RETURNING`, an `EXECUTE
+  PROCEDURE` with output parameters: Firebird 5 makes a batch of them and
+  writes nothing) run one row at a time. `write_mode` in the query log says
+  which mode ran, and when a batch was asked for and not used,
+  `not_pushed_reasons` says why, as one entry `batch: <reason>`. A batch is sent every N rows, at every `commit_every` boundary, and
   whenever the next row might not fit its 16 MB buffer, so wide rows get
   smaller batches, never a "batch too big" error. The first failing row
   stops the call and is named as in the per-row mode: a row the client
@@ -637,7 +641,8 @@ Returns one row:
   whole (a lost connection) names its range of source rows. `rows_affected`
   sums the record counts for plain `INSERT`/`UPDATE`/`DELETE`; for
   `EXECUTE BLOCK` and `EXECUTE PROCEDURE` it is `NULL`, because Firebird
-  reports 0 for each such message.
+  reports 0 for each such message (one row at a time they are counted, so
+  `batch_size` changes it).
 - With `source`, a statement that returns rows is refused, and a
   statement with `?` placeholders needs a `source`.
 - **Session statements are refused:** `SET ROLE`, `SET TRUSTED ROLE`,
@@ -750,7 +755,8 @@ COPY fb.main.CUSTOMER FROM 'customers.csv' (HEADER);
   and Firebird's error; the DuckDB transaction rolls back, and with it
   every row of the INSERT.
 - **Batches.** With `SET firebird_write_batch_size = N`, a Firebird 4+
-  server gets the rows N at a time, as for `firebird_execute`.
+  server gets the rows N at a time, as for `firebird_execute`; when they
+  go one at a time instead, the record's `not_pushed_reasons` says why.
 - **Fed by `firebird_execute`.** An `INSERT ... SELECT ... FROM
   firebird_execute(...)` on the same ATTACH shares one write transaction,
   committed when the statement ends, when the call's rows go straight into

@@ -99,6 +99,12 @@ std::unique_ptr<FirebirdBatchWriter> FirebirdBatchWriter::TryCreate(FirebirdConn
     if (!api.fb_get_master_interface || !api.fb_get_statement_interface || !api.fb_get_transaction_interface) {
         return no("the Firebird client library has no fb_get_statement_interface (Firebird 4+ client needed)");
     }
+    // Firebird 5 makes a batch of a statement with an output message (an
+    // INSERT ... RETURNING, an EXECUTE PROCEDURE with output parameters),
+    // reports every message as done, and writes nothing.
+    if (!stmt.columns().empty()) {
+        return no("the statement returns values (RETURNING or output parameters)");
+    }
     const int major = conn.EngineMajor();
     if (major < 4) {
         return no("the server is Firebird " + std::to_string(major) + "; batches need Firebird 4+");
@@ -264,15 +270,21 @@ FirebirdBatchWriter::Result FirebirdBatchWriter::Execute() {
     const auto &api = fbapi();
     Firebird::ITransaction *tra = nullptr;
     ISC_STATUS isc[20] = {};
-    api.fb_get_transaction_interface(isc, &tra, &d.conn->tr());
-    if (isc[0] == 1 && isc[1] != 0) {
-        throw IOException("fb_get_transaction_interface: " + FirebirdStatusText(isc));
-    }
-    Firebird::IBatchCompletionState *cs = d.batch->execute(status, tra);
-    tra->release();
     const idx_t sent = pending_;
     pending_ = 0;
     r.sent = sent;
+    api.fb_get_transaction_interface(isc, &tra, &d.conn->tr());
+    if (isc[0] == 1 && isc[1] != 0) {
+        // Nothing was sent: the batch fails as a whole, through the
+        // caller's failure path (its record, its rows).
+        d.conn->NoteStatus(isc);
+        r.failed = true;
+        r.whole_batch = true;
+        r.error = "fb_get_transaction_interface: " + FirebirdStatusText(isc);
+        return r;
+    }
+    Firebird::IBatchCompletionState *cs = d.batch->execute(status, tra);
+    tra->release();
     if (Failed(*status)) {
         // A lost connection marks the connection broken, as on the per-row path.
         d.conn->NoteStatus(reinterpret_cast<const ISC_STATUS *>(status->getErrors()));
@@ -283,6 +295,7 @@ FirebirdBatchWriter::Result FirebirdBatchWriter::Execute() {
     }
     const unsigned size = cs->getSize(status);
     if (Failed(*status)) {
+        d.conn->NoteStatus(reinterpret_cast<const ISC_STATUS *>(status->getErrors()));
         cs->dispose();
         r.failed = true;
         r.whole_batch = true;
@@ -293,6 +306,7 @@ FirebirdBatchWriter::Result FirebirdBatchWriter::Execute() {
     for (unsigned p = 0; p < size; ++p) {
         const int state = cs->getState(status, p);
         if (Failed(*status)) {
+            d.conn->NoteStatus(reinterpret_cast<const ISC_STATUS *>(status->getErrors()));
             r.failed = true;
             r.failed_index = p;
             r.error = "IBatchCompletionState::getState: " + StatusErrors(*status);
@@ -304,6 +318,7 @@ FirebirdBatchWriter::Result FirebirdBatchWriter::Execute() {
             r.failed = true;
             r.failed_index = p;
             if (Failed(*status)) {
+                d.conn->NoteStatus(reinterpret_cast<const ISC_STATUS *>(status->getErrors()));
                 r.error = "IBatchCompletionState::getStatus: " + StatusErrors(*status);
             } else {
                 // A message can also fail because the attachment went away

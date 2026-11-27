@@ -145,6 +145,14 @@ void FirebirdObservabilityState::SetWriteResult(const std::string &write_mode, i
     }
 }
 
+void FirebirdObservabilityState::SetWriteNote(const std::string &note) {
+    std::lock_guard<std::mutex> g(lock_);
+    last_.not_pushed_reasons = {note};
+    if (!log_.empty()) {
+        log_.back().not_pushed_reasons = {note};
+    }
+}
+
 void FirebirdObservabilityState::FailWrite(uint64_t seq, const std::string &msg) {
     auto sanitized = SanitizeErrorMessage(msg);
     std::lock_guard<std::mutex> g(lock_);

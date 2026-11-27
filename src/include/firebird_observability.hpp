@@ -139,6 +139,10 @@ public:
     void SetErrorIfEmpty(const std::string &msg);
     // Writes: the final (or in-flight) counts and mode of the current record.
     void SetWriteResult(const std::string &write_mode, int64_t rows_written, int64_t rows_affected);
+    // Writes that asked for batches (batch_size > 0) and ran one row at a
+    // time: why, as the current record's one not_pushed_reasons entry
+    // ("batch: <reason>").
+    void SetWriteNote(const std::string &note);
     // A write whose rows were not kept after it recorded itself (its
     // commit failed): the record numbered seq, wherever it is now (the
     // current record, the ring buffer, or both), gets the error,

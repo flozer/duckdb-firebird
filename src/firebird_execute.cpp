@@ -584,6 +584,7 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
                 batch = FirebirdBatchWriter::TryCreate(conn, stmt, *encoder, statement_type, bind.count_rows, &why);
                 if (!batch) {
                     encoder.reset();
+                    obs->SetWriteNote("batch: " + why);
                 }
             }
             if (!encoder) {

@@ -28,10 +28,10 @@ SET firebird_query_log_size = 100;
 
 # What this client and server pair batches: the server's major version, or
 # 3 with a Firebird 3 client, which has no batch API (the matrix runs this
-# file through one against a Firebird 4+ server too).
+# file through one against a Firebird 4+ server too); and the client's.
 statement ok
 CREATE TABLE fb_major AS
-SELECT CASE WHEN c.client_major >= 4 THEN s.V ELSE c.client_major END AS major
+SELECT CASE WHEN c.client_major >= 4 THEN s.V ELSE c.client_major END AS major, c.client_major AS client
   FROM firebird_query('ro', 'SELECT CAST(SUBSTRING(RDB$GET_CONTEXT(''SYSTEM'', ''ENGINE_VERSION'') FROM 1 FOR 1) AS INTEGER) AS V FROM RDB$DATABASE') s,
        (SELECT TRY_CAST(split_part(client_version, '.', 1) AS INTEGER) AS client_major
           FROM firebird_health('ro')) c;
@@ -175,6 +175,8 @@ SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
 # --- Both modes name the same failing row ------------------------------------------
 # Row 2 is a duplicate key (found by the server), row 5 too long for the
 # parameter (found by the client, before its batch is sent): row 2 either way.
+# In batch mode row 5's failure sends rows 1 to 4 first, and the server's
+# failure on row 2 is the one named.
 
 statement error
 SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_VARCHAR) VALUES (?, ?)',
@@ -201,6 +203,33 @@ SELECT count(*) FROM ro.main.RW_TARGET;
 ----
 0
 
+# With no earlier failure, the row the client can't encode is named: row 5,
+# after rows 1 to 4 went to the server in batch mode.
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_VARCHAR) VALUES (?, ?)',
+    source := $$SELECT * FROM (VALUES (80, 'a'), (81, 'b'), (82, 'c'), (83, 'd'), (84, repeat('x', 200))) t$$,
+    batch_size := 0);
+----
+source row 5 failed
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_VARCHAR) VALUES (?, ?)',
+    source := $$SELECT * FROM (VALUES (80, 'a'), (81, 'b'), (82, 'c'), (83, 'd'), (84, repeat('x', 200))) t$$,
+    batch_size := 100);
+----
+source row 5 failed
+
+statement error
+INSERT INTO rw.main.RW_TARGET (ID, C_VARCHAR)
+SELECT * FROM (VALUES (80, 'a'), (81, 'b'), (82, 'c'), (83, 'd'), (84, repeat('x', 200))) t;
+----
+row 5 failed
+
+query I
+SELECT count(*) FROM ro.main.RW_TARGET;
+----
+0
+
 # --- batch_size := overrides the setting, both ways; NULL means not given ---------
 
 # A negative size is refused when it is set (INSERT and firebird_execute
@@ -209,6 +238,12 @@ statement error
 SET firebird_write_batch_size = -1;
 ----
 firebird_write_batch_size must be >= 0
+
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (?, ?)',
+    source := 'SELECT 1, ''a''', batch_size := -1);
+----
+batch_size must be >= 0
 
 statement ok
 SET firebird_write_batch_size = 0;
@@ -226,10 +261,11 @@ statement ok
 SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (?, ?)',
     source := 'SELECT 2, ''b''', batch_size := NULL);
 
-query I
-SELECT write_mode FROM firebird_last_query();
+# No batch asked: no reason.
+query II
+SELECT write_mode, not_pushed_reasons FROM firebird_last_query();
 ----
-row
+row	[]
 
 statement ok
 SET firebird_write_batch_size = 100;
@@ -314,6 +350,35 @@ SELECT list(ID ORDER BY ID) FROM ro.main.RW_TARGET;
 statement ok
 SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET');
 
+# A commit that fails at a later commit_every boundary, in batch mode: row
+# 150 makes RW_GUARDED_AI put a row in RW_COMMIT_GUARD, and the commit after
+# row 200 is refused. Rows 1 to 100 stay; nothing after them does.
+statement error
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_GUARDED (ID) VALUES (?)',
+    source := 'SELECT CASE WHEN i = 150 THEN -1 ELSE i END FROM range(1, 251) t(i)', commit_every := 100);
+----
+the commit after source row 200 failed
+
+query III
+SELECT write_mode = CASE WHEN major >= 4 THEN 'batch' ELSE 'row' END, rows_written,
+       error_message LIKE '%commit refused: RW_COMMIT_GUARD has a row%Source rows 1 to 100 were committed (commit_every); the later ones are rolled back.'
+  FROM firebird_last_query(), fb_major;
+----
+true	200	true
+
+query II
+SELECT count(*), sum(ID) FROM ro.main.RW_GUARDED;
+----
+100	5050
+
+query I
+SELECT count(*) FROM firebird_query('ro', 'SELECT ID FROM RW_COMMIT_GUARD');
+----
+0
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_GUARDED');
+
 # A failure in a later batch names its source row.
 statement error
 SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID) VALUES (?)',
@@ -378,7 +443,7 @@ query IIII
 SELECT write_mode = CASE WHEN major >= 5 THEN 'batch' ELSE 'row' END,
        rows_written,
        -- Firebird reports no record counts for a batched EXECUTE BLOCK.
-       rows_affected IS NULL = (major >= 5),
+       (rows_affected IS NULL) = (major >= 5),
        (major >= 5) OR rows_affected = 300
   FROM firebird_last_query(), fb_major;
 ----
@@ -392,16 +457,90 @@ SELECT count(*), count(CITY), sum(ID) FROM ro.main.CUSTOMER;
 statement ok
 SELECT * FROM firebird_execute('rw', 'DELETE FROM CUSTOMER');
 
+# EXECUTE PROCEDURE: batched on Firebird 5+ too.
+query I
+SELECT executions FROM firebird_execute('rw', 'EXECUTE PROCEDURE SP_LOG_IN(?)',
+    source := 'SELECT i FROM range(1, 251) t(i)');
+----
+250
+
+query II
+SELECT write_mode = CASE WHEN major >= 5 THEN 'batch' ELSE 'row' END, rows_written
+  FROM firebird_last_query(), fb_major;
+----
+true	250
+
+query II
+SELECT count(*), sum(ID) FROM ro.main.RW_LOG WHERE NOTE = 'proc in';
+----
+250	31375
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG');
+
+# --- Statements that return values run per row ---------------------------------
+# INSERT ... RETURNING and EXECUTE PROCEDURE with output parameters. Firebird 5
+# makes a batch of them, reports every message as done, and writes nothing.
+# The record says why they ran per row.
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG');
+
+query I
+SELECT executions FROM firebird_execute('rw', 'INSERT INTO RW_LOG (ID, NOTE) VALUES (?, ''ret'') RETURNING ID',
+    source := 'SELECT i FROM range(1, 251) t(i)');
+----
+250
+
+query II
+SELECT write_mode,
+       not_pushed_reasons = [CASE WHEN client >= 4 THEN 'batch: the statement returns values (RETURNING or output parameters)'
+                                  ELSE 'batch: the Firebird client library has no fb_get_statement_interface (Firebird 4+ client needed)' END]
+  FROM firebird_last_query(), fb_major;
+----
+row	true
+
+query II
+SELECT count(*), sum(ID) FROM ro.main.RW_LOG WHERE NOTE = 'ret';
+----
+250	31375
+
+query I
+SELECT executions FROM firebird_execute('rw', 'EXECUTE PROCEDURE SP_LOG_OUT(?)',
+    source := 'SELECT i FROM range(1001, 1251) t(i)');
+----
+250
+
+query II
+SELECT write_mode,
+       not_pushed_reasons = [CASE WHEN client >= 4 THEN 'batch: the statement returns values (RETURNING or output parameters)'
+                                  ELSE 'batch: the Firebird client library has no fb_get_statement_interface (Firebird 4+ client needed)' END]
+  FROM firebird_last_query(), fb_major;
+----
+row	true
+
+query II
+SELECT count(*), sum(ID) FROM ro.main.RW_LOG WHERE NOTE = 'proc';
+----
+250	281375
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_LOG');
+
 # --- BLOB parameters keep the per-row path ---------------------------------------
 
 statement ok
 SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_BLOB_TEXT) VALUES (?, ?)',
     source := 'SELECT 1, repeat(''Ação '', 20000)');
 
-query I
-SELECT write_mode FROM firebird_last_query();
+query II
+SELECT write_mode,
+       not_pushed_reasons = [CASE WHEN client < 4 THEN 'batch: the Firebird client library has no fb_get_statement_interface (Firebird 4+ client needed)'
+                                  WHEN major < 4 THEN 'batch: the server is Firebird 3; batches need Firebird 4+'
+                                  ELSE 'batch: the statement has BLOB parameters' END]
+  FROM firebird_last_query(), fb_major;
 ----
-row
+row	true
 
 query I
 SELECT strlen(C_BLOB_TEXT) FROM rw.main.RW_TARGET;
@@ -425,7 +564,7 @@ SELECT ID, C_SMALLINT, C_INTEGER, C_BIGINT, C_NUM4_2, C_DEC9_2, C_NUM9_3, C_NUM1
 # The source scan records after the INSERT: look the INSERT up in the log.
 query II
 SELECT operation, write_mode = CASE WHEN major >= 4 THEN 'batch' ELSE 'row' END
-  FROM (SELECT * FROM firebird_query_log() WHERE operation = 'insert' LIMIT 1), fb_major;
+  FROM (SELECT * FROM firebird_query_log() WHERE operation = 'insert' ORDER BY captured_at DESC LIMIT 1), fb_major;
 ----
 insert	true
 
@@ -450,7 +589,7 @@ INSERT INTO rw.main.RW_LOG SELECT i, 'n' || i FROM range(2500) t(i);
 query III
 SELECT write_mode = CASE WHEN major >= 4 THEN 'batch' ELSE 'row' END, rows_written,
        rows_affected IS NOT DISTINCT FROM CASE WHEN major >= 4 THEN 2500 END
-  FROM (SELECT * FROM firebird_query_log() WHERE operation = 'insert' LIMIT 1), fb_major;
+  FROM (SELECT * FROM firebird_query_log() WHERE operation = 'insert' ORDER BY captured_at DESC LIMIT 1), fb_major;
 ----
 true	2500	true
 

@@ -886,8 +886,12 @@ Retorna uma linha:
   PROCEDURE` e `EXECUTE BLOCK` no Firebird 5+ (um servidor Firebird 4
   falha a segunda mensagem `EXECUTE BLOCK` de um lote). Outros comandos,
   o Firebird 3, uma biblioteca cliente anterior ao Firebird 4 (sem
-  `fb_get_statement_interface`) e comandos com parametros BLOB rodam uma
-  linha por vez; `write_mode` no log de queries diz qual modo rodou. Um lote e enviado a cada N linhas, em cada limite de
+  `fb_get_statement_interface`), comandos com parametros BLOB e comandos
+  que retornam valores (`INSERT ... RETURNING`, um `EXECUTE PROCEDURE` com
+  parametros de saida: o Firebird 5 faz um lote deles e nao grava nada)
+  rodam uma linha por vez. `write_mode` no log de queries diz qual modo
+  rodou, e quando um lote foi pedido e nao usado, `not_pushed_reasons` diz
+  por que, como uma entrada `batch: <razao>`. Um lote e enviado a cada N linhas, em cada limite de
   `commit_every`, e sempre que a proxima linha pode nao caber no buffer de
   16 MB, entao linhas largas geram lotes menores, nunca um erro "batch too
   big". A primeira linha que falha para a chamada e e citada como no modo
@@ -897,7 +901,8 @@ Retorna uma linha:
   contagens de registros de
   `INSERT`/`UPDATE`/`DELETE` simples; para `EXECUTE BLOCK` e
   `EXECUTE PROCEDURE` e `NULL`, porque o Firebird informa 0 para cada
-  mensagem dessas.
+  mensagem dessas (uma linha por vez elas sao contadas, entao
+  `batch_size` muda o valor).
 - Com `source`, um comando que retorna linhas e recusado, e um comando com
   `?` precisa de `source`.
 - **Comandos de sessao sao recusados:** `SET ROLE`, `SET TRUSTED ROLE`,
@@ -1013,7 +1018,9 @@ COPY fb.main.CUSTOMER FROM 'customers.csv' (HEADER);
   e o erro do Firebird; a transacao DuckDB e desfeita, e com ela todas as
   linhas do INSERT.
 - **Lotes.** Com `SET firebird_write_batch_size = N`, um servidor
-  Firebird 4+ recebe as linhas de N em N, como no `firebird_execute`.
+  Firebird 4+ recebe as linhas de N em N, como no `firebird_execute`;
+  quando elas vao uma por vez, o `not_pushed_reasons` do registro diz por
+  que.
 - **Alimentado por `firebird_execute`.** Um `INSERT ... SELECT ... FROM
   firebird_execute(...)` no mesmo ATTACH compartilha uma transacao de
   escrita, confirmada quando o comando termina, quando as linhas da chamada
@@ -1774,9 +1781,12 @@ Saida compartilhada com `firebird_query_log()`:
   para que um limite real de `0` nunca fique ambiguo.
 - `offset_pushed`: offset `ROWS m TO n` empurrado (`row_offset`), ou `NULL`
   quando nenhum.
-- `not_pushed_reasons`: uma razao coarse por entrada de `residual_filters`,
-  mesma ordem/tamanho. Uma de `NONE_CHARSET`, `UNSUPPORTED_OP`,
-  `ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING`.
+- `not_pushed_reasons`: em leituras, uma razao coarse por entrada de
+  `residual_filters`, mesma ordem/tamanho. Uma de `NONE_CHARSET`,
+  `UNSUPPORTED_OP`, `ROWID_OR_INVALID_COLUMN`,
+  `UNSUPPORTED_PROJECTION_MAPPING`. Numa escrita que pediu lotes
+  (`batch_size` > 0) e rodou uma linha por vez, uma entrada
+  `batch: <razao>`; vazia nas outras escritas.
 
 As tres ultimas (`limit_pushed` / `offset_pushed` / `not_pushed_reasons`)
 sao as colunas de explicabilidade de pushdown (Fase 4 #3). Deixam explicito

@@ -22,7 +22,8 @@ class FirebirdBatchWriter {
 public:
     // Null (and the reason in *why_not) when the statement can't be
     // batched here: client older than Firebird 4 (no
-    // fb_get_statement_interface), server older than 4, a
+    // fb_get_statement_interface), a statement that returns values
+    // (RETURNING, output parameters), server older than 4, a
     // statement type the server can't batch, BLOB parameters, or
     // createBatch failed. The encoder must have been built with
     // fixed_layout = true on `stmt`.
@@ -55,7 +56,9 @@ public:
         std::string error;
     };
     // Sends the pending messages in the connection's current transaction.
-    // Stops at the first failing message (no MULTIERROR).
+    // Stops at the first failing message (no MULTIERROR). Every failure,
+    // also of the calls before the batch runs, is in the Result: it
+    // throws only what the allocator does.
     Result Execute();
 
 private:

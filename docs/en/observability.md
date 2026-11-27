@@ -52,7 +52,7 @@ connection.
 | `error_message` | VARCHAR | Empty on success; sanitized exception text on failure |
 | `limit_pushed` | BIGINT | The `ROWS` limit actually pushed to Firebird (`row_limit`), or `NULL` when no limit was pushed. `NULL` (not `0`) so a real limit of `0` is never ambiguous. |
 | `offset_pushed` | BIGINT | The `ROWS m TO n` offset actually pushed (`row_offset`), or `NULL` when none. |
-| `not_pushed_reasons` | VARCHAR[] | One coarse reason per `residual_filters` entry, same order/length. One of `NONE_CHARSET`, `UNSUPPORTED_OP`, `ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING`. |
+| `not_pushed_reasons` | VARCHAR[] | Reads: one coarse reason per `residual_filters` entry, same order/length. One of `NONE_CHARSET`, `UNSUPPORTED_OP`, `ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING`. A write that asked for batches (`batch_size` > 0) and ran one row at a time: one entry, `batch: <reason>`; empty for other writes. |
 | `bytes_read_estimate` | BIGINT | **ESTIMATE** (G5) of Firebird payload bytes pulled by this query: `rows_read × XSQLDA row width + BLOB segment bytes read`. Definition and exclusions below. |
 | `snapshot_mode` | VARCHAR | How the scan's partitions relate transactionally: `serial` (one partition), `shared` (all partitions read one Firebird snapshot; Firebird 4+), `independent` (each partition used its own read-committed transaction: Firebird 3, or the shared snapshot could not be established), `transaction` (the scan read the snapshot of its DuckDB transaction: ATTACH with the opt-in transaction snapshot, Firebird 4+). See below. |
 | `partition_method` | VARCHAR | How the table was split: `none` (one partition), `pk` (primary-key ranges) or `dbkey` (`RDB$DB_KEY` ranges, `partition_by = 'dbkey'`). |

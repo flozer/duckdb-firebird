@@ -15,6 +15,11 @@
  *   RW_WIDE  : a wide row (two VARCHAR(8000) UTF8) for the batch buffer.
  *   SP_SEQ   : selectable procedure returning N rows.
  *   RW_LOG / SP_WRITE: a log table, and a selectable procedure that writes.
+ *   SP_LOG_OUT: an executable procedure that writes to RW_LOG and returns a
+ *              value (output parameters, for the batch tests).
+ *   SP_LOG_IN: the same without output parameters (batched on Firebird 5).
+ *   RW_GUARDED: a table whose trigger puts a row in RW_COMMIT_GUARD when
+ *              ID < 0 (a commit that fails at a commit_every boundary).
  *   RW_COMMIT_GUARD: always empty; a transaction that commits with a row in
  *              it is refused by the RW_COMMIT_CHECK database trigger (a
  *              commit that fails, for the INSERT tests).
@@ -131,6 +136,10 @@ CREATE TABLE RW_COMMIT_GUARD (
 
 CREATE EXCEPTION RW_COMMIT_REFUSED 'commit refused: RW_COMMIT_GUARD has a row';
 
+CREATE TABLE RW_GUARDED (
+    ID INTEGER NOT NULL
+);
+
 SET TERM ^ ;
 
 CREATE PROCEDURE SP_SEQ (N INTEGER)
@@ -153,6 +162,26 @@ BEGIN
     INSERT INTO RW_LOG (ID, NOTE) VALUES (1, 'written');
     ID = 1;
     SUSPEND;
+END^
+
+CREATE PROCEDURE SP_LOG_OUT (ID INTEGER)
+RETURNS (DOUBLED INTEGER)
+AS
+BEGIN
+    INSERT INTO RW_LOG (ID, NOTE) VALUES (:ID, 'proc');
+    DOUBLED = ID * 2;
+END^
+
+CREATE PROCEDURE SP_LOG_IN (ID INTEGER)
+AS
+BEGIN
+    INSERT INTO RW_LOG (ID, NOTE) VALUES (:ID, 'proc in');
+END^
+
+CREATE TRIGGER RW_GUARDED_AI FOR RW_GUARDED AFTER INSERT AS
+BEGIN
+    IF (NEW.ID < 0) THEN
+        INSERT INTO RW_COMMIT_GUARD (ID) VALUES (NEW.ID);
 END^
 
 CREATE TRIGGER RW_COMMIT_CHECK ON TRANSACTION COMMIT
