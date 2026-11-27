@@ -14,16 +14,25 @@ platform build matrix).
 
 ## License
 
-The headers are distributed under the **Interbase Public License
-1.0** (IPL), a Mozilla-style license derived from the original
-Inprise Corporation grant. Each file preserves the original
+`ibase.h` and the other C headers are distributed under the
+**Interbase Public License 1.0** (IPL), a Mozilla-style license derived
+from the original Inprise Corporation grant; each preserves its original
 copyright header. The full license text is available at
 <https://github.com/FirebirdSQL/firebird/blob/master/builds/install/misc/IPLicense.txt>.
+
+The OO API headers (`firebird/Interface.h`, `firebird/IdlFbInterfaces.h`),
+under the IDPL, are vendored apart, in `third_party/firebird-oo/` (see its
+README).
 
 ## Source
 
 Headers were copied from a Firebird 5.0 install
 (`include/ibase.h`, `include/firebird/*.h`,
 `include/firebird/impl/*.h`). The ISC entry-point surface they
-describe is stable across Firebird 3 / 4 / 5; updates are
-unnecessary unless we start consuming OO-API symbols.
+describe is stable across Firebird 3 / 4 / 5.
+
+A build with `FB_SDK_ROOT` (the Windows CI builds use the Firebird 4.0.5
+SDK) takes `ibase.h` and the OO API headers from that SDK instead, so the
+batch code compiles against two header sets: the SDK's and the vendored
+5.0.3 ones. The OO interfaces are versioned, and the batch code calls only
+what Firebird 4.0 has.

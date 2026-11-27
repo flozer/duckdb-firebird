@@ -145,17 +145,31 @@ void FirebirdObservabilityState::SetWriteResult(const std::string &write_mode, i
     }
 }
 
+void FirebirdObservabilityState::SetWriteNote(const std::string &note) {
+    std::lock_guard<std::mutex> g(lock_);
+    last_.not_pushed_reasons = {note};
+    if (!log_.empty()) {
+        log_.back().not_pushed_reasons = {note};
+    }
+}
+
 void FirebirdObservabilityState::FailWrite(uint64_t seq, const std::string &msg) {
     auto sanitized = SanitizeErrorMessage(msg);
     std::lock_guard<std::mutex> g(lock_);
     if (last_.seq == seq) {
         last_.error_message = sanitized;
         last_.rows_written = 0;
+        if (last_.rows_affected > 0) {
+            last_.rows_affected = 0;
+        }
     }
     for (auto &entry : log_) {
         if (entry.seq == seq) {
             entry.error_message = sanitized;
             entry.rows_written = 0;
+            if (entry.rows_affected > 0) {
+                entry.rows_affected = 0;
+            }
         }
     }
 }

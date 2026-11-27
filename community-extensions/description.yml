@@ -20,8 +20,9 @@ extension:
   # platform's default dynamic-loader search path (or via
   # DUCKDB_FIREBIRD_CLIENT_LIBRARY) when they first call a firebird_*
   # function. Vendored Firebird headers under
-  # third_party/firebird/include/ (Interbase Public License) cover the
-  # compile-time requirement.
+  # third_party/firebird/include/ (Interbase Public License) and the OO
+  # API headers under third_party/firebird-oo/include/ (Initial
+  # Developer's Public License) cover the compile-time requirement.
   maintainers:
     - flozer
   # WASM is still excluded because libfbclient depends on native

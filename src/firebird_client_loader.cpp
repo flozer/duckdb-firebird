@@ -118,6 +118,13 @@ static void BindSymbols(FirebirdClientApi &api,
     BIND(isc_commit_transaction);
     BIND(isc_create_blob2);
     BIND(isc_put_segment);
+    // Optional: Firebird 4+ batched writes (IBatch) only.
+    api.fb_get_master_interface = reinterpret_cast<decltype(api.fb_get_master_interface)>(
+        PlatformSym(handle, "fb_get_master_interface"));
+    api.fb_get_statement_interface = reinterpret_cast<decltype(api.fb_get_statement_interface)>(
+        PlatformSym(handle, "fb_get_statement_interface"));
+    api.fb_get_transaction_interface = reinterpret_cast<decltype(api.fb_get_transaction_interface)>(
+        PlatformSym(handle, "fb_get_transaction_interface"));
     // Optional: only firebird_health().client_version uses it.
     api.isc_get_client_version = reinterpret_cast<decltype(api.isc_get_client_version)>(
         PlatformSym(handle, "isc_get_client_version"));

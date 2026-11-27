@@ -39,8 +39,35 @@ SELECT count(*) FROM (SELECT * FROM rw.main.RW_TYPES4 EXCEPT ALL SELECT * FROM r
 statement ok
 SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET4');
 
+# The same round trip in batches (IBatch): the fixed message layout of
+# INT128, NUMERIC(38,6), DECFLOAT and the time zone types.
+query II
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET4 VALUES (?, ?, ?, ?, ?, ?, ?)',
+    source := 'SELECT * FROM ro.main.RW_TYPES4', batch_size := 100);
+----
+3	3
+
+query I
+SELECT write_mode FROM firebird_last_query();
+----
+batch
+
+query I
+SELECT count(*) FROM (SELECT * FROM rw.main.RW_TARGET4 EXCEPT ALL SELECT * FROM rw.main.RW_TYPES4);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT * FROM rw.main.RW_TYPES4 EXCEPT ALL SELECT * FROM rw.main.RW_TARGET4);
+----
+0
+
+statement ok
+SELECT * FROM firebird_execute('rw', 'DELETE FROM RW_TARGET4');
+
 # Wide DECIMALs (digits past 64 bits) into NUMERIC(18,4): what the same
-# literal gets. They go as INT128 with their scale, and the server rounds.
+# literal gets, one row at a time and in a batch. They go as INT128 with
+# their scale, and the server rounds.
 # (One type for the three values: mixed DECIMAL scales past 38 digits would
 # make the VALUES column a DOUBLE.)
 statement ok
@@ -59,13 +86,22 @@ SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM18_4) VALU
                                       (9201, 123456789.12345678901234::DECIMAL(38,20)),
                                       (9202, -1.00004999999999999999::DECIMAL(38,20))) t$$);
 
+statement ok
+SELECT * FROM firebird_execute('rw', 'INSERT INTO RW_TARGET (ID, C_NUM18_4) VALUES (?, ?)',
+    source := $$SELECT * FROM (VALUES (9300, 1.12345678901234567891::DECIMAL(38,20)),
+                                      (9301, 123456789.12345678901234::DECIMAL(38,20)),
+                                      (9302, -1.00004999999999999999::DECIMAL(38,20))) t$$, batch_size := 100);
+
 query II
 SELECT ID % 100, C_NUM18_4 FROM rw.main.RW_TARGET WHERE ID >= 9100 ORDER BY ID % 100, ID;
 ----
 0	1.1235
 0	1.1235
+0	1.1235
 1	123456789.1235
 1	123456789.1235
+1	123456789.1235
+2	-1.0000
 2	-1.0000
 2	-1.0000
 

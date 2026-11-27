@@ -52,14 +52,14 @@ connection.
 | `error_message` | VARCHAR | Empty on success; sanitized exception text on failure |
 | `limit_pushed` | BIGINT | The `ROWS` limit actually pushed to Firebird (`row_limit`), or `NULL` when no limit was pushed. `NULL` (not `0`) so a real limit of `0` is never ambiguous. |
 | `offset_pushed` | BIGINT | The `ROWS m TO n` offset actually pushed (`row_offset`), or `NULL` when none. |
-| `not_pushed_reasons` | VARCHAR[] | One coarse reason per `residual_filters` entry, same order/length. One of `NONE_CHARSET`, `UNSUPPORTED_OP`, `ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING`. |
+| `not_pushed_reasons` | VARCHAR[] | Reads: one coarse reason per `residual_filters` entry, same order/length. One of `NONE_CHARSET`, `UNSUPPORTED_OP`, `ROWID_OR_INVALID_COLUMN`, `UNSUPPORTED_PROJECTION_MAPPING`. A write that asked for batches (`batch_size` > 0) and ran one row at a time: one entry, `batch: <reason>`; empty for other writes. |
 | `bytes_read_estimate` | BIGINT | **ESTIMATE** (G5) of Firebird payload bytes pulled by this query: `rows_read × XSQLDA row width + BLOB segment bytes read`. Definition and exclusions below. |
 | `snapshot_mode` | VARCHAR | How the scan's partitions relate transactionally: `serial` (one partition), `shared` (all partitions read one Firebird snapshot; Firebird 4+), `independent` (each partition used its own read-committed transaction: Firebird 3, or the shared snapshot could not be established), `transaction` (the scan read the snapshot of its DuckDB transaction: ATTACH with the opt-in transaction snapshot, Firebird 4+). See below. |
 | `partition_method` | VARCHAR | How the table was split: `none` (one partition), `pk` (primary-key ranges) or `dbkey` (`RDB$DB_KEY` ranges, `partition_by = 'dbkey'`). |
 | `operation` | VARCHAR | What the record is: `scan` (`firebird_scan` or a table of an `ATTACH`), `query` (`firebird_query`), `execute` (`firebird_execute`) or `insert` (`INSERT INTO` a table of an `ATTACH` opened with `READ_WRITE`). |
-| `write_mode` | VARCHAR | For writes: `row` (one execution per row). `NULL` for reads. |
+| `write_mode` | VARCHAR | For writes: `row` (one execution per row) or `batch` (Firebird 4+ batched execution). `NULL` for reads. |
 | `rows_written` | BIGINT | For writes: executions sent to Firebird. `NULL` for reads. |
-| `rows_affected` | BIGINT | For writes: Firebird's record counts. `NULL` for reads and when not counted (`count_rows := false`, a statement that returns rows, an INSERT). |
+| `rows_affected` | BIGINT | For writes: Firebird's record counts. `NULL` for reads and when not counted (`count_rows := false`, a statement that returns rows, a batched `EXECUTE BLOCK`, a per-row INSERT). |
 
 `limit_pushed` / `offset_pushed` / `not_pushed_reasons` are the Phase 4 #3
 pushdown-explainability columns. They make it explicit what paging reached

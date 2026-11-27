@@ -61,7 +61,9 @@ void FixBlobCharset(FirebirdColumnDesc &desc) {
 
 // Prepares `sql` without executing it and checks it is a SELECT.
 std::unique_ptr<FirebirdStatement> PrepareSelect(FirebirdConnection &conn, const std::string &sql) {
-    auto stmt = make_uniq<FirebirdStatement>(conn, sql, FirebirdStatement::PrepareOnlyTag {});
+    // std::make_unique, not make_uniq: returning DuckDB's unique_ptr as a
+    // std::unique_ptr copies it on MinGW's GCC (a compile error there).
+    auto stmt = std::make_unique<FirebirdStatement>(conn, sql, FirebirdStatement::PrepareOnlyTag {});
     const int type = stmt->StatementType();
     if (type != isc_info_sql_stmt_select && type != isc_info_sql_stmt_select_for_upd) {
         throw BinderException(

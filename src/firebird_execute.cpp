@@ -43,6 +43,7 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 #endif
 
+#include "firebird_batch.hpp"
 #include "firebird_client.hpp"
 #include "firebird_observability.hpp"
 #include "firebird_param_encoder.hpp"
@@ -71,6 +72,8 @@ struct FirebirdExecuteBindData : public TableFunctionData {
     vector<LogicalType> source_types;
     int64_t commit_every = 0;
     bool count_rows = true;
+    // Rows per Firebird 4+ batch (IBatch); 0 = one execution per row.
+    int64_t batch_size = 0;
 };
 
 struct FirebirdExecuteGlobalState : public GlobalTableFunctionState {
@@ -335,6 +338,7 @@ unique_ptr<FunctionData> FirebirdExecuteBind(ClientContext &context, TableFuncti
         throw BinderException("%s(alias, sql) requires two non-NULL arguments", kFunctionName);
     }
     auto bind = make_uniq<FirebirdExecuteBindData>();
+    bool explicit_batch = false;
     bind->alias = input.inputs[0].ToString();
     bind->sql = input.inputs[1].ToString();
     bind->logged_sql = RedactPasswords(bind->sql, bind->secrets);
@@ -364,6 +368,12 @@ unique_ptr<FunctionData> FirebirdExecuteBind(ClientContext &context, TableFuncti
             }
         } else if (kv.first == "count_rows") {
             bind->count_rows = kv.second.IsNull() || kv.second.GetValue<bool>();
+        } else if (kv.first == "batch_size") {
+            // NULL = not given (DuckDB 2.0 drops NULL named parameters itself).
+            if (!kv.second.IsNull()) {
+                bind->batch_size = kv.second.GetValue<int64_t>();
+                explicit_batch = true;
+            }
         }
     }
     bind->attach = GetFirebirdAttachHandle(context, bind->alias, kFunctionName);
@@ -388,6 +398,15 @@ unique_ptr<FunctionData> FirebirdExecuteBind(ClientContext &context, TableFuncti
     }
     CheckWritable(bind->attach, bind->alias);
     CheckSessionStatement(bind->sql);
+    if (!explicit_batch) {
+        Value v;
+        if (context.TryGetCurrentSetting("firebird_write_batch_size", v) && !v.IsNull()) {
+            bind->batch_size = v.GetValue<int64_t>();
+        }
+    }
+    if (bind->batch_size < 0) {
+        throw BinderException("%s: batch_size must be >= 0 (0 = one execution per row)", kFunctionName);
+    }
     if (bind->commit_every > 0 && !bind->has_source) {
         throw BinderException("%s: commit_every needs source := '<query>'", kFunctionName);
     }
@@ -507,6 +526,7 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
     int64_t rows_affected = 0;
     int64_t executions = 0;
     bool rows_unknown = !bind.count_rows;
+    std::string write_mode = "row";
     RecordFirebirdWrite(context, bind.logged_sql, "execute", "", -1);
     auto obs = GetObservabilityState(context);
     const auto t0 = std::chrono::steady_clock::now();
@@ -554,7 +574,23 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
             auto &conn = GetFirebirdWriteConnection(context, *bind.attach.catalog, bind.lock_timeout_s);
             FirebirdStatement stmt(conn, bind.sql, FirebirdStatement::PrepareOnlyTag {});
             CheckStatementType(stmt, false);
-            FirebirdParamEncoder encoder(stmt, bind.source_types, bind.attach.none_encoding);
+            const int statement_type = stmt.StatementType();
+            // Firebird 4+ batches when asked and possible; otherwise per row.
+            std::unique_ptr<FirebirdParamEncoder> encoder;
+            std::unique_ptr<FirebirdBatchWriter> batch;
+            if (bind.batch_size > 0) {
+                encoder = make_uniq<FirebirdParamEncoder>(stmt, bind.source_types, bind.attach.none_encoding, true);
+                std::string why;
+                batch = FirebirdBatchWriter::TryCreate(conn, stmt, *encoder, statement_type, bind.count_rows, &why);
+                if (!batch) {
+                    encoder.reset();
+                    obs->SetWriteNote("batch: " + why);
+                }
+            }
+            if (!encoder) {
+                encoder = make_uniq<FirebirdParamEncoder>(stmt, bind.source_types, bind.attach.none_encoding);
+            }
+            write_mode = batch ? "batch" : "row";
 
             // The source is read as a stream, a chunk at a time: its connection
             // buffers a chunk or two ahead of the writes (DuckDB's default read-ahead is
@@ -586,6 +622,7 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
             auto &source = *result;
 #endif
             int64_t committed = 0;
+            int64_t added = 0;  // rows encoded (= executions in the per-row mode)
             auto kept = [&]() -> std::string {
                 return committed > 0 ? " Source rows 1 to " + std::to_string(committed) +
                                            " were committed (commit_every); the later ones are rolled back."
@@ -594,6 +631,29 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
             auto fail = [&](int64_t row, const std::string &message) {
                 throw InvalidInputException("%s: source row %lld failed: %s%s", kFunctionName,
                                             static_cast<long long>(row), message, kept());
+            };
+            // Sends the pending batch; its rows count as executions.
+            auto flush = [&]() {
+                if (!batch || batch->Pending() == 0) {
+                    return;
+                }
+                const int64_t first = executions;
+                auto res = batch->Execute();
+                executions += static_cast<int64_t>(res.executed);
+                if (res.affected < 0) {
+                    rows_unknown = true;
+                } else {
+                    rows_affected += res.affected;
+                }
+                if (res.failed && res.whole_batch) {
+                    throw InvalidInputException("%s: source rows %lld to %lld (one batch) failed: %s%s", kFunctionName,
+                                                static_cast<long long>(first + 1),
+                                                static_cast<long long>(first + static_cast<int64_t>(res.sent)),
+                                                res.error, kept());
+                }
+                if (res.failed) {
+                    fail(first + static_cast<int64_t>(res.failed_index) + 1, res.error);
+                }
             };
             bool types_checked = false;
             while (true) {
@@ -628,16 +688,33 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
                 }
                 for (idx_t r = 0; r < chunk->size(); ++r) {
                     try {
-                        encoder.Encode(*chunk, r);
-                        stmt.ExecuteWithInput(bind.sql);
-                        if (bind.count_rows) {
-                            rows_affected += stmt.RecordsAffected();
+                        encoder->Encode(*chunk, r);
+                        if (batch) {
+                            batch->Add();
+                        } else {
+                            stmt.ExecuteWithInput(bind.sql);
+                            if (bind.count_rows) {
+                                rows_affected += stmt.RecordsAffected();
+                            }
                         }
                     } catch (std::exception &ex) {
-                        fail(executions + 1, ErrorData(ex).RawMessage());
+                        // The rows before it go first, so a failure among
+                        // them is named, as one row at a time would; not on
+                        // a connection the error showed is gone.
+                        const std::string error = ErrorData(ex).RawMessage();
+                        if (!conn.IsBroken()) {
+                            flush();
+                        }
+                        fail(added + 1, error);
                     }
-                    ++executions;
-                    if (bind.commit_every > 0 && executions % bind.commit_every == 0) {
+                    ++added;
+                    if (!batch) {
+                        ++executions;
+                    } else if (static_cast<int64_t>(batch->Pending()) >= bind.batch_size || batch->Full()) {
+                        flush();
+                    }
+                    if (bind.commit_every > 0 && added % bind.commit_every == 0) {
+                        flush();
                         // A failed commit keeps only what earlier boundaries
                         // committed; once it succeeds, these rows are kept too,
                         // even if the next write transaction fails to start.
@@ -645,7 +722,7 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
                             conn.CommitWrite();
                         } catch (std::exception &ex) {
                             throw InvalidInputException("%s: the commit after source row %lld failed: %s%s",
-                                                        kFunctionName, static_cast<long long>(executions),
+                                                        kFunctionName, static_cast<long long>(added),
                                                         ErrorData(ex).RawMessage(), kept());
                         }
                         committed = executions;
@@ -654,15 +731,16 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
                         } catch (std::exception &ex) {
                             throw InvalidInputException("%s: the write transaction after source row %lld "
                                                         "could not start: %s%s",
-                                                        kFunctionName, static_cast<long long>(executions),
+                                                        kFunctionName, static_cast<long long>(added),
                                                         ErrorData(ex).RawMessage(), kept());
                         }
                     }
                 }
             }
+            flush();
             if (source.HasError()) {
                 throw InvalidInputException("%s: the source query failed after %lld row(s): %s%s", kFunctionName,
-                                            static_cast<long long>(executions), source.GetError(), kept());
+                                            static_cast<long long>(added), source.GetError(), kept());
             }
         }
 #ifdef FIREBIRD_DUCKDB_V2
@@ -684,14 +762,14 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
         if (redact) {
             error = ErrorData(error.Type(), RedactMessage(error.RawMessage(), bind));
         }
-        obs->SetWriteResult("row", executions, -1);
+        obs->SetWriteResult(write_mode, executions, -1);
         obs->SetError(error.RawMessage());
         if (redact) {
             error.Throw();
         }
         throw;
     }
-    obs->SetWriteResult("row", executions, rows_unknown ? -1 : rows_affected);
+    obs->SetWriteResult(write_mode, executions, rows_unknown ? -1 : rows_affected);
     obs->AddFirebirdTimeUs(
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
     obs->UpdateTotalTimeUs();
@@ -768,7 +846,8 @@ TableFunction GetFirebirdExecuteFunction() {
                          .AddPositionalOnly("sql", LogicalType::VARCHAR)
                          .AddKeywordOnly("source", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
                          .AddKeywordOnly("commit_every", LogicalType::BIGINT, Value(LogicalType::BIGINT))
-                         .AddKeywordOnly("count_rows", LogicalType::BOOLEAN, Value(LogicalType::BOOLEAN)),
+                         .AddKeywordOnly("count_rows", LogicalType::BOOLEAN, Value(LogicalType::BOOLEAN))
+                         .AddKeywordOnly("batch_size", LogicalType::BIGINT, Value(LogicalType::BIGINT)),
                      FirebirdExecuteFunction, FirebirdExecuteBind, FirebirdExecuteInitGlobal);
 #else
     TableFunction fn(kFunctionName, {LogicalType::VARCHAR, LogicalType::VARCHAR}, FirebirdExecuteFunction,
@@ -776,6 +855,7 @@ TableFunction GetFirebirdExecuteFunction() {
     fn.named_parameters["source"] = LogicalType::VARCHAR;
     fn.named_parameters["commit_every"] = LogicalType::BIGINT;
     fn.named_parameters["count_rows"] = LogicalType::BOOLEAN;
+    fn.named_parameters["batch_size"] = LogicalType::BIGINT;
 #endif
     fn.projection_pushdown = false;
     return fn;
