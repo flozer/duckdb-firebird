@@ -85,6 +85,11 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 #   2. Vendored copy under `third_party/firebird/include/` - the
 #      default. Always present; required for the community CI path.
 #
+# The OO API headers (firebird/Interface.h, IdlFbInterfaces.h, used by the
+# Firebird 4+ batched writes) are vendored apart, under
+# `third_party/firebird-oo/include/`. That directory comes after the one
+# above, so a Firebird 4+ SDK given with FB_SDK_ROOT uses its own.
+#
 # On Linux/macOS we additionally pass `-ldl` so the runtime loader
 # can call dlopen/dlsym (already standard on most distros, but
 # explicit linkage avoids surprises in slim build images).
@@ -131,8 +136,10 @@ if(NOT FB_INCLUDE_DIR)
     message(STATUS "libfbclient headers via vendored copy: ${FB_INCLUDE_DIR}")
 endif()
 
-target_include_directories(${EXTENSION_NAME}          PRIVATE ${FB_INCLUDE_DIR})
-target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE ${FB_INCLUDE_DIR})
+set(FB_OO_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/firebird-oo/include")
+
+target_include_directories(${EXTENSION_NAME}          PRIVATE ${FB_INCLUDE_DIR} ${FB_OO_INCLUDE_DIR})
+target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE ${FB_INCLUDE_DIR} ${FB_OO_INCLUDE_DIR})
 
 # Runtime dynamic-loader dependency (dlopen / dlsym). LoadLibrary on
 # Windows is satisfied by kernel32 which CMake links by default.

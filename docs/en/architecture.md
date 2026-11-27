@@ -287,8 +287,9 @@ its read-only transaction.
   and the batch is executed every N rows, at `commit_every` boundaries
   and before the 16 MB buffer (`TAG_BUFFER_BYTES_SIZE`) could overflow.
   The OO API headers (`firebird/Interface.h`, `IdlFbInterfaces.h`) are
-  vendored with `ibase.h`. A build against other headers (`FB_SDK_ROOT`)
-  needs a Firebird 4+ SDK; CMake stops with a message for an older one.
+  vendored apart from `ibase.h`, in `third_party/firebird-oo/`. A build
+  against other headers (`FB_SDK_ROOT`) needs a Firebird 4+ SDK, whose own
+  OO headers it then uses; CMake stops with a message for an older one.
 - **A result read halfway keeps the write.** DuckDB commits a streamed
   result only once it is fully read. On DuckDB 1.5 the bind sets
   `QueryResultOutputType::FORCE_MATERIALIZED`; DuckDB 2.0 has no such
