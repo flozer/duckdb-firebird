@@ -32,7 +32,15 @@ cancelamento (inclusive o "operation was cancelled" de um
 contexto de "fetch failed" dos scans nao e acrescentado a uma interrupcao.
 Uma query que falhou tambem guarda o erro: o DuckDB entao interrompe sozinho
 as outras partes dela, e o cancelamento delas nao substitui o erro que parou
-a query.
+a query. Escritas tambem: um `firebird_execute` interrompido (um comando
+longo, um lote, ou um laco de `source`) ou um `INSERT INTO fb.main.T` para
+do mesmo jeito. Em autocommit sua transacao de escrita Firebird e desfeita
+com o comando DuckDB; linhas que um `commit_every` anterior confirmou
+ficam. Dentro de `BEGIN ... COMMIT`, o DuckDB mantem a transacao abortada
+depois da interrupcao (todo comando falha com "Current transaction is
+aborted" ate o `ROLLBACK`), e a transacao de escrita Firebird fica aberta,
+com seus locks, ate esse `ROLLBACK` encerra-la; depois de um abort o
+servidor ja a desfez.
 A interrupcao nao alcanca a abertura de uma conexao nem a carga dos metadados
 das tabelas de um ATTACH: essas esperam o servidor.
 
@@ -1043,8 +1051,10 @@ COPY fb.main.CUSTOMER FROM 'customers.csv' (HEADER);
   Num erro nenhuma linha fica: `rows_written` e 0, e `rows_affected`
   tambem no modo lote. Um comando que falha fora do INSERT (na origem, ou
   interrompido) ainda deixa o registro do INSERT, com "did not complete";
-  um commit que falha poe o erro no `error_message` do registro ("the
-  Firebird commit failed: ...") e as contagens em 0.
+  quando uma consulta Firebird da origem falhou antes, esse registro vai
+  so para `firebird_query_log()`, e `firebird_last_query()` mostra o erro
+  da consulta. Um commit que falha poe o erro no `error_message` do
+  registro ("the Firebird commit failed: ...") e as contagens em 0.
 
 ### `firebird_attach_sql(connection_string [, schema])`
 

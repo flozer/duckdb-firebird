@@ -561,6 +561,15 @@ public:
     bool CancelAnswered() const { return cancel_answered_; }
     // The cancel sent was an abort (the client closed the connection).
     bool CancelAborted() const { return cancel_sent_.load() == 2; }
+    // A cancel was sent, answered or not.
+    bool CancelSent() const { return cancel_sent_.load() != 0; }
+    // Forgets the cancel of an earlier guard (see FirebirdCancelGuard), so
+    // CancelAnswered and CancelSent speak only of the calls the new guard
+    // watches. Called before the guard is registered with the watcher.
+    void ResetCancelState() {
+        cancel_sent_.store(0);
+        cancel_answered_ = false;
+    }
     // SQL the caller wrote ran on this attachment (a write transaction, a
     // firebird_query) and may have changed its session: a context variable
     // (RDB$SET_CONTEXT('USER_SESSION', ...)), the role, the time zone, rows

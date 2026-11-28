@@ -114,8 +114,20 @@ public:
     // and clears any leftover entries so the off state is truly empty.
     // Returns the record's seq.
     uint64_t RecordQuery(const FirebirdQueryTelemetry &rec, int64_t log_size);
+    // A failure's record made after the fact (an INSERT's, when it ends):
+    // like RecordQuery, with rec complete (its error_message is
+    // sanitized here), except that when the current record is newer than
+    // since_seq and carries an error, that record stays current: the
+    // statement's first failure stays in firebird_last_query(), and rec
+    // goes to the ring buffer only. Returns rec's seq.
+    uint64_t RecordFailureAfter(const FirebirdQueryTelemetry &rec, int64_t log_size, uint64_t since_seq);
+    // The seq of the newest record (0 before the first).
+    uint64_t CurrentSeq() const;
 
     // Chunk C - cumulative metrics for the *current* last_ record.
+    // Each also updates that record's ring-buffer entry, found by seq: the
+    // newest entry may be a newer record (RecordFailureAfter), which these
+    // never touch.
     // Each method grabs the same mutex as RecordQuery; the cost per call
     // is one uncontended lock, called once per fetched chunk (not per
     // row), so it stays off the hot path even for million-row scans.
@@ -165,6 +177,9 @@ private:
     // and "wall time of the slowest partition" once everything settles.
     std::chrono::steady_clock::time_point start_;
     uint64_t seq_ = 0;
+    // The ring-buffer entry of last_ (same seq), or null when the log has
+    // none (off, or trimmed away). Called with lock_ held.
+    FirebirdQueryTelemetry *CurrentLogEntry();
 };
 
 // Fetch (or create) the observability state attached to this ClientContext.
@@ -177,6 +192,10 @@ shared_ptr<FirebirdObservabilityState> GetObservabilityState(ClientContext &ctx)
 // Returns the record's seq (see FirebirdObservabilityState::FailWrite).
 uint64_t RecordFirebirdWrite(ClientContext &ctx, const std::string &sql, const std::string &operation,
                              const std::string &table_name, int64_t connection_id);
+// The record RecordFirebirdWrite starts, for a caller that fills it in
+// before recording it (see RecordFailureAfter).
+FirebirdQueryTelemetry MakeFirebirdWriteRecord(const std::string &sql, const std::string &operation,
+                                               const std::string &table_name, int64_t connection_id);
 
 // The query log size the session has set (firebird_query_log_size).
 int64_t FirebirdQueryLogSize(ClientContext &ctx);

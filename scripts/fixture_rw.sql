@@ -23,6 +23,12 @@
  *   RW_COMMIT_GUARD: always empty; a transaction that commits with a row in
  *              it is refused by the RW_COMMIT_CHECK database trigger (a
  *              commit that fails, for the INSERT tests).
+ *   RW_SLOW  : every insert waits on a four-way cross join of RDB$FIELDS
+ *              (hours): a write whose Firebird call blocks, for
+ *              scripts/check_cancel_writes.py.
+ *   RW_COUNTED / RW_WRITES: every insert into RW_COUNTED advances the
+ *              RW_WRITES sequence, which a rollback doesn't undo: how many
+ *              rows an interrupted write sent before it was stopped.
  */
 SET SQL DIALECT 3;
 
@@ -140,6 +146,20 @@ CREATE TABLE RW_GUARDED (
     ID INTEGER NOT NULL
 );
 
+/* Every insert into RW_SLOW waits on a four-way cross join of RDB$FIELDS
+ * (hours, see RW_SLOW_BI): scripts/check_cancel_writes.py interrupts one. */
+CREATE TABLE RW_SLOW (
+    ID INTEGER NOT NULL,
+    NOTE VARCHAR(20)
+);
+
+CREATE TABLE RW_COUNTED (
+    ID INTEGER NOT NULL,
+    NOTE VARCHAR(20)
+);
+
+CREATE SEQUENCE RW_WRITES;
+
 SET TERM ^ ;
 
 CREATE PROCEDURE SP_SEQ (N INTEGER)
@@ -189,6 +209,18 @@ AS
 BEGIN
     IF (EXISTS (SELECT 1 FROM RW_COMMIT_GUARD)) THEN
         EXCEPTION RW_COMMIT_REFUSED;
+END^
+
+CREATE TRIGGER RW_SLOW_BI FOR RW_SLOW BEFORE INSERT AS
+DECLARE N BIGINT;
+BEGIN
+    SELECT COUNT(*) FROM RDB$FIELDS A, RDB$FIELDS B, RDB$FIELDS C, RDB$FIELDS D INTO :N;
+END^
+
+CREATE TRIGGER RW_COUNTED_BI FOR RW_COUNTED BEFORE INSERT AS
+DECLARE N BIGINT;
+BEGIN
+    N = GEN_ID(RW_WRITES, 1);
 END^
 
 SET TERM ; ^

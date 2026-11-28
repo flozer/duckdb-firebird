@@ -455,6 +455,25 @@ SELECT count(*) FROM firebird_query_log() WHERE operation = 'scan' AND error_mes
 ----
 0
 
+# A Firebird query in the source fails: its failure stays in
+# firebird_last_query(), and the INSERT's record of its own (it did not
+# complete) goes to the query log only.
+statement error
+INSERT INTO rw.main.RW_LOG
+  SELECT * FROM firebird_query('rw', 'SELECT CAST(''x'' AS INTEGER) AS ID, CAST(''n'' AS VARCHAR(20)) AS NOTE FROM RDB$DATABASE');
+----
+conversion error
+
+query II
+SELECT operation, error_message LIKE '%conversion error%' FROM firebird_last_query();
+----
+query	true
+
+query III
+SELECT operation, table_name, error_message FROM firebird_query_log() LIMIT 1;
+----
+insert	RW_LOG	INSERT into Firebird table "RW_LOG" did not complete; none of its rows were kept
+
 statement ok
 SET firebird_query_log_size = 0;
 

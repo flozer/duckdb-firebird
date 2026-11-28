@@ -147,6 +147,12 @@ FirebirdCancelGuard::FirebirdCancelGuard(ClientContext &context, FirebirdConnect
     : entry_(std::make_shared<Entry>()) {
     entry_->context = &context;
     entry_->conn = conn;
+    // What this guard reports is about the calls it watches only: a raise
+    // an earlier guard sent and the server never answered must not turn a
+    // later error on the same connection into the interrupt.
+    if (conn) {
+        conn->ResetCancelState();
+    }
     CancelWatcher::Get().Add(entry_);
 }
 

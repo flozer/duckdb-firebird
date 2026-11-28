@@ -1057,6 +1057,7 @@ public:
         entry.sql = sql;
         entry.table_name = table_name;
         entry.obs = GetObservabilityState(context);
+        entry.open_seq = entry.obs->CurrentSeq();
         entry.log_size = FirebirdQueryLogSize(context);
         std::lock_guard<std::mutex> g(write_lock_);
         entry.id = ++insert_ids_;
@@ -1092,7 +1093,10 @@ public:
     // The transaction ends. A failed commit marks the records of the
     // INSERTs that finished in it as failed (their rows are gone); an INSERT
     // still open never finished, and gets a failed record of its own unless
-    // it reported its error already.
+    // it reported its error already. That record doesn't take
+    // firebird_last_query() from the failure that stopped the statement
+    // (a query in the INSERT's source that failed): it goes to the query
+    // log only.
     void EndInserts(const std::string &commit_error) {
         std::vector<OpenInsertEntry> open;
         std::vector<ClosedInsertEntry> closed;
@@ -1110,18 +1114,10 @@ public:
             if (entry.reported) {
                 continue;
             }
-            FirebirdQueryTelemetry rec;
-            rec.remote_sql = entry.sql;
-            rec.table_name = entry.table_name;
-            rec.operation = "insert";
-            rec.write_mode = "row";
-            rec.rows_written = 0;
-            rec.partitions = 1;
-            rec.connection_id = -1;
-            rec.captured_at = Timestamp::GetCurrentTimestamp();
-            entry.obs->RecordQuery(rec, entry.log_size);
-            entry.obs->SetError("INSERT into Firebird table \"" + entry.table_name +
-                                "\" did not complete; none of its rows were kept");
+            auto rec = MakeFirebirdWriteRecord(entry.sql, "insert", entry.table_name, -1);
+            rec.error_message =
+                "INSERT into Firebird table \"" + entry.table_name + "\" did not complete; none of its rows were kept";
+            entry.obs->RecordFailureAfter(rec, entry.log_size, entry.open_seq);
         }
     }
 
@@ -1353,6 +1349,8 @@ private:
         std::string sql;
         std::string table_name;
         shared_ptr<FirebirdObservabilityState> obs;
+        // The newest record when the INSERT opened (see EndInserts).
+        uint64_t open_seq = 0;
         int64_t log_size = 0;
         bool reported = false;
     };
