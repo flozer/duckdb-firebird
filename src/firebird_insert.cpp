@@ -136,7 +136,9 @@ public:
             state.conn = &conn;
             state.connection_id = conn.Id();
             // The prepare can wait on the server (a metadata lock); Fail
-            // turns the error a cancel causes into the interrupt.
+            // turns the error a cancel causes into the interrupt. The write
+            // connection (and the start of its transaction, which doesn't
+            // wait on locks) comes before the guard.
             FirebirdCancelGuard cancel(context, &conn);
             HoldFirebirdWriteResources(context, catalog_, state.res);
             state.res->stmt = make_uniq<FirebirdStatement>(conn, sql_, FirebirdStatement::PrepareOnlyTag {});

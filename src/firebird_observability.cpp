@@ -83,6 +83,22 @@ uint64_t FirebirdObservabilityState::RecordFailureAfter(const FirebirdQueryTelem
     return r.seq;
 }
 
+FirebirdQueryTelemetry *FirebirdObservabilityState::CurrentLogEntry() {
+    if (!last_.valid) {
+        return nullptr;
+    }
+    // Entries are in seq order; the current record's is usually the last.
+    for (auto it = log_.rbegin(); it != log_.rend(); ++it) {
+        if (it->seq == last_.seq) {
+            return &*it;
+        }
+        if (it->seq < last_.seq) {
+            break;
+        }
+    }
+    return nullptr;
+}
+
 uint64_t FirebirdObservabilityState::CurrentSeq() const {
     std::lock_guard<std::mutex> g(lock_);
     return seq_;
@@ -98,27 +114,27 @@ std::vector<FirebirdQueryTelemetry> FirebirdObservabilityState::SnapshotLog() co
 void FirebirdObservabilityState::AddRows(int64_t n) {
     std::lock_guard<std::mutex> g(lock_);
     last_.rows_read += n;
-    // Mirror the metric onto the most recent ring-buffer entry so
+    // Mirror the metric onto the current record's ring-buffer entry so
     // firebird_query_log() reflects the in-flight totals for the
-    // current query. Older entries are frozen.
-    if (!log_.empty()) {
-        log_.back().rows_read = last_.rows_read;
+    // current query. Other entries are frozen.
+    if (auto *entry = CurrentLogEntry()) {
+        entry->rows_read = last_.rows_read;
     }
 }
 
 void FirebirdObservabilityState::AddBytes(int64_t bytes) {
     std::lock_guard<std::mutex> g(lock_);
     last_.bytes_read_estimate += bytes;
-    if (!log_.empty()) {
-        log_.back().bytes_read_estimate = last_.bytes_read_estimate;
+    if (auto *entry = CurrentLogEntry()) {
+        entry->bytes_read_estimate = last_.bytes_read_estimate;
     }
 }
 
 void FirebirdObservabilityState::AddFirebirdTimeUs(int64_t us) {
     std::lock_guard<std::mutex> g(lock_);
     last_.firebird_time_us += us;
-    if (!log_.empty()) {
-        log_.back().firebird_time_us = last_.firebird_time_us;
+    if (auto *entry = CurrentLogEntry()) {
+        entry->firebird_time_us = last_.firebird_time_us;
     }
 }
 
@@ -127,16 +143,16 @@ void FirebirdObservabilityState::UpdateTotalTimeUs() {
     auto now = std::chrono::steady_clock::now();
     last_.total_time_us =
         std::chrono::duration_cast<std::chrono::microseconds>(now - start_).count();
-    if (!log_.empty()) {
-        log_.back().total_time_us = last_.total_time_us;
+    if (auto *entry = CurrentLogEntry()) {
+        entry->total_time_us = last_.total_time_us;
     }
 }
 
 void FirebirdObservabilityState::SetTotalTimeUs(int64_t us) {
     std::lock_guard<std::mutex> g(lock_);
     last_.total_time_us = us;
-    if (!log_.empty()) {
-        log_.back().total_time_us = us;
+    if (auto *entry = CurrentLogEntry()) {
+        entry->total_time_us = us;
     }
 }
 
@@ -144,11 +160,11 @@ void FirebirdObservabilityState::SetError(const std::string &msg) {
     auto sanitized = SanitizeErrorMessage(msg);
     std::lock_guard<std::mutex> g(lock_);
     last_.error_message = sanitized;
-    // Mirror the sanitized error onto the most recent ring-buffer entry
-    // so firebird_query_log() never carries a raw exception text when
-    // the user has the log enabled.
-    if (!log_.empty()) {
-        log_.back().error_message = sanitized;
+    // Mirror the sanitized error onto the current record's ring-buffer
+    // entry so firebird_query_log() never carries a raw exception text
+    // when the user has the log enabled.
+    if (auto *entry = CurrentLogEntry()) {
+        entry->error_message = sanitized;
     }
 }
 
@@ -159,8 +175,9 @@ void FirebirdObservabilityState::SetErrorIfEmpty(const std::string &msg) {
         return;
     }
     last_.error_message = sanitized;
-    if (!log_.empty() && log_.back().error_message.empty()) {
-        log_.back().error_message = sanitized;
+    auto *entry = CurrentLogEntry();
+    if (entry && entry->error_message.empty()) {
+        entry->error_message = sanitized;
     }
 }
 
@@ -170,18 +187,18 @@ void FirebirdObservabilityState::SetWriteResult(const std::string &write_mode, i
     last_.write_mode = write_mode;
     last_.rows_written = rows_written;
     last_.rows_affected = rows_affected;
-    if (!log_.empty()) {
-        log_.back().write_mode = write_mode;
-        log_.back().rows_written = rows_written;
-        log_.back().rows_affected = rows_affected;
+    if (auto *entry = CurrentLogEntry()) {
+        entry->write_mode = write_mode;
+        entry->rows_written = rows_written;
+        entry->rows_affected = rows_affected;
     }
 }
 
 void FirebirdObservabilityState::SetWriteNote(const std::string &note) {
     std::lock_guard<std::mutex> g(lock_);
     last_.not_pushed_reasons = {note};
-    if (!log_.empty()) {
-        log_.back().not_pushed_reasons = {note};
+    if (auto *entry = CurrentLogEntry()) {
+        entry->not_pushed_reasons = {note};
     }
 }
 

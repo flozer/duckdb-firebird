@@ -265,12 +265,22 @@ watcher cancels their Firebird calls too; their "Interrupted: ..." never
 replaces the error already recorded, so `error_message` keeps the failure
 that stopped the query. In autocommit, an interrupted write's Firebird
 transaction rolls back with the DuckDB statement; inside `BEGIN ... COMMIT`
-it stays open until `ROLLBACK`. An INSERT into an ATTACH records itself when
-it ends; when another part of its statement recorded a failure first (a
-Firebird query in its source that failed), the INSERT's own failed record
-(its interrupt, or "... did not complete; none of its rows were kept") goes
-to `firebird_query_log()` only, and `firebird_last_query()` keeps that
-failure. See "Interrupting a query" in `function_manual.md`.
+it stays open until `ROLLBACK`. An interrupted INSERT's record follows the
+rule in "A failed INSERT's record" below. See "Interrupting a query" in
+`function_manual.md`.
+
+### A failed INSERT's record
+
+An INSERT into an ATTACH records itself when it ends, after the records of
+the Firebird queries in its source. When one of those failed first (a
+conversion error, a lost connection, an interrupt), the INSERT's own failed
+record (its interrupt, or "... did not complete; none of its rows were
+kept") goes to `firebird_query_log()` only, and `firebird_last_query()`
+keeps the failure that stopped the statement. This holds with or without an
+interrupt: an `INSERT INTO fb.main.T SELECT ... FROM firebird_query(...)`
+whose query fails shows that query's error in `firebird_last_query()`, and
+the INSERT's "did not complete" as the newest entry of
+`firebird_query_log()`. The query's own log entry keeps its metrics.
 
 ### `bytes_read_estimate` — definition (G5)
 

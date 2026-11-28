@@ -533,7 +533,9 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
     const auto t0 = std::chrono::steady_clock::now();
     // A DuckDB interrupt cancels the Firebird request the call waits on (see
     // FirebirdCancelGuard); reset before the early commit, which may release
-    // the connection.
+    // the connection. GetFirebirdWriteConnection (which may start the write
+    // transaction) runs before the guard: starting a transaction doesn't
+    // wait on locks.
     std::unique_ptr<FirebirdCancelGuard> cancel;
     try {
         // One write at a time on the DuckDB transaction's write connection:
@@ -771,7 +773,10 @@ void FirebirdExecuteFunction(ClientContext &context, TableFunctionInput &data, D
             // the commit, and an interrupt that came after the last call
             // would be raised by DuckDB once the write had committed. Either
             // way the statement was interrupted: it doesn't commit, and the
-            // write rolls back with it.
+            // write rolls back with it. One window remains: an interrupt
+            // that lands during CommitFirebirdWriteNow itself is seen only
+            // after the commit, so the statement can end as interrupted
+            // with its write committed.
             auto *guarded = cancel ? cancel->Connection() : nullptr;
             cancel.reset();
             const bool cancel_sent = guarded && guarded->CancelSent();

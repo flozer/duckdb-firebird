@@ -125,6 +125,9 @@ public:
     uint64_t CurrentSeq() const;
 
     // Chunk C - cumulative metrics for the *current* last_ record.
+    // Each also updates that record's ring-buffer entry, found by seq: the
+    // newest entry may be a newer record (RecordFailureAfter), which these
+    // never touch.
     // Each method grabs the same mutex as RecordQuery; the cost per call
     // is one uncontended lock, called once per fetched chunk (not per
     // row), so it stays off the hot path even for million-row scans.
@@ -174,6 +177,9 @@ private:
     // and "wall time of the slowest partition" once everything settles.
     std::chrono::steady_clock::time_point start_;
     uint64_t seq_ = 0;
+    // The ring-buffer entry of last_ (same seq), or null when the log has
+    // none (off, or trimmed away). Called with lock_ held.
+    FirebirdQueryTelemetry *CurrentLogEntry();
 };
 
 // Fetch (or create) the observability state attached to this ClientContext.

@@ -787,9 +787,11 @@ COPY fb.main.CUSTOMER FROM 'customers.csv' (HEADER);
   (counting would cost one round trip per row). On an error no row is
   kept: `rows_written` is 0, and so is `rows_affected` in batch mode. A
   statement that fails outside the INSERT (in its source, or interrupted)
-  still leaves the INSERT's record, with "did not complete"; a commit that
-  fails sets the record's `error_message` ("the Firebird commit failed:
-  ...") and its counts to 0.
+  still leaves the INSERT's record, with "did not complete"; when a
+  Firebird query in its source failed first, that record goes to
+  `firebird_query_log()` only, and `firebird_last_query()` shows the
+  query's error. A commit that fails sets the record's `error_message`
+  ("the Firebird commit failed: ...") and its counts to 0.
 
 ### `firebird_attach_sql(connection_string [, schema])`
 
